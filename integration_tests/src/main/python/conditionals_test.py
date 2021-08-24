@@ -21,7 +21,15 @@ from pyspark.sql.types import *
 import pyspark.sql.functions as f
 
 all_gens = all_gen + [NullGen()]
-all_nested_gens = array_gens_sample + struct_gens_sample
+
+# map_gens_sample have one nested map(map) that cudf will cause bug, will file one bug
+# after bug fixed will use map_gens_sample instead of map_gens_sample_tmp
+map_gens_sample_tmp = [simple_string_to_string_map_gen,
+                   MapGen(StringGen(pattern='key_[0-9]', nullable=False), ArrayGen(string_gen), max_length=10),
+                   MapGen(RepeatSeqGen(IntegerGen(nullable=False), 10), long_gen, max_length=10),
+                   MapGen(BooleanGen(nullable=False), boolean_gen, max_length=2)]
+all_nested_gens = array_gens_sample + struct_gens_sample + map_gens_sample_tmp
+
 all_nested_gens_nonempty_struct = array_gens_sample + nonempty_struct_gens_sample
 
 # Create dedicated data gens of nested type for 'if' tests here with two exclusions:
