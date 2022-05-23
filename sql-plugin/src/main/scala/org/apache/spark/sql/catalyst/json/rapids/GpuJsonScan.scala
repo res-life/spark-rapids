@@ -243,7 +243,8 @@ class JsonPartitionReader(
     maxBytesPerChunk: Long,
     execMetrics: Map[String, GpuMetric])
   extends GpuTextBasedPartitionReader(conf, partFile, dataSchema, readDataSchema,
-    parsedOptions.lineSeparatorInRead, maxRowsPerChunk, maxBytesPerChunk, execMetrics) {
+    parsedOptions.lineSeparatorInRead, maxRowsPerChunk, maxBytesPerChunk, execMetrics,
+    castNumericUnixTimestampToTimestamp = true) {
 
   def buildJsonOptions(parsedOptions: JSONOptions): cudf.JSONOptions = {
     val builder = cudf.JSONOptions.builder()

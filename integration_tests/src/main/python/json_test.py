@@ -346,3 +346,9 @@ def test_json_read_with_corrupt_files(spark_tmp_path, v1_enabled_list):
                 .json([first_data_path, second_data_path, third_data_path])
                 .collect(),
             conf=all_confs)
+
+
+def test_json_read_with_numeric_unix_timestamp():
+    with_gpu_session(lambda spark: spark.read.schema(StructType([StructField("c1", TimestampType())]))
+                     .json("/tmp/tmp.json").collect(),
+                     conf=_enable_all_types_conf)

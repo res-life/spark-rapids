@@ -56,7 +56,8 @@ abstract class GpuTextBasedPartitionReader(
     lineSeparatorInRead: Option[Array[Byte]],
     maxRowsPerChunk: Integer,
     maxBytesPerChunk: Long,
-    execMetrics: Map[String, GpuMetric])
+    execMetrics: Map[String, GpuMetric],
+    castNumericUnixTimestampToTimestamp: Boolean = false)
   extends PartitionReader[ColumnarBatch] with ScanWithMetrics with Arm {
   import GpuMetric._
 
@@ -180,9 +181,9 @@ abstract class GpuTextBasedPartitionReader(
                    DataTypes.IntegerType | DataTypes.LongType | DataTypes.FloatType |
                    DataTypes.DoubleType | _: DecimalType | DataTypes.DateType |
                    DataTypes.TimestampType =>
-                f.copy(dataType = DataTypes.StringType)
+                f.copy(dataType = DataTypes.LongType)
               case other if GpuTypeShims.supportCsvRead(other) =>
-                f.copy(dataType = DataTypes.StringType)
+                f.copy(dataType = DataTypes.LongType)
               case _ =>
                 f
             }
