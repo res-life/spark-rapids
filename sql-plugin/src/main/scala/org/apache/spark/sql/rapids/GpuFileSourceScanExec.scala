@@ -124,7 +124,7 @@ case class GpuFileSourceScanExec(
         partitionFilters.filterNot(isDynamicPruningFilter), dataFilters)
     if (AlluxioCfgUtils.isAlluxioPathsToReplaceTaskTime(rapidsConf, relation.fileFormat)) {
       // if should directly read from s3, should set `alluxioPathReplacementMap` as None
-      if (AlluxioUtils.shouldReadDirectlyFromS3(rapidsConf, pds.flatMap(pd => pd.files))) {
+      if (AlluxioUtils.shouldReadDirectlyFromS3(rapidsConf, pds)) {
         alluxioPathReplacementMap = None
       } else {
         // this is not ideal, here we check to see if we will replace any paths, which is an
@@ -135,7 +135,7 @@ case class GpuFileSourceScanExec(
       }
     } else if (AlluxioCfgUtils.isAlluxioAutoMountTaskTime(rapidsConf, relation.fileFormat)) {
       // if should directly read from s3, should set `alluxioPathReplacementMap` as None
-      if (AlluxioUtils.shouldReadDirectlyFromS3(rapidsConf, pds.flatMap(pd => pd.files))) {
+      if (AlluxioUtils.shouldReadDirectlyFromS3(rapidsConf, pds)) {
         alluxioPathReplacementMap = None
       } else {
         alluxioPathReplacementMap = AlluxioUtils.autoMountIfNeeded(rapidsConf, pds,

@@ -202,7 +202,8 @@ object SparkShimImpl extends Spark321PlusShims with Spark320until340Shims {
               if (AlluxioCfgUtils.enabledAlluxioReplacementAlgoConvertTime(conf)) {
                 val shouldReadFromS3 = wrapped.relation.location match {
                   case inMemory: InMemoryFileIndex =>
-                    AlluxioUtils.shouldReadDirectlyFromS3(conf, inMemory.allFiles())
+                    val pds = inMemory.listFiles(Seq(), Seq())
+                    AlluxioUtils.shouldReadDirectlyFromS3(conf, pds)
                   case _ =>
                     false
                 }

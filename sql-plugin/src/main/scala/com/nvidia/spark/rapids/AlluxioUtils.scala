@@ -29,7 +29,7 @@ import alluxio.conf.{AlluxioProperties, InstancedConfiguration, PropertyKey}
 import alluxio.grpc.MountPOptions
 import alluxio.wire.MountPointInfo
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileStatus, Path}
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.RuntimeConfig
@@ -660,12 +660,12 @@ object AlluxioUtils extends Logging with Arm {
   }
 
   // If reading large s3 files on a cluster with slower disks, skip using Alluxio.
-  def shouldReadDirectlyFromS3(rapidsConf: RapidsConf, fileStatusSeq: Seq[FileStatus]): Boolean = {
+  def shouldReadDirectlyFromS3(rapidsConf: RapidsConf, pds: Seq[PartitionDirectory]): Boolean = {
     if (!rapidsConf.enableAlluxioSlowDisk) {
       return false
     }
 
-    val files = fileStatusSeq.filter { file =>
+    val files = pds.flatMap(pd => pd.files).filter { file =>
       file.isFile
     }
     val totalSize = files.map { f =>

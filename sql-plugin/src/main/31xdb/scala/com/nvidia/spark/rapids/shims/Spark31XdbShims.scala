@@ -313,7 +313,8 @@ abstract class Spark31XdbShims extends Spark31XdbShimsBase with Logging {
               if (AlluxioCfgUtils.enabledAlluxioReplacementAlgoConvertTime(conf)) {
                 val shouldReadFromS3 = wrapped.relation.location match {
                   case inMemory: InMemoryFileIndex =>
-                    AlluxioUtils.shouldReadDirectlyFromS3(conf, inMemory.allFiles())
+                    val pds = inMemory.listFiles(Seq(), Seq())
+                    AlluxioUtils.shouldReadDirectlyFromS3(conf, pds)
                   case _ =>
                     false
                 }
