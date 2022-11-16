@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids.shims
 
 import com.databricks.sql.execution.window.RunningWindowFunctionExec
 import com.databricks.sql.optimizer.PlanDynamicPruningFilters
+import com.nvidia.spark.TimingUtils
 import com.nvidia.spark.rapids._
 import org.apache.hadoop.fs.FileStatus
 
@@ -204,7 +205,10 @@ object SparkShimImpl extends Spark321PlusShims with Spark320until340Shims {
                   case inMemory: InMemoryFileIndex =>
                     // List all the partitions to reduce overhead, pass in 2 empty filters.
                     // Subsequent process will do the right partition pruning.
-                    val pds = inMemory.listFiles(Seq.empty, Seq.empty)
+
+                    val (pds, duration) = TimingUtils.timeTakenMs { inMemory.listFiles(Seq.empty, Seq.empty) }
+                    logInfo(s"my-debug: list files elapsed time: $duration ms.")
+
                     AlluxioUtils.shouldReadDirectlyFromS3(conf, pds)
                   case _ =>
                     false
