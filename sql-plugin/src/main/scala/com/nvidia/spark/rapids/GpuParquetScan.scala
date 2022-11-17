@@ -1046,6 +1046,7 @@ case class GpuParquetMultiFilePartitionReaderFactory(
     // update the file paths for Alluxio if needed, the coalescing reader doesn't support
     // input_file_name so no need to track what the non Alluxio file name is
     val files = if (alluxioReplacementTaskTime) {
+      logInfo("my-debug 2: is executor?")
       AlluxioUtils.updateFilesTaskTimeIfAlluxio(origFiles, alluxioPathReplacementMap).map(_.toRead)
     } else {
       // Since coalescing reader isn't supported if input_file_name is used, so won't

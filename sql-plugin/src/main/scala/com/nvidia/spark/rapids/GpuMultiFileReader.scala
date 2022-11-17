@@ -370,6 +370,7 @@ abstract class MultiFileCloudPartitionReaderBase(
   private val files: Array[PartitionedFileInfoOptAlluxio] = {
     if (alluxioPathReplacementMap.nonEmpty) {
       if (alluxioReplacementTaskTime) {
+        logInfo("my-debug 1: is executor?")
         AlluxioUtils.updateFilesTaskTimeIfAlluxio(inputFiles, Some(alluxioPathReplacementMap))
       } else {
         // was done at CONVERT_TIME, need to recalculate the original path to set for
