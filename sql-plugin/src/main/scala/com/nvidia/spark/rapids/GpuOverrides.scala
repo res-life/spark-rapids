@@ -25,6 +25,7 @@ import scala.util.control.NonFatal
 import ai.rapids.cudf.DType
 import com.nvidia.spark.rapids.RapidsConf.{SUPPRESS_PLANNING_FAILURE, TEST_CONF}
 import com.nvidia.spark.rapids.shims.{AQEUtils, DecimalArithmeticOverrides, DeltaLakeUtils, GetMapValueMeta, GpuBatchScanExec, GpuHashPartitioning, GpuRangePartitioning, GpuSpecifiedWindowFrameMeta, GpuTypeShims, GpuWindowExpressionMeta, OffsetWindowFunctionMeta, SparkShimImpl}
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.shims.GpuShuffleExchangeExec
@@ -2867,6 +2868,26 @@ object GpuOverrides extends Logging {
         "3.1.3 fixed issue SPARK-36741 where NaNs in these set like operators were " +
         "not treated as being equal. We have chosen to break with compatibility for " +
         "the older versions of Spark in this instance and handle NaNs the same as 3.1.3+"),
+    expr[ArrayRemove](
+      "Returns the array after removing all elements that equal to the input element (right) " + 
+      "from the input array (left)",
+      ExprChecks.binaryProject(
+        TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
+          TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
+        TypeSig.ARRAY.nested(TypeSig.all),
+        ("array",
+          TypeSig.ARRAY.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL +
+            TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP),
+          TypeSig.all),
+        ("element",
+          (TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.NULL + 
+            TypeSig.ARRAY + TypeSig.STRUCT + TypeSig.MAP).nested(),
+          TypeSig.all)),
+      (in, conf, p, r) => new BinaryExprMeta[ArrayRemove](in, conf, p, r) {
+        override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression =
+          GpuArrayRemove(lhs, rhs)
+      }
+    ),
     expr[TransformKeys](
       "Transform keys in a map using a transform function",
       ExprChecks.projectOnly(TypeSig.MAP.nested(TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
@@ -2957,8 +2978,8 @@ object GpuOverrides extends Logging {
       "Substring operator",
       ExprChecks.projectOnly(TypeSig.STRING, TypeSig.STRING + TypeSig.BINARY,
         Seq(ParamCheck("str", TypeSig.STRING, TypeSig.STRING + TypeSig.BINARY),
-          ParamCheck("pos", TypeSig.lit(TypeEnum.INT), TypeSig.INT),
-          ParamCheck("len", TypeSig.lit(TypeEnum.INT), TypeSig.INT))),
+          ParamCheck("pos", TypeSig.INT, TypeSig.INT),
+          ParamCheck("len", TypeSig.INT, TypeSig.INT))),
       (in, conf, p, r) => new TernaryExprMeta[Substring](in, conf, p, r) {
         override def convertToGpu(
             column: Expression,
@@ -3664,7 +3685,7 @@ object GpuOverrides extends Logging {
       "The backend for most file input",
       ExecChecks(
         (TypeSig.commonCudfTypes + TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY +
-            TypeSig.DECIMAL_128 + TypeSig.BINARY).nested(),
+          TypeSig.DECIMAL_128 + TypeSig.BINARY).nested(),
         TypeSig.all),
       (p, conf, parent, r) => new SparkPlanMeta[BatchScanExec](p, conf, parent, r) {
         override val childScans: scala.Seq[ScanMeta[_]] =
@@ -4015,7 +4036,7 @@ object GpuOverrides extends Logging {
   ).collect { case r if r != null => (r.getClassFor.asSubclass(classOf[SparkPlan]), r) }.toMap
 
   lazy val execs: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] =
-    commonExecs ++ SparkShimImpl.getExecs
+    commonExecs ++ SparkShimImpl.getExecs ++ GpuHiveOverrides.execs
 
   def getTimeParserPolicy: TimeParserPolicy = {
     val policy = SQLConf.get.getConfString(SQLConf.LEGACY_TIME_PARSER_POLICY.key, "EXCEPTION")
@@ -4288,15 +4309,22 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
    *  to have to copy the data to GPU and then back off after it does the scan on
    *  Delta Table Checkpoint, so have the entire plan fallback to CPU at that point.
    */
-  def isDeltaLakeMetadataQuery(plan: SparkPlan): Boolean = {
+  def isDeltaLakeMetadataQuery(plan: SparkPlan, detectDeltaCheckpoint: Boolean): Boolean = {
     val deltaLogScans = PlanUtils.findOperators(plan, {
       case f: FileSourceScanExec if DeltaLakeUtils.isDatabricksDeltaLakeScan(f) =>
         logDebug(s"Fallback for FileSourceScanExec with _databricks_internal: $f")
         true
       case f: FileSourceScanExec =>
+        val checkDeltaFunc = (name: String) => if (detectDeltaCheckpoint) {
+          name.contains("/_delta_log/") && (name.endsWith(".json") ||
+            (name.endsWith(".parquet") && new Path(name).getName().contains("checkpoint")))
+        } else {
+          name.contains("/_delta_log/") && name.endsWith(".json")
+        }
+
         // example filename: "file:/tmp/delta-table/_delta_log/00000000000000000000.json"
         val found = f.relation.inputFiles.exists { name =>
-          name.contains("/_delta_log/") && name.endsWith(".json")
+          checkDeltaFunc(name)
         }
         if (found) {
           logDebug(s"Fallback for FileSourceScanExec delta log: $f")
@@ -4345,7 +4373,8 @@ case class GpuOverrides() extends Rule[SparkPlan] with Logging {
 
   private def applyOverrides(plan: SparkPlan, conf: RapidsConf): SparkPlan = {
     val wrap = GpuOverrides.wrapAndTagPlan(plan, conf)
-    if (conf.isDetectDeltaLogQueries && isDeltaLakeMetadataQuery(plan)) {
+    val detectDeltaCheckpoint = conf.isDetectDeltaCheckpointQueries
+    if (conf.isDetectDeltaLogQueries && isDeltaLakeMetadataQuery(plan, detectDeltaCheckpoint)) {
       wrap.entirePlanWillNotWork("Delta Lake metadata queries are not efficient on GPU")
     }
     val reasonsToNotReplaceEntirePlan = wrap.getReasonsNotToReplaceEntirePlan

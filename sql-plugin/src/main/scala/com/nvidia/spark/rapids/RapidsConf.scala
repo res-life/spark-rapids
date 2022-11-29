@@ -493,6 +493,15 @@ object RapidsConf {
     .integerConf
     .createWithDefault(Integer.MAX_VALUE)
 
+  val CHUNKED_READER = conf("spark.rapids.sql.reader.chunked")
+      .doc("Should we use a chunked reader where possible. A chunked reader will " +
+          "take input data and potentially output multiple tables instead of a single table. " +
+          "This reduces the maximum memory usage and can work around issues when there is really " +
+          "high compression ratios in the data.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val MAX_READER_BATCH_SIZE_BYTES = conf("spark.rapids.sql.reader.batchSizeBytes")
     .doc("Soft limit on the maximum number of bytes the reader reads per batch. " +
       "The readers will read chunks of data until this limit is met or exceeded. " +
@@ -757,7 +766,7 @@ object RapidsConf {
       .createWithDefault(false)
 
   val ENABLE_TIERED_PROJECT = conf("spark.rapids.sql.tiered.project.enabled")
-      .doc("Enable tiered project for aggregations.")
+      .doc("Enable tiered projections.")
       .internal()
       .booleanConf
       .createWithDefault(true)
@@ -1082,6 +1091,18 @@ object RapidsConf {
     .booleanConf
     .createWithDefault(true)
 
+  val ENABLE_HIVE_TEXT: ConfEntryWithDefault[Boolean] =
+    conf("spark.rapids.sql.format.hive.text.enabled")
+      .doc("When set to false disables Hive text table acceleration")
+      .booleanConf
+      .createWithDefault(false)
+
+  val ENABLE_HIVE_TEXT_READ: ConfEntryWithDefault[Boolean] =
+    conf("spark.rapids.sql.format.hive.text.read.enabled")
+      .doc("When set to false disables Hive text table read acceleration")
+      .booleanConf
+      .createWithDefault(false)
+
   val ENABLE_RANGE_WINDOW_BYTES = conf("spark.rapids.sql.window.range.byte.enabled")
     .doc("When the order-by column of a range based window is byte type and " +
       "the range boundary calculated for a value has overflow, CPU and GPU will get " +
@@ -1385,7 +1406,10 @@ object RapidsConf {
   val SHUFFLE_MULTITHREADED_MAX_BYTES_IN_FLIGHT =
     conf("spark.rapids.shuffle.multiThreaded.maxBytesInFlight")
       .doc("The size limit, in bytes, that the RAPIDS shuffle manager configured in " +
-          "\"MULTITHREADED\" mode will allow to be deserialized concurrently.")
+          "\"MULTITHREADED\" mode will allow to be deserialized concurrently per task. This is " +
+        "also the maximum amount of memory that will be used per task. This should ideally be " +
+        "at least the same size as the batch size so we don't have to wait to process a " +
+        "single batch.")
       .startupOnly()
       .bytesConf(ByteUnit.BYTE)
       .createWithDefault(Integer.MAX_VALUE)
@@ -1664,6 +1688,13 @@ object RapidsConf {
     .booleanConf
     .createWithDefault(value = true)
 
+  val DETECT_DELTA_CHECKPOINT_QUERIES = conf("spark.rapids.sql.detectDeltaCheckpointQueries")
+    .doc("Queries against Delta Lake _delta_log checkpoint Parquet files are not efficient on " +
+      "the GPU. When this option is enabled, the plugin will attempt to detect these queries " +
+      "and fall back to the CPU.")
+    .booleanConf
+    .createWithDefault(value = true)
+
   val NUM_FILES_FILTER_PARALLEL = conf("spark.rapids.sql.coalescing.reader.numFilterParallel")
     .doc("This controls the number of files the coalescing reader will run " +
       "in each thread when it filters blocks for reading. If this value is greater than zero " +
@@ -1916,6 +1947,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isImprovedTimestampOpsEnabled: Boolean = get(IMPROVED_TIMESTAMP_OPS)
 
+  lazy val chunkedReaderEnabled: Boolean = get(CHUNKED_READER)
+
   lazy val maxReadBatchSizeRows: Int = get(MAX_READER_BATCH_SIZE_ROWS)
 
   lazy val maxReadBatchSizeBytes: Long = get(MAX_READER_BATCH_SIZE_BYTES)
@@ -2086,6 +2119,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val isIcebergReadEnabled: Boolean = get(ENABLE_ICEBERG_READ)
 
+  lazy val isHiveDelimitedTextEnabled: Boolean = get(ENABLE_HIVE_TEXT)
+
+  lazy val isHiveDelimitedTextReadEnabled: Boolean = get(ENABLE_HIVE_TEXT_READ)
+
   lazy val shuffleManagerEnabled: Boolean = get(SHUFFLE_MANAGER_ENABLED)
 
   lazy val shuffleManagerMode: String = get(SHUFFLE_MANAGER_MODE)
@@ -2244,6 +2281,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isFastSampleEnabled: Boolean = get(ENABLE_FAST_SAMPLE)
 
   lazy val isDetectDeltaLogQueries: Boolean = get(DETECT_DELTA_LOG_QUERIES)
+
+  lazy val isDetectDeltaCheckpointQueries: Boolean = get(DETECT_DELTA_CHECKPOINT_QUERIES)
 
   lazy val concurrentWriterPartitionFlushSize:Long = get(CONCURRENT_WRITER_PARTITION_FLUSH_SIZE)
 
