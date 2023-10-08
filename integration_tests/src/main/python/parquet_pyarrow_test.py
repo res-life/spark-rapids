@@ -11,15 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import difflib
 import pyarrow as pa
 import pyarrow.parquet as pa_pq
 import pytest
-import sys
 import time
 
-from asserts import _prep_incompat_conf, _RowCmp, _assert_equal
-from conftest import get_float_check
+from asserts import _prep_incompat_conf, _RowCmp, assert_equal
 from data_gen import *
 from parquet_test import reader_opt_confs
 from spark_session import with_gpu_session
@@ -154,7 +151,7 @@ def _gen_row_from_columnar_cpu_data(column_names, columnar_data, row_idx):
 
 def _convert_pyarrow_table_to_cpu_object(pa_table):
     """
-    Convert pyarrow table to cpu type data to reuse the `_assert_equal(cpu, gpu)` in asserts.py
+    Convert pyarrow table to cpu type data to reuse the `assert_equal(cpu, gpu)` in asserts.py
      e.g.: convert pyarrow map_scalar to Pyspark Row
     """
     columnar_data = []
@@ -166,20 +163,6 @@ def _convert_pyarrow_table_to_cpu_object(pa_table):
         for row_idx in range(pa_table.num_rows)
     ]
     return cpu_data
-
-
-def assert_equal(cpu_adapted_from_pyarrow, gpu):
-    """Verify that the result from the pyarrow(already adapted to CPU data format) and the GPU are equal"""
-    try:
-        _assert_equal(cpu_adapted_from_pyarrow, gpu, float_check=get_float_check(), path=[],
-                      cpu_data_adapted_from="pyarrow")
-    except:
-        sys.stdout.writelines(difflib.unified_diff(
-            a=[f"{x}\n" for x in cpu_adapted_from_pyarrow],
-            b=[f"{x}\n" for x in gpu],
-            fromfile='pyarrow OUTPUT',
-            tofile='GPU OUTPUT'))
-        raise
 
 
 def assert_gpu_and_pyarrow_are_compatible(base_write_path, gen_list, conf={}):
