@@ -1505,7 +1505,7 @@ class CastChecks extends ExprChecks {
   }
 
   def gpuCanCastConsiderTimezone(from: DataType, to: DataType) = {
-    // need timezone support, here check timezone
+    // remove this check after non-UTC timezone is supported
     (from, to) match {
       case (_:StringType, _:TimestampType) => TypeChecks.areTimestampsSupported()
       case (_:TimestampType, _:StringType) => TypeChecks.areTimestampsSupported()

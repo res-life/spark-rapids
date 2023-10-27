@@ -1654,7 +1654,7 @@ object GpuOverrides extends Logging {
               }
             }
 
-            // need timezone support, here check timezone
+            // remove this check after non-UTC timezone is supported
             checkTimeZoneId(dateAddInterval.zoneId)
           }
 
@@ -1671,7 +1671,8 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new UnixTimeExprMeta[DateFormatClass](a, conf, p, r) {
 
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          // remove this check after non-UTC timezone is supported
+          super.tagExprForGpu()
           checkTimeZoneId(a.zoneId)
         }
 
@@ -1691,7 +1692,8 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new UnixTimeExprMeta[ToUnixTimestamp](a, conf, p, r) {
 
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          // remove this check after non-UTC timezone is supported
+          super.tagExprForGpu()
           checkTimeZoneId(a.zoneId)
         }
 
@@ -1716,7 +1718,8 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new UnixTimeExprMeta[UnixTimestamp](a, conf, p, r) {
 
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          // remove this check after non-UTC timezone is supported
+          super.tagExprForGpu()
           checkTimeZoneId(a.zoneId)
         }
 
@@ -1736,7 +1739,8 @@ object GpuOverrides extends Logging {
       (hour, conf, p, r) => new UnaryExprMeta[Hour](hour, conf, p, r) {
        
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          // remove this check after non-UTC timezone is supported
+          super.tagExprForGpu()
           checkTimeZoneId(hour.zoneId)
         }
 
@@ -1749,7 +1753,8 @@ object GpuOverrides extends Logging {
       (minute, conf, p, r) => new UnaryExprMeta[Minute](minute, conf, p, r) {
 
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          // remove this check after non-UTC timezone is supported
+          super.tagExprForGpu()
           checkTimeZoneId(minute.zoneId)
         }
 
@@ -1763,7 +1768,8 @@ object GpuOverrides extends Logging {
       (second, conf, p, r) => new UnaryExprMeta[Second](second, conf, p, r) {
 
        override def tagExprForGpu(): Unit = {
-         // need timezone support, here check timezone
+         // remove this check after non-UTC timezone is supported
+         super.tagExprForGpu()
          checkTimeZoneId(second.zoneId)
        }
 
@@ -1803,7 +1809,8 @@ object GpuOverrides extends Logging {
       (a, conf, p, r) => new UnixTimeExprMeta[FromUnixTime](a, conf, p, r) {
 
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          // remove this check after non-UTC timezone is supported
+          super.tagExprForGpu()
           checkTimeZoneId(a.zoneId)
         }
 

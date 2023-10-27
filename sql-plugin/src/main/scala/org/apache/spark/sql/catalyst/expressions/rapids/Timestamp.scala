@@ -40,7 +40,8 @@ object TimeStamp {
       (a, conf, p, r) => new UnixTimeExprMeta[GetTimestamp](a, conf, p, r) {
 
         override def tagExprForGpu(): Unit = {
-          // need timezone support, here check timezone
+          super.tagExprForGpu()
+          // remove this check after non-UTC timezone is supported
           checkTimeZoneId(a.zoneId)
         }
 
