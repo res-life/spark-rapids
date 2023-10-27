@@ -1081,7 +1081,7 @@ abstract class BaseExprMeta[INPUT <: Expression](
 
     // if expr is time zone aware and GPU does not support non UTC tz for this expr yet,
     // ensure it's in UTC tz
-    if (isTimeZoneAwareExpr && !supportsNonUTCTimeZone) {
+    if (!tagTimeZoneBySelf && isTimeZoneAwareExpr && !supportsNonUTCTimeZone) {
       checkTimeZoneId(expr.asInstanceOf[TimeZoneAwareExpression].zoneId)
     }
   }
@@ -1091,9 +1091,16 @@ abstract class BaseExprMeta[INPUT <: Expression](
 
   /**
    * whether the GPU supports non UTC time zone, for each expression that supports non UTC time
-   * zone, should override to return true
+   * zone, should override this method to return true
    */
   def supportsNonUTCTimeZone: Boolean = false
+
+  /**
+   * For cast expr or might other exprs, it's time zone aware, but time zone check can be skipped
+   * for some input/output types, like cast(int as long). For this kind of expr, should override
+   * this method and return true which means this Expr Meta should check time zone itself
+   */
+  def tagTimeZoneBySelf: Boolean = false
 
   /**
    * Called to verify that this expression will work on the GPU. For most expressions without

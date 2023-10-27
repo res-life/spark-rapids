@@ -90,6 +90,9 @@ abstract class CastExprMetaBase[INPUT <: UnaryExpression with TimeZoneAwareExpre
     recursiveTagExprForGpuCheck()
   }
 
+  // tag time zone by Cast itself, do not delegate to parent class
+  override def tagTimeZoneBySelf: Boolean = true
+
   protected def recursiveTagExprForGpuCheck(
       fromDataType: DataType = fromType,
       toDataType: DataType = toType,
