@@ -38,13 +38,6 @@ object TimeStamp {
             .withPsNote(TypeEnum.STRING, "A limited number of formats are supported"),
             TypeSig.STRING)),
       (a, conf, p, r) => new UnixTimeExprMeta[GetTimestamp](a, conf, p, r) {
-
-        override def tagExprForGpu(): Unit = {
-          super.tagExprForGpu()
-          // remove this check after non-UTC timezone is supported
-          checkTimeZoneId(a.zoneId)
-        }
-
         override def convertToGpu(lhs: Expression, rhs: Expression): GpuExpression = {
           GpuGetTimestamp(lhs, rhs, sparkFormat, strfFormat)
         }
