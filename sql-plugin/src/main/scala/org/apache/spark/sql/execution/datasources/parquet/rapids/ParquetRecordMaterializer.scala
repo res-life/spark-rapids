@@ -23,7 +23,7 @@ import org.apache.parquet.io.api.{GroupConverter, RecordMaterializer}
 import org.apache.parquet.schema.MessageType
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.execution.datasources.parquet.{NoopUpdater, ParquetToSparkSchemaConverter}
+import org.apache.spark.sql.execution.datasources.parquet.{NoopUpdater, ParquetToSparkSchemaConverter => RealSchemaConverter}
 import org.apache.spark.sql.execution.datasources.parquet.rapids.shims.ShimParquetRowConverter
 import org.apache.spark.sql.types.StructType
 
@@ -33,7 +33,7 @@ import org.apache.spark.sql.types.StructType
 class ParquetRecordMaterializer(
    parquetSchema: MessageType,
    catalystSchema: StructType,
-   schemaConverter: ParquetToSparkSchemaConverter,
+   schemaConverter: RealSchemaConverter,
    convertTz: Option[ZoneId],
    datetimeRebaseMode: String) extends RecordMaterializer[InternalRow] {
 

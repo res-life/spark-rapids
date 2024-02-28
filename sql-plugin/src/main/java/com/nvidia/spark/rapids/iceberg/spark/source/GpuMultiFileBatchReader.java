@@ -364,6 +364,7 @@ class GpuMultiFileBatchReader extends BaseDataReader<ColumnarBatch> {
           new CombineConf(
               -1, // combineThresholdsize
               -1) // combineWaitTime
+          , 0
       );
     }
 
@@ -434,7 +435,8 @@ class GpuMultiFileBatchReader extends BaseDataReader<ColumnarBatch> {
           metrics, partitionSchema, numThreads,
           false, // ignoreMissingFiles
           false, // ignoreCorruptFiles
-          false // useFieldId
+          false, // useFieldId
+          0
       ) {
         @Override
         public boolean checkIfNeedToSplitDataBlock(SingleDataBlockInfo currentBlockInfo,

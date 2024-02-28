@@ -427,6 +427,17 @@ case class GpuFileSourceScanExec(
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME)
   ) ++ fileCacheMetrics ++ {
     relation.fileFormat match {
+      case _: GpuReadParquetFileFormat if rapidsConf.parquetReadOnHost > -1 =>
+        Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
+          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME),
+          "cpuDecodeBatches" -> createMetric(DEBUG_LEVEL, "CPU decode batches"),
+          "cpuDecodeRows" -> createMetric(DEBUG_LEVEL, "CPU decode rows"),
+          "cpuDecodeTime" -> createNanoTimingMetric(DEBUG_LEVEL, "CPU decode time"),
+          "cpuDecodeDictTime" -> createNanoTimingMetric(DEBUG_LEVEL, "CPU dict decode time"),
+          "cpuDecodeDataTime" -> createNanoTimingMetric(DEBUG_LEVEL, "CPU data decode time"),
+          "hostVecBuildTime" -> createNanoTimingMetric(DEBUG_LEVEL, "host vector build time"),
+          "hostVecToDeviceTime" -> createNanoTimingMetric(DEBUG_LEVEL, "host To device Time"),
+        )
       case _: GpuReadParquetFileFormat | _: GpuOrcFileFormat =>
         Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
           WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME))
