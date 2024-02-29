@@ -38,7 +38,7 @@ import org.apache.spark.sql.execution.vectorized.rapids.HostWritableColumnVector
 import org.apache.spark.sql.types.{ArrayType, BinaryType, DataType, DecimalType, MapType, StructType}
 
 
-class VectorizedParquetGpuProducer(
+class HostParquetProducer(
     conf: Configuration,
     tgtBatchSize: Int,
     fileBuffer: HostMemoryBuffer,
@@ -209,7 +209,7 @@ class VectorizedParquetGpuProducer(
     readerClosed = true
 
     // release host resource slot if allocated
-    VectorizedParquetGpuProducer.hostResourceSemaphore.foreach(_.getAndIncrement())
+    HostParquetProducer.hostResourceSemaphore.foreach(_.getAndIncrement())
 
     buffer
   }
@@ -267,7 +267,23 @@ class VectorizedParquetGpuProducer(
   }
 }
 
-object VectorizedParquetGpuProducer {
+object HostParquetProducer {
+
+  def parseHybridParquetOpts(str: String): HybridParquetOpts = {
+    str match {
+      case "" =>
+        HybridParquetOpts(DeviceOnly, 0, 0)
+      case "GPU_ONLY" =>
+        HybridParquetOpts(DeviceOnly, 0, 0)
+      case "CPU_ONLY" =>
+        HybridParquetOpts(HostOnly, 0, 0)
+      case s if s.startsWith("DeviceFirst(") && s.endsWith(")") =>
+        val args = s.slice(12, str.length -1).split(",").map(_.toInt)
+        HybridParquetOpts(DeviceFirst, args(0), args(1))
+      case _ =>
+        throw new IllegalArgumentException(s"illegal HybridParquetOpts $str")
+    }
+  }
 
   def schemaSupportCheck(types: Array[DataType]): Boolean = {
     types.collectFirst {
@@ -287,7 +303,7 @@ object VectorizedParquetGpuProducer {
 
   private var hostResourceSemaphore: Option[AtomicInteger] = None
 
-  def acquireHostResource(totalSize: Int): Boolean = {
+  def acquireSlot(totalSize: Int): Boolean = {
     if (hostResourceSemaphore.isEmpty) {
       synchronized {
         if (hostResourceSemaphore.isEmpty) {
@@ -304,3 +320,10 @@ object VectorizedParquetGpuProducer {
   }
 
 }
+
+sealed trait ReadMode
+object HostOnly extends ReadMode
+object DeviceOnly extends ReadMode
+object DeviceFirst extends ReadMode
+
+case class HybridParquetOpts(mode: ReadMode, hostCurrentBound: Int, pollInterval: Int)

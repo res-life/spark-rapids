@@ -65,7 +65,7 @@ import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, PartitioningAwareFileIndex, SchemaColumnConvertNotSupportedException}
-import org.apache.spark.sql.execution.datasources.parquet.rapids.VectorizedParquetGpuProducer
+import org.apache.spark.sql.execution.datasources.parquet.rapids.{DeviceOnly, HostOnly, HostParquetProducer}
 import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
 import org.apache.spark.sql.internal.SQLConf
@@ -1884,7 +1884,7 @@ class MultiFileParquetPartitionReader(
     ignoreMissingFiles: Boolean,
     ignoreCorruptFiles: Boolean,
     useFieldId: Boolean,
-    readOnHostOpts: Int = -1)
+    readOnHostOpts: String)
   extends MultiFileCoalescingPartitionReaderBase(conf, clippedBlocks,
     partitionSchema, maxReadBatchSizeRows, maxReadBatchSizeBytes, maxGpuColumnSizeBytes,
     numThreads, execMetrics)
@@ -1979,24 +1979,27 @@ class MultiFileParquetPartitionReader(
       clippedSchema: SchemaBase, readDataSchema: StructType,
       extraInfo: ExtraInfo): GpuDataProducer[Table] = {
 
-    val canReadOnHost = readOnHostOpts > -1 &&
-      VectorizedParquetGpuProducer.schemaSupportCheck(readDataSchema.fields.map(_.dataType))
+    val hybridOpts = HostParquetProducer.parseHybridParquetOpts(readOnHostOpts)
+    val canReadOnHost = hybridOpts.mode != DeviceOnly &&
+      HostParquetProducer.schemaSupportCheck(readDataSchema.fields.map(_.dataType))
 
     val readOnHost = if (canReadOnHost) {
-      if (readOnHostOpts == 0) {
+      if (hybridOpts.mode == HostOnly) {
         true
       } else {
-        GpuSemaphore.tryAcquire(TaskContext.get()) match {
-          case SemaphoreAcquired =>
-            false
-          case AcquireFailed(_) =>
-            if (VectorizedParquetGpuProducer.acquireHostResource(readOnHostOpts)) {
-              true
-            } else {
-              GpuSemaphore.acquireIfNecessary(TaskContext.get())
-              false
-            }
+        var ret: Option[Boolean] = None
+        while (ret.isEmpty) {
+          GpuSemaphore.tryAcquire(TaskContext.get()) match {
+            case SemaphoreAcquired =>
+              ret = Option(false)
+            case AcquireFailed(_) =>
+              if (HostParquetProducer.acquireSlot(hybridOpts.hostCurrentBound)) {
+                ret = Option(true)
+              }
+          }
+          if (ret.isEmpty) Thread.sleep(hybridOpts.pollInterval)
         }
+        ret.get
       }
     } else {
       GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -2004,7 +2007,7 @@ class MultiFileParquetPartitionReader(
     }
 
     if (readOnHost) {
-      new VectorizedParquetGpuProducer(conf, currentTargetBatchSize.toInt,
+      new HostParquetProducer(conf, currentTargetBatchSize.toInt,
         dataBuffer, 0, dataSize, metrics,
         extraInfo.dateRebaseMode, extraInfo.timestampRebaseMode, extraInfo.hasInt96Timestamps,
         clippedSchema, readDataSchema)
@@ -2110,7 +2113,7 @@ class MultiFileCloudParquetPartitionReader(
     queryUsesInputFile: Boolean,
     keepReadsInOrder: Boolean,
     combineConf: CombineConf,
-    readOnHostOpts: Int = -1)
+    readOnHostOpts: String)
   extends MultiFileCloudPartitionReaderBase(conf, files, numThreads, maxNumFileProcessed, null,
     execMetrics, maxReadBatchSizeRows, maxReadBatchSizeBytes, ignoreCorruptFiles,
     alluxioPathReplacementMap, alluxioReplacementTaskTime, keepReadsInOrder, combineConf)
@@ -2574,31 +2577,34 @@ class MultiFileCloudParquetPartitionReader(
       hostBuffer: HostMemoryBuffer,
       dataSize: Long,
       allPartValues: Option[Array[(Long, InternalRow)]],
-      readOnHostOpts: Int): Iterator[ColumnarBatch] = {
+      readOnHostOpts: String): Iterator[ColumnarBatch] = {
 
     val parseOpts = closeOnExcept(hostBuffer) { _ =>
       getParquetOptions(readDataSchema, clippedSchema, useFieldId)
     }
     val colTypes = readDataSchema.fields.map(f => f.dataType)
 
-    val canReadOnHost = readOnHostOpts > -1 &&
-      VectorizedParquetGpuProducer.schemaSupportCheck(readDataSchema.fields.map(_.dataType))
+    val hybridOpts = HostParquetProducer.parseHybridParquetOpts(readOnHostOpts)
+    val canReadOnHost = hybridOpts.mode != DeviceOnly &&
+      HostParquetProducer.schemaSupportCheck(readDataSchema.fields.map(_.dataType))
 
     val readOnHost = if (canReadOnHost) {
-      if (readOnHostOpts == 0) {
+      if (hybridOpts.mode == HostOnly) {
         true
       } else {
-        GpuSemaphore.tryAcquire(TaskContext.get()) match {
-          case SemaphoreAcquired =>
-            false
-          case AcquireFailed(_) =>
-            if (VectorizedParquetGpuProducer.acquireHostResource(readOnHostOpts)) {
-              true
-            } else {
-              GpuSemaphore.acquireIfNecessary(TaskContext.get())
-              false
-            }
+        var ret: Option[Boolean] = None
+        while (ret.isEmpty) {
+          GpuSemaphore.tryAcquire(TaskContext.get()) match {
+            case SemaphoreAcquired =>
+              ret = Option(false)
+            case AcquireFailed(_) =>
+              if (HostParquetProducer.acquireSlot(hybridOpts.hostCurrentBound)) {
+                ret = Option(true)
+              }
+          }
+          if (ret.isEmpty) Thread.sleep(hybridOpts.pollInterval)
         }
+        ret.get
       }
     } else {
       GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -2611,7 +2617,7 @@ class MultiFileCloudParquetPartitionReader(
       hostBuffer.incRefCount()
 
       val tableReader = if (readOnHost) {
-        new VectorizedParquetGpuProducer(conf, targetBatchSizeBytes.toInt,
+        new HostParquetProducer(conf, targetBatchSizeBytes.toInt,
           hostBuffer, 0, dataSize, metrics,
           dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
           clippedSchema, readDataSchema)

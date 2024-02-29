@@ -1502,8 +1502,8 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .doc("Leverages CPUs to read parquet files if there is no available GPU. " +
       "The host-side reader produces cuDF column vector directly. R2C is unnecessary.")
     .internal()
-    .integerConf
-    .createWithDefault(-1)
+    .stringConf
+    .createWithDefault("")
 
   val ORC_DEBUG_DUMP_PREFIX = conf("spark.rapids.sql.orc.debug.dumpPrefix")
     .doc("A path prefix where ORC split file data is dumped for debugging.")
@@ -2507,7 +2507,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val parquetDebugDumpAlways: Boolean = get(PARQUET_DEBUG_DUMP_ALWAYS)
 
-  lazy val parquetReadOnHost: Int = get(PARQUET_READ_ON_HOST)
+  lazy val parquetReadOnHost: String = get(PARQUET_READ_ON_HOST)
 
   lazy val orcDebugDumpPrefix: Option[String] = get(ORC_DEBUG_DUMP_PREFIX)
 
