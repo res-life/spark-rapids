@@ -31,10 +31,13 @@ import org.apache.spark.sql.catalyst.util.RebaseDateTime;
 import org.apache.spark.sql.execution.datasources.DataSourceUtils;
 import org.apache.spark.sql.execution.datasources.SchemaColumnConvertNotSupportedException;
 import org.apache.spark.sql.execution.datasources.parquet.ParquetRowConverter;
+import org.apache.spark.sql.execution.vectorized.rapids.HostWritableColumnVector;
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
 import org.apache.spark.sql.types.*;
+import scala.util.control.Exception;
 
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
@@ -174,8 +177,10 @@ public class ParquetVectorUpdaterFactory {
 				}
 				break;
 			case BINARY:
-				if (sparkType == DataTypes.StringType || sparkType == DataTypes.BinaryType ||
-						canReadAsBinaryDecimal(descriptor, sparkType)) {
+				if (sparkType == DataTypes.StringType) {
+					return new BinaryFastDecodeDictUpdater();
+				}
+				if (sparkType == DataTypes.BinaryType || canReadAsBinaryDecimal(descriptor, sparkType)) {
 					return new BinaryUpdater();
 				}
 				break;
@@ -760,6 +765,42 @@ public class ParquetVectorUpdaterFactory {
 				Dictionary dictionary) {
 			Binary v = dictionary.decodeToBinary(dictionaryIds.getDictId(offset));
 			values.putByteArray(offset, v.getBytes());
+		}
+	}
+
+	private static class BinaryFastDecodeDictUpdater implements ParquetVectorUpdater {
+		@Override
+		public void readValues(
+				int total,
+				int offset,
+				WritableColumnVector values,
+				VectorizedValuesReader valuesReader) {
+			valuesReader.readBinary(total, values, offset);
+		}
+
+		@Override
+		public void skipValues(int total, VectorizedValuesReader valuesReader) {
+			valuesReader.skipBinary(total);
+		}
+
+		@Override
+		public void readValue(
+				int offset,
+				WritableColumnVector values,
+				VectorizedValuesReader valuesReader) {
+			valuesReader.readBinary(1, values, offset);
+		}
+
+		@Override
+		public void decodeSingleDictionaryId(
+				int offset,
+				WritableColumnVector values,
+				WritableColumnVector dictionaryIds,
+				Dictionary dictionary) {
+			Binary v = dictionary.decodeToBinary(dictionaryIds.getDictId(offset));
+			ByteBuffer bb = v.toByteBuffer();
+			int start = bb.position() + bb.arrayOffset();
+			values.putByteArray(offset, bb.array(), start, bb.limit() - start);
 		}
 	}
 
