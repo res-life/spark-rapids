@@ -385,7 +385,7 @@ case class GpuConcatWs(children: Seq[Expression])
   }
 }
 
-case class GpuContains(left: Expression, right: Expression)
+case class GpuContains(left: Expression, right: Expression, experimental: Boolean = false)
     extends GpuBinaryExpressionArgsAnyScalar
         with Predicate
         with ImplicitCastInputTypes
@@ -401,8 +401,13 @@ case class GpuContains(left: Expression, right: Expression)
 
   override def toString: String = s"gpucontains($left, $right)"
 
-  def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector =
-    lhs.getBase.stringContains(rhs.getBase)
+  def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
+    if (experimental) {
+      lhs.getBase.stringContainsKMP(rhs.getBase)
+    } else {
+      lhs.getBase.stringContains(rhs.getBase)
+    }
+  }
 
   override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
     withResource(GpuColumnVector.from(lhs, numRows, left.dataType)) { expandedLhs =>
