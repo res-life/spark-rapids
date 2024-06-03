@@ -318,7 +318,8 @@ case class GpuIf(
 case class GpuCaseWhen(
     branches: Seq[(Expression, Expression)],
     elseValue: Option[Expression] = None,
-    caseWhenFuseEnabled: Boolean = true) extends GpuConditionalExpression with Serializable with Logging {
+    caseWhenFuseEnabled: Boolean = true)
+    extends GpuConditionalExpression with Serializable with Logging {
 
   import GpuExpressionWithSideEffectUtils._
 
@@ -377,10 +378,12 @@ case class GpuCaseWhen(
         }
 
         withResource(firstTrueIndex) { _ =>
-          val thenElseScalars = (branches.map(_._2) ++ elseValue).map(_.columnarEvalAny(batch).asInstanceOf[GpuScalar])
+          val thenElseScalars = (branches.map(_._2) ++ elseValue).map(_.columnarEvalAny(batch)
+              .asInstanceOf[GpuScalar])
           withResource(thenElseScalars) { _ =>
             // generate a column to store all scalars
-            val scalarsBytes = thenElseScalars.map(ret => ret.getValue.asInstanceOf[UTF8String].getBytes)
+            val scalarsBytes = thenElseScalars.map(ret => ret.getValue
+                .asInstanceOf[UTF8String].getBytes)
             val scalarCol = ColumnVector.fromUTF8Strings(scalarsBytes: _*)
             withResource(scalarCol) { _ =>
               // execute final select
