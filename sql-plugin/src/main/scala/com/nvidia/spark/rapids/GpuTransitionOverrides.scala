@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.annotation.tailrec
 import scala.collection.mutable
 
+import com.nvidia.spark.rapids.lore.GpuLore
 import com.nvidia.spark.rapids.shims.{GpuBatchScanExec, SparkShimImpl}
 
 import org.apache.spark.SparkContext
@@ -822,6 +823,10 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         if (rapidsConf.isAqeExchangeReuseFixupEnabled &&
             plan.conf.adaptiveExecutionEnabled && plan.conf.exchangeReuseEnabled) {
           updatedPlan = fixupAdaptiveExchangeReuse(updatedPlan)
+        }
+
+        if (rapidsConf.get(RapidsConf.TAG_LORE_ID_ENABLED)) {
+          updatedPlan = GpuLore.tagForLore(updatedPlan, rapidsConf)
         }
 
         if (rapidsConf.logQueryTransformations) {
