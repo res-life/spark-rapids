@@ -3975,7 +3975,7 @@ object GpuOverrides extends Logging {
     expr[HyperLogLogPlusPlus](
       "Aggregation approximate count distinct",
       ExprChecks.reductionAndGroupByAgg(TypeSig.LONG, TypeSig.LONG,
-        Seq(ParamCheck("input", TypeSig.cpuAtomics, TypeSig.all))),
+        Seq(ParamCheck("input",XxHash64Shims.supportedTypes, TypeSig.all))),
       (a, conf, p, r) => new UnaryExprMeta[HyperLogLogPlusPlus](a, conf, p, r) {
         override def convertToGpu(child: Expression): GpuExpression = {
           GpuHyperLogLogPlusPlus(child, a.relativeSD)

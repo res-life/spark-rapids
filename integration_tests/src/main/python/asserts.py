@@ -534,6 +534,10 @@ def run_with_cpu(func,
         cpu_start = time.time()
         global from_cpu
         from_cpu = with_cpu_session(bring_back, conf=conf)
+
+        print("my debug: ")
+        print(from_cpu)
+
         global cpu_end
         cpu_end = time.time()
 
