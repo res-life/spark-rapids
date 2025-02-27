@@ -1474,7 +1474,7 @@ def test_reduction_with_min_max_by_unique(kudo_enabled):
             "min_by(a, b)", "max_by(a, b)"),
         conf = {kudo_enabled_conf_key: kudo_enabled})
 
-# When the ordering column is not unique this gpu will always return the minimal/maximal value 
+# When the ordering column is not unique this gpu will always return the minimal/maximal value
 # while spark's result is non-deterministic. So we need to set the column b and c to be
 # the same to make the result comparable.
 @pytest.mark.parametrize('data_gen', basic_gen_no_floats + struct_gens_sample_with_decimal128 + array_gens_sample, ids=idfn)
@@ -2438,7 +2438,7 @@ def test_hash_agg_force_pre_sort(cast_key_to, kudo_enabled):
             'spark.rapids.sql.agg.singlePassPartialSortEnabled': True,
             kudo_enabled_conf_key: kudo_enabled})
 
-
+@allow_non_gpu("ShuffleExchangeExec")
 @ignore_order(local=True)
 def test_group_by_binary():
     gen_list = [('c_binary', binary_gen), ('c_int', int_gen)]

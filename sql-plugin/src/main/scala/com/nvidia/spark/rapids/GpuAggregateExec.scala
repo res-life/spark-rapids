@@ -1178,11 +1178,9 @@ abstract class GpuBaseAggregateMeta[INPUT <: SparkPlan](
     // We don't support Maps as GroupBy keys yet, even if they are nested in Structs. So,
     // we need to run recursive type check on the structs.
     val mapOrBinaryGroupings = agg.groupingExpressions.exists(e =>
-      TrampolineUtil.dataTypeExistsRecursively(e.dataType,
-        dt => dt.isInstanceOf[MapType] || dt.isInstanceOf[BinaryType]))
+      TrampolineUtil.dataTypeExistsRecursively(e.dataType, dt => dt.isInstanceOf[MapType]))
     if (mapOrBinaryGroupings) {
-      willNotWorkOnGpu("MapType, or BinaryType " +
-        "in grouping expressions are not supported")
+      willNotWorkOnGpu("MapType in grouping expressions is not supported")
     }
 
     // We support Arrays as grouping expression but not if the child is a struct. So we need to
