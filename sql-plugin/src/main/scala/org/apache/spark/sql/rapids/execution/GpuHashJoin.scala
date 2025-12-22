@@ -21,7 +21,7 @@ import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{withRestoreOnRetry, withRetryNoSplit}
-import com.nvidia.spark.rapids.jni.{GpuOOM, JoinPrimitives}
+import com.nvidia.spark.rapids.jni.{GpuOOM, JoinPrimitives, ReusableHashJoin}
 import com.nvidia.spark.rapids.shims.ShimBinaryExecNode
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, NamedExpression}
@@ -437,6 +437,66 @@ object JoinImpl {
     } else {
       innerSortJoinBuildRight(leftKeys, rightKeys, compareNullsEqual)
     }
+  }
+
+  // ============================================================================
+  // Reusable Hash Join Methods
+  // These methods support building the hash table once and probing multiple times.
+  // This is useful when the build side is constant (e.g., broadcast join) and
+  // the stream side has multiple batches.
+  // See: https://github.com/NVIDIA/spark-rapids/issues/12327
+  // ============================================================================
+
+  /**
+   * Build a reusable hash table from the build keys that can be probed multiple times.
+   * The caller is responsible for closing the returned ReusableHashJoin when done.
+   *
+   * @param buildKeys table of join keys for the build side
+   * @param compareNullsEqual true if null key values should match
+   * @return a reusable hash join object that can be probed multiple times
+   */
+  def buildReusableHashJoin(buildKeys: Table,
+                            compareNullsEqual: Boolean): ReusableHashJoin = {
+    JoinPrimitives.buildHashTable(buildKeys, compareNullsEqual)
+  }
+
+  /**
+   * Probe a reusable hash join to compute inner join gather maps.
+   *
+   * @param hashJoin the pre-built hash table
+   * @param probeKeys table of join keys for the probe (stream) side
+   * @return gather maps for the inner join
+   */
+  def innerHashJoinProbe(hashJoin: ReusableHashJoin,
+                         probeKeys: Table): GatherMapsResult = {
+    val arrayRet = JoinPrimitives.hashInnerJoinProbe(hashJoin, probeKeys)
+    GatherMapsResult(arrayRet(0), arrayRet(1))
+  }
+
+  /**
+   * Probe a reusable hash join to compute left outer join gather maps.
+   *
+   * @param hashJoin the pre-built hash table
+   * @param probeKeys table of join keys for the probe (left) side
+   * @return gather maps for the left outer join
+   */
+  def leftOuterHashJoinProbe(hashJoin: ReusableHashJoin,
+                             probeKeys: Table): GatherMapsResult = {
+    val arrayRet = JoinPrimitives.hashLeftOuterJoinProbe(hashJoin, probeKeys)
+    GatherMapsResult(arrayRet(0), arrayRet(1))
+  }
+
+  /**
+   * Probe a reusable hash join to compute full outer join gather maps.
+   *
+   * @param hashJoin the pre-built hash table
+   * @param probeKeys table of join keys for the probe side
+   * @return gather maps for the full outer join
+   */
+  def fullOuterHashJoinProbe(hashJoin: ReusableHashJoin,
+                             probeKeys: Table): GatherMapsResult = {
+    val arrayRet = JoinPrimitives.hashFullOuterJoinProbe(hashJoin, probeKeys)
+    GatherMapsResult(arrayRet(0), arrayRet(1))
   }
 
   /**
@@ -1196,6 +1256,12 @@ abstract class BaseHashJoinIterator(
 
 /**
  * An iterator that does a hash join against a stream of batches.
+ * 
+ * This implementation supports reusing the hash table across multiple stream batches
+ * when using the REUSE_HASH strategy. The hash table is built once from the build side
+ * keys and probed for each stream batch, avoiding the cost of rebuilding the hash table.
+ * 
+ * See: https://github.com/NVIDIA/spark-rapids/issues/12327
  */
 class HashJoinIterator(
     built: LazySpillableColumnarBatch,
@@ -1224,6 +1290,66 @@ class HashJoinIterator(
       conditionForLogging,
       opTime = opTime,
       joinTime = joinTime) {
+
+  // Cached reusable hash join for the build side keys.
+  // Built lazily on first use and reused for subsequent stream batches.
+  // This is the key optimization from issue #12327.
+  @volatile private var cachedHashJoin: Option[ReusableHashJoin] = None
+  private val hashJoinLock = new Object()
+
+  /**
+   * Get or build the cached hash join for the build side.
+   * Thread-safe and builds the hash table only once.
+   */
+  private def getOrBuildCachedHashJoin(buildKeys: Table): ReusableHashJoin = {
+    cachedHashJoin match {
+      case Some(hj) => hj
+      case None =>
+        hashJoinLock.synchronized {
+          // Double-check after acquiring lock
+          cachedHashJoin match {
+            case Some(hj) => hj
+            case None =>
+              val hj = JoinImpl.buildReusableHashJoin(buildKeys, compareNullsEqual)
+              cachedHashJoin = Some(hj)
+              hj
+          }
+        }
+    }
+  }
+
+  /**
+   * Check if we can use the cached hash join optimization.
+   * Applicable for join types supported by cuDF's HashJoin class.
+   * 
+   * Supported join types with cached hash join:
+   * - InnerLike (Inner, Cross)
+   * - LeftOuter (when build side is right)
+   * - RightOuter (when build side is left)
+   * - FullOuter
+   * 
+   * NOT supported (would need cuDF extensions):
+   * - LeftSemi, LeftAnti (no reusable hash join API in cuDF)
+   * - Distinct joins (distinct_hash_join Java bindings not yet available)
+   */
+  private def canUseCachedHashJoin: Boolean = {
+    // Don't use cached hash join for:
+    // 1. Distinct joins (need distinct_hash_join Java bindings)
+    // 2. Sort-based strategy
+    // 3. Semi/Anti joins (no reusable hash join API in cuDF yet)
+    if (buildStats.isDistinct || joinOptions.strategy == JoinStrategy.INNER_SORT_WITH_POST) {
+      return false
+    }
+    
+    joinType match {
+      case _: InnerLike => true
+      case LeftOuter if buildSide == GpuBuildRight => true
+      case RightOuter if buildSide == GpuBuildLeft => true
+      case FullOuter => true
+      case _ => false
+    }
+  }
+
   override protected def joinGathererLeftRight(
       leftKeys: Table,
       leftData: LazySpillableColumnarBatch,
@@ -1298,8 +1424,68 @@ class HashJoinIterator(
         }
       case _ =>
         // Use existing hash join methods (for AUTO and HASH_ONLY strategies)
-        computeWithHashJoin(leftKeys, rightKeys)
+        // Try to use cached hash join for InnerLike joins
+        if (canUseCachedHashJoin) {
+          computeWithCachedHashJoin(leftKeys, rightKeys)
+        } else {
+          computeWithHashJoin(leftKeys, rightKeys)
+        }
     }
+  }
+
+  /**
+   * Compute join using the cached/reusable hash table.
+   * The hash table is built once from the build side and reused for each probe.
+   * 
+   * Supports: InnerLike, LeftOuter, RightOuter, FullOuter
+   */
+  private def computeWithCachedHashJoin(
+      leftKeys: Table,
+      rightKeys: Table): GatherMapsResult = {
+    logJoinCardinality(leftKeys, rightKeys, "hash join (reused hash table)")
+
+    val result = (joinType, buildSide) match {
+      // Inner join cases
+      case (_: InnerLike, GpuBuildRight) =>
+        val hashJoin = getOrBuildCachedHashJoin(rightKeys)
+        JoinImpl.innerHashJoinProbe(hashJoin, leftKeys)
+      
+      case (_: InnerLike, GpuBuildLeft) =>
+        val hashJoin = getOrBuildCachedHashJoin(leftKeys)
+        val probeResult = JoinImpl.innerHashJoinProbe(hashJoin, rightKeys)
+        // Swap: probeResult is [right_map, left_map], we need [left_map, right_map]
+        GatherMapsResult(probeResult.right, probeResult.left)
+      
+      // Left outer join: build must be on right
+      case (LeftOuter, GpuBuildRight) =>
+        val hashJoin = getOrBuildCachedHashJoin(rightKeys)
+        JoinImpl.leftOuterHashJoinProbe(hashJoin, leftKeys)
+      
+      // Right outer join: build must be on left, use left join with swapped tables
+      case (RightOuter, GpuBuildLeft) =>
+        val hashJoin = getOrBuildCachedHashJoin(leftKeys)
+        val probeResult = JoinImpl.leftOuterHashJoinProbe(hashJoin, rightKeys)
+        // Swap: probeResult is [right_map, left_map], we need [left_map, right_map]
+        GatherMapsResult(probeResult.right, probeResult.left)
+      
+      // Full outer join cases
+      case (FullOuter, GpuBuildRight) =>
+        val hashJoin = getOrBuildCachedHashJoin(rightKeys)
+        JoinImpl.fullOuterHashJoinProbe(hashJoin, leftKeys)
+      
+      case (FullOuter, GpuBuildLeft) =>
+        val hashJoin = getOrBuildCachedHashJoin(leftKeys)
+        val probeResult = JoinImpl.fullOuterHashJoinProbe(hashJoin, rightKeys)
+        // Swap: probeResult is [right_map, left_map], we need [left_map, right_map]
+        GatherMapsResult(probeResult.right, probeResult.left)
+      
+      case _ =>
+        throw new IllegalStateException(
+          s"Unexpected join type/build side combination for cached hash join: " +
+          s"joinType=$joinType, buildSide=$buildSide")
+    }
+    logJoinCompletion()
+    result
   }
 
   private def computeNonCondInnerHashWithPost(
@@ -1362,6 +1548,16 @@ class HashJoinIterator(
     }
     logJoinCompletion()
     result
+  }
+
+  /**
+   * Clean up resources when the iterator is closed.
+   * This includes the cached hash join.
+   */
+  override def close(): Unit = {
+    cachedHashJoin.foreach(_.close())
+    cachedHashJoin = None
+    super.close()
   }
 }
 
