@@ -46,6 +46,7 @@ package org.apache.spark.sql.rapids
 import java.io._
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -483,6 +484,38 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     writer.stop(true)
     // batch1: 2,4,6; batch2: 1,3,5; batch3: 0 -> all partitions
     verifyWrite(writer, expectedRecords = 7, partitionsWithData = Set(0, 1, 2, 3, 4, 5, 6))
+  }
+
+  // ==================== Merger Pool Tests ====================
+
+  test("waiting merger tasks do not block unrelated mergers") {
+    val blockersStarted = new CountDownLatch(numWriterThreads)
+    val mergerCanFinish = new CountDownLatch(1)
+    val blockers = (0 until numWriterThreads).map { slotNum =>
+      RapidsShuffleInternalManagerBase.queueMergerTask(slotNum, () => {
+        blockersStarted.countDown()
+        mergerCanFinish.await()
+        null
+      })
+    }
+
+    try {
+      assert(blockersStarted.await(5, TimeUnit.SECONDS), "merger blockers did not start")
+
+      // With fixed merger slots, this task is queued behind the first blocker. The blockers wait
+      // for this task to release them, forming the same cycle as a merger waiting for a producer
+      // whose task cannot start. A dedicated cached merger pool allows this task to run.
+      val unrelatedMerger = RapidsShuffleInternalManagerBase.queueMergerTask(
+        numWriterThreads, () => {
+          mergerCanFinish.countDown()
+          true
+        })
+      assert(unrelatedMerger.get(5, TimeUnit.SECONDS),
+        "unrelated merger was blocked by waiting merger tasks")
+    } finally {
+      mergerCanFinish.countDown()
+      blockers.foreach(_.get(5, TimeUnit.SECONDS))
+    }
   }
 
   // ==================== Cancellation Tests ====================

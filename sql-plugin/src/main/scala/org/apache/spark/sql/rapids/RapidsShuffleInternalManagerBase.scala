@@ -17,7 +17,8 @@
 package org.apache.spark.sql.rapids
 
 import java.io.IOException
-import java.util.concurrent.{Callable, ConcurrentHashMap, ConcurrentLinkedQueue, ExecutionException, Executors, Future, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{Callable, ConcurrentHashMap, ConcurrentLinkedQueue, ExecutionException,
+  Executors, ExecutorService, Future, LinkedBlockingQueue, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
 
 import scala.collection.JavaConverters._
@@ -182,15 +183,13 @@ object RapidsShuffleInternalManagerBase extends Logging {
   //   spark.rapids.shuffle.multiThreaded.reader.threads
   private var numWriterSlots: Int = 0
   private var numReaderSlots: Int = 0
-  private var numMergerSlots: Int = 0
   private lazy val writerSlots = new mutable.HashMap[Int, Slot]()
   private lazy val readerSlots = new mutable.HashMap[Int, Slot]()
-  private lazy val mergerSlots = new mutable.HashMap[Int, Slot]()
+  private var mergerPool: ExecutorService = _
 
   // used by callers to obtain a unique slot
   private val writerSlotNumber = new AtomicInteger(0)
   private val readerSlotNumber= new AtomicInteger(0)
-  private val mergerSlotNumber = new AtomicInteger(0)
 
   private var mtShuffleInitialized: Boolean = false
 
@@ -217,14 +216,17 @@ object RapidsShuffleInternalManagerBase extends Logging {
   }
 
   /**
-   * Send a task to a specific merger slot.
-   * @param slotNum the slot to submit to
-   * @param task a task to execute
-   * @note there must not be an uncaught exception while calling
-   *      `task`.
+   * Send a merger task to the merger pool. Merger tasks can wait for their producer, so they
+   * must not share fixed single-threaded slots where a waiting task can block unrelated mergers.
    */
-  def queueMergerTask[T](slotNum: Int, task: Callable[T]): Future[T] = {
-    mergerSlots(slotNum % numMergerSlots).offer(task)
+  def queueMergerTask[T](task: Callable[T]): Future[T] = {
+    mergerPool.submit(task)
+  }
+
+  // Keep the slot-based signature for compatibility. The slot number is intentionally ignored
+  // because merger tasks must not share fixed single-threaded slots.
+  def queueMergerTask[T](_slotNum: Int, task: Callable[T]): Future[T] = {
+    queueMergerTask(task)
   }
 
   def startThreadPoolIfNeeded(
@@ -234,8 +236,6 @@ object RapidsShuffleInternalManagerBase extends Logging {
       mtShuffleInitialized = true
       numWriterSlots = numWriterThreads
       numReaderSlots = numReaderThreads
-      // Use same number of merger slots as writer slots
-      numMergerSlots = numWriterThreads
       if (writerSlots.isEmpty) {
         (0 until numWriterSlots).foreach { slotNum =>
           writerSlots.put(slotNum, new Slot(slotNum, "writer"))
@@ -246,11 +246,10 @@ object RapidsShuffleInternalManagerBase extends Logging {
           readerSlots.put(slotNum, new Slot(slotNum, "reader"))
         }
       }
-      if (mergerSlots.isEmpty) {
-        (0 until numMergerSlots).foreach { slotNum =>
-          mergerSlots.put(slotNum, new Slot(slotNum, "merger"))
-        }
-      }
+      mergerPool = Executors.newCachedThreadPool(new ThreadFactoryBuilder()
+        .setNameFormat("rapids-shuffle-merger-%d")
+        .setDaemon(true)
+        .build())
     }
   }
 
@@ -262,18 +261,18 @@ object RapidsShuffleInternalManagerBase extends Logging {
     readerSlots.values.foreach(_.shutdownNow())
     readerSlots.clear()
 
-    mergerSlots.values.foreach(_.shutdownNow())
-    mergerSlots.clear()
+    if (mergerPool != null) {
+      mergerPool.shutdownNow()
+      mergerPool = null
+    }
 
     // Reset slot counters to ensure clean state for next initialization
     writerSlotNumber.set(0)
     readerSlotNumber.set(0)
-    mergerSlotNumber.set(0)
   }
 
   def getNextWriterSlot: Int = Math.abs(writerSlotNumber.incrementAndGet())
   def getNextReaderSlot: Int = Math.abs(readerSlotNumber.incrementAndGet())
-  def getNextMergerSlot: Int = Math.abs(mergerSlotNumber.incrementAndGet())
 }
 
 trait RapidsShuffleWriterShimHelper {
@@ -367,7 +366,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    *                             Merger thread uses this to know when a partition is complete.
    * @param mergerCondition Condition variable for main thread to wake up merger thread
    * @param hasNewWork Flag for wait/notify pattern
-   * @param mergerSlotNum The merger thread pool slot assigned to this batch.
    * @param mergerFuture Future representing the merger task, used to wait for completion.
    */
   private case class BatchState(
@@ -381,7 +379,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     // reset to false after merger thread wakes up and checks actual data state.
     // This avoids busy-loop polling and provides clear signal for debugging.
     hasNewWork: AtomicBoolean,
-    mergerSlotNum: Int,
     mergerFuture: Future[_])
 
   /**
@@ -450,9 +447,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     val maxPartitionIdQueued = new AtomicInteger(-1)
     val mergerCondition = new Object()
     val hasNewWork = new AtomicBoolean(false)
-
-    // Assign a merger slot for this batch
-    val mergerSlotNum = RapidsShuffleInternalManagerBase.getNextMergerSlot
 
     // Merger task: writes compressed records to disk in partition order.
     // Each record has its own buffer. For each partition, we:
@@ -562,11 +556,10 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       }
     }
 
-    val mergerFuture = RapidsShuffleInternalManagerBase.queueMergerTask(
-      mergerSlotNum, () => {
-        mergerTask.run()
-        null
-      })
+    val mergerFuture = RapidsShuffleInternalManagerBase.queueMergerTask(() => {
+      mergerTask.run()
+      null
+    })
 
     BatchState(
       batchId,
@@ -575,7 +568,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       maxPartitionIdQueued,
       mergerCondition,
       hasNewWork,
-      mergerSlotNum,
       mergerFuture)
   }
 
