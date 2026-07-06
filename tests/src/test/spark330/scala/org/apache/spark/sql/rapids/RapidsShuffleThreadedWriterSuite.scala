@@ -488,33 +488,144 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   // ==================== Merger Pool Tests ====================
 
-  test("waiting merger tasks do not block unrelated mergers") {
-    val blockersStarted = new CountDownLatch(numWriterThreads)
-    val mergerCanFinish = new CountDownLatch(1)
-    val blockers = (0 until numWriterThreads).map { slotNum =>
-      RapidsShuffleInternalManagerBase.queueMergerTask(slotNum, () => {
-        blockersStarted.countDown()
-        mergerCanFinish.await()
-        null
+  test("mergers yield while producers are blocked") {
+    val producersBlocked = new CountDownLatch(numWriterThreads)
+    val releaseProducers = new CountDownLatch(1)
+    val blockedWriters = (0 until numWriterThreads).map(_ => createWriter())
+    val blockedRecords = (0 until numWriterThreads).map(createTestBatch)
+    val blockedThreads = blockedWriters.zip(blockedRecords).map { case (writer, batch) =>
+      val input = new Iterator[(Int, ColumnarBatch)] {
+        private var hasNextCalls = 0
+        private var recordReturned = false
+
+        override def hasNext: Boolean = {
+          hasNextCalls += 1
+          if (hasNextCalls <= 2) {
+            true
+          } else {
+            producersBlocked.countDown()
+            releaseProducers.await()
+            false
+          }
+        }
+
+        override def next(): (Int, ColumnarBatch) = {
+          require(!recordReturned)
+          recordReturned = true
+          (0, batch)
+        }
+      }
+      new Thread(() => {
+        try {
+          writer.write(input)
+        } catch {
+          case NonFatal(_) => // Expected when the blocked writer is cancelled during cleanup.
+        }
       })
     }
 
+    val unrelatedWriter = createWriter()
+    var unrelatedStopped = false
+    @volatile var unrelatedFailure: Throwable = null
+    val unrelatedThread = new Thread(() => {
+      try {
+        unrelatedWriter.write(createTestRecords(Iterator(1)))
+      } catch {
+        case t: Throwable => unrelatedFailure = t
+      }
+    })
     try {
-      assert(blockersStarted.await(5, TimeUnit.SECONDS), "merger blockers did not start")
+      blockedThreads.foreach(_.start())
+      assert(producersBlocked.await(5, TimeUnit.SECONDS), "producers did not block")
 
-      // With fixed merger slots, this task is queued behind the first blocker. The blockers wait
-      // for this task to release them, forming the same cycle as a merger waiting for a producer
-      // whose task cannot start. A dedicated cached merger pool allows this task to run.
-      val unrelatedMerger = RapidsShuffleInternalManagerBase.queueMergerTask(
-        numWriterThreads, () => {
-          mergerCanFinish.countDown()
-          true
-        })
-      assert(unrelatedMerger.get(5, TimeUnit.SECONDS),
-        "unrelated merger was blocked by waiting merger tasks")
+      // Wait until both mergers have written their first record. In the old implementation they
+      // then occupy all merger slots waiting for their blocked producers. Cooperative mergers
+      // yield at this point and leave the bounded pool available for unrelated work.
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (blockedWriters.exists(_.getBytesInFlight != 0) && System.nanoTime() < deadline) {
+        Thread.sleep(10)
+      }
+      assert(blockedWriters.forall(_.getBytesInFlight == 0),
+        "blocking mergers did not drain their first records")
+
+      unrelatedThread.start()
+      unrelatedThread.join(5000)
+      assert(!unrelatedThread.isAlive, "unrelated merger was blocked by waiting producers")
+      if (unrelatedFailure != null) {
+        throw unrelatedFailure
+      }
+      unrelatedWriter.stop(true)
+      unrelatedStopped = true
+
+      val mergerThreadCount = Thread.getAllStackTraces.keySet().toArray.count {
+        case thread: Thread => thread.getName.startsWith("rapids-shuffle-merger-")
+        case _ => false
+      }
+      assert(mergerThreadCount <= numWriterThreads,
+        s"Expected at most $numWriterThreads merger threads, found $mergerThreadCount")
     } finally {
-      mergerCanFinish.countDown()
-      blockers.foreach(_.get(5, TimeUnit.SECONDS))
+      if (!unrelatedStopped) {
+        unrelatedWriter.stop(false)
+      }
+      blockedWriters.foreach(_.stop(false))
+      releaseProducers.countDown()
+      blockedThreads.foreach(_.join(5000))
+      if (unrelatedThread.isAlive) {
+        unrelatedThread.join(5000)
+      }
+    }
+  }
+
+  test("merger resumes after compression future completes") {
+    val blockersStarted = new CountDownLatch(numWriterThreads)
+    val releaseBlockers = new CountDownLatch(1)
+    val writerBlockers = (0 until numWriterThreads).map { slotNum =>
+      RapidsShuffleInternalManagerBase.queueWriteTask(slotNum, () => {
+        blockersStarted.countDown()
+        releaseBlockers.await()
+        null
+      })
+    }
+    assert(blockersStarted.await(5, TimeUnit.SECONDS), "writer blockers did not start")
+
+    val writer = createWriter()
+    var writerStopped = false
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (writer.getBytesInFlight == 0 && System.nanoTime() < deadline) {
+        Thread.sleep(10)
+      }
+      assert(writer.getBytesInFlight > 0, "compression future was not queued")
+
+      // The merger has yielded because the compression future is incomplete. FutureTask.done
+      // must schedule another merger step after the writer slot is released.
+      releaseBlockers.countDown()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, "merger did not resume after compression completed")
+      if (writeFailure != null) {
+        throw writeFailure
+      }
+      writer.stop(true)
+      writerStopped = true
+    } finally {
+      releaseBlockers.countDown()
+      writerBlockers.foreach(_.get(5, TimeUnit.SECONDS))
+      if (!writerStopped) {
+        writer.stop(false)
+      }
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
     }
   }
 
