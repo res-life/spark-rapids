@@ -84,6 +84,16 @@ class TestColumnarBatchSerializer extends Serializer with Serializable {
   override def supportsRelocationOfSerializedObjects: Boolean = true
 }
 
+class FailingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
+  override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
+    override def serializeStream(s: OutputStream): SerializationStream =
+      new TestColumnarBatchSerializationStream(s) {
+        override def writeValue[T: ClassTag](value: T): SerializationStream =
+          throw new IOException("injected serialization failure")
+      }
+  }
+}
+
 class TestColumnarBatchSerializerInstance extends SerializerInstance {
   override def serialize[T: ClassTag](t: T): ByteBuffer = {
     val bos = new ByteArrayOutputStream()
@@ -623,6 +633,52 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       if (!writerStopped) {
         writer.stop(false)
       }
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+  test("merger propagates an exceptional compression future without hanging") {
+    val blockersStarted = new CountDownLatch(numWriterThreads)
+    val releaseBlockers = new CountDownLatch(1)
+    val writerBlockers = (0 until numWriterThreads).map { slotNum =>
+      RapidsShuffleInternalManagerBase.queueWriteTask(slotNum, () => {
+        blockersStarted.countDown()
+        releaseBlockers.await()
+        null
+      })
+    }
+    assert(blockersStarted.await(5, TimeUnit.SECONDS), "writer blockers did not start")
+
+    when(dependency.serializer).thenReturn(new FailingTestColumnarBatchSerializer())
+    val writer = createWriter()
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+      while (writer.getBytesInFlight == 0 && System.nanoTime() < deadline) {
+        Thread.sleep(10)
+      }
+      assert(writer.getBytesInFlight > 0, "compression future was not queued")
+
+      releaseBlockers.countDown()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, "exceptional compression future left the merger waiting")
+      assert(writeFailure.isInstanceOf[IOException],
+        s"Expected IOException, got ${Option(writeFailure).map(_.getClass.getName)}")
+    } finally {
+      releaseBlockers.countDown()
+      writerBlockers.foreach(_.get(5, TimeUnit.SECONDS))
+      writer.stop(false)
       if (writeThread.isAlive) {
         writeThread.join(5000)
       }

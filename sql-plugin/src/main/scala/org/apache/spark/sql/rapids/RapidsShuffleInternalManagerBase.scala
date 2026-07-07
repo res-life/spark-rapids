@@ -192,6 +192,7 @@ object RapidsShuffleInternalManagerBase extends Logging {
   // used by callers to obtain a unique slot
   private val writerSlotNumber = new AtomicInteger(0)
   private val readerSlotNumber= new AtomicInteger(0)
+  private val mergerSlotNumber = new AtomicInteger(0)
 
   private var mtShuffleInitialized: Boolean = false
 
@@ -277,10 +278,12 @@ object RapidsShuffleInternalManagerBase extends Logging {
     // Reset slot counters to ensure clean state for next initialization
     writerSlotNumber.set(0)
     readerSlotNumber.set(0)
+    mergerSlotNumber.set(0)
   }
 
   def getNextWriterSlot: Int = Math.abs(writerSlotNumber.incrementAndGet())
   def getNextReaderSlot: Int = Math.abs(readerSlotNumber.incrementAndGet())
+  def getNextMergerSlot: Int = Math.abs(mergerSlotNumber.incrementAndGet())
 }
 
 trait RapidsShuffleWriterShimHelper {
@@ -366,6 +369,15 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     private var currentPartitionToWrite = 0
     private var outputStream: OutputStream = _
 
+    private sealed trait WorkState
+    private case object Complete extends WorkState
+    private case object NotReady extends WorkState
+    private case object EmptyPartition extends WorkState
+    private case class ReadyRecord(
+        queue: ConcurrentLinkedQueue[Future[CompressedRecord]],
+        future: Future[CompressedRecord]) extends WorkState
+    private case object FinishedPartition extends WorkState
+
     def schedule(): Unit = {
       if (!completionFuture.isDone && scheduled.compareAndSet(false, true)) {
         val task = new FutureTask[Void](new Callable[Void] {
@@ -398,35 +410,26 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       try {
         var keepDraining = true
         while (keepDraining && !completionFuture.isDone) {
-          if (currentPartitionToWrite >= numPartitions) {
-            completionFuture.complete(null)
-            keepDraining = false
-          } else if (currentPartitionToWrite > maxPartitionIdQueued.get()) {
-            keepDraining = false
-          } else {
-            val recordQueue = partitionRecords.get(currentPartitionToWrite)
-            if (recordQueue == null) {
+          currentWorkState match {
+            case Complete =>
+              completionFuture.complete(null)
+              keepDraining = false
+            case NotReady =>
+              keepDraining = false
+            case EmptyPartition =>
               // The producer has advanced beyond this partition without adding records.
               writer.getPartitionWriter(currentPartitionToWrite).openStream().close()
               currentPartitionToWrite += 1
-            } else {
-              val future = recordQueue.peek()
-              if (future != null && future.isDone) {
-                if (outputStream == null) {
-                  outputStream = writer.getPartitionWriter(currentPartitionToWrite).openStream()
-                }
-                recordQueue.poll()
-                writeRecord(future.get())
-              } else if (future == null &&
-                  currentPartitionToWrite < maxPartitionIdQueued.get()) {
-                closeOutputStream()
-                partitionRecords.remove(currentPartitionToWrite)
-                currentPartitionToWrite += 1
-              } else {
-                // The producer or compression task will schedule another step when work is ready.
-                keepDraining = false
+            case ReadyRecord(recordQueue, future) =>
+              if (outputStream == null) {
+                outputStream = writer.getPartitionWriter(currentPartitionToWrite).openStream()
               }
-            }
+              recordQueue.poll()
+              writeRecord(future.get())
+            case FinishedPartition =>
+              closeOutputStream()
+              partitionRecords.remove(currentPartitionToWrite)
+              currentPartitionToWrite += 1
           }
         }
 
@@ -453,21 +456,32 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
       }
     }
 
-    private def hasReadyWork: Boolean = {
+    private def currentWorkState: WorkState = {
       if (currentPartitionToWrite >= numPartitions) {
-        true
+        Complete
       } else {
         val maxQueued = maxPartitionIdQueued.get()
         if (currentPartitionToWrite > maxQueued) {
-          false
+          NotReady
         } else {
           val recordQueue = partitionRecords.get(currentPartitionToWrite)
-          recordQueue == null ||
-            Option(recordQueue.peek()).exists(_.isDone) ||
-            (recordQueue.isEmpty && currentPartitionToWrite < maxQueued)
+          if (recordQueue == null) {
+            EmptyPartition
+          } else {
+            val future = recordQueue.peek()
+            if (future != null && future.isDone) {
+              ReadyRecord(recordQueue, future)
+            } else if (future == null && currentPartitionToWrite < maxQueued) {
+              FinishedPartition
+            } else {
+              NotReady
+            }
+          }
         }
       }
     }
+
+    private def hasReadyWork: Boolean = currentWorkState != NotReady
 
     private def writeRecord(record: CompressedRecord): Unit = {
       if (record.compressedSize > 0) {
@@ -632,23 +646,23 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
    *    spark.rapids.shuffle.partitioning.maxCpuBatchSize) -> Main thread acquires limiter quota
    * 2. Writer thread: serialize + compress -> OpenByteArrayOutputStream (JVM heap)
    * 3. Writer thread: release excess quota (recordSize - compressedSize)
-   * 4. Merger thread: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
+   * 4. Merger step: heap buffer -> ShuffleMapOutputWriter (via SpillablePartialFileHandle)
    *    - If MEMORY_WITH_SPILL mode: data may stay in host memory until spill/commit
    *    - If FILE_ONLY mode or spilled: data goes to disk
-   * 5. Merger thread: release remaining quota after writing to output stream
+   * 5. Merger step: release remaining quota after writing to output stream
    * 6. (Multi-batch only) Main thread: mergePartialFiles() combines all batch outputs into
    *    final shuffle file, reading from each SpillablePartialFileHandle sequentially
    *
    * Threading model (same for both scenarios):
    * - Main thread: Processes all records without blocking, queues compression tasks
-   * - Background merger thread(s): Wait for compression tasks to complete and write
-   *   partitions to disk in order
+   * - Merger steps: Run on a shared bounded pool, write ready partitions in order, and yield
+   *   when the next compression task is incomplete
    * - Worker threads: Execute compression tasks in parallel
    *
-   * Single batch: One merger thread writes directly to final output file
+   * Single batch: Cooperative merger steps write directly to the final output file
    *
    * Multi-batch: Detects partition ID decreasing (indicates new batch), creates
-   * independent state for each batch (each with its own merger thread running in parallel),
+   * independent state for each batch (each with its own cooperative merger),
    * then merges all batch outputs into final file.
    */
   private def writePartitionedGpuBatches(
