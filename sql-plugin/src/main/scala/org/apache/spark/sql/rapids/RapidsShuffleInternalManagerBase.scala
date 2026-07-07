@@ -154,53 +154,20 @@ object RapidsShuffleInternalManagerBase extends Logging {
     case other => other
   }
 
-  /**
-   * "slots" are a thread + queue thin wrapper that is used
-   * to execute tasks that need to be done in sequentially.
-   * This is done such that the threaded shuffle posts
-   * tasks that are for writer_i, or reader_i, which are
-   * guaranteed to be processed sequentially for that writer or reader.
-   * Writers/readers that land in a different slot are working independently
-   * and could perform their work in parallel.
-   * @param slotNum this slot's unique number only used to name its executor
-   */
-  private class Slot(slotNum: Int, slotType: String) {
-    private val p = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder()
-      .setNameFormat(s"rapids-shuffle-$slotType-$slotNum")
-      .setDaemon(true)
-      .build())
-
-    def offer[T](task: Callable[T]): Future[T] = {
-      p.submit(task)
-    }
-
-    def execute(task: Runnable): Unit = p.execute(task)
-
-    def shutdownNow(): Unit = p.shutdownNow()
-  }
-
   // this is set by the executor on startup, when the MULTITHREADED
   // shuffle mode is utilized, as per these configs:
   //   spark.rapids.shuffle.multiThreaded.writer.threads
   //   spark.rapids.shuffle.multiThreaded.reader.threads
-  private var numReaderSlots: Int = 0
-  private lazy val readerSlots = new mutable.HashMap[Int, Slot]()
   private var writerPool: ExecutorService = _
+  private var readerPool: ExecutorService = _
   private var mergerPool: ExecutorService = _
 
-  // used by callers to obtain a unique slot
-  private val readerSlotNumber= new AtomicInteger(0)
+  // Kept for compatibility with callers that used the old slot-based merger API.
   private val mergerSlotNumber = new AtomicInteger(0)
 
   private var mtShuffleInitialized: Boolean = false
 
-  /**
-   * Send a task to a specific write slot.
-   * @param slotNum the slot to submit to
-   * @param task a task to execute
-   * @note there must not be an uncaught exception while calling
-   *      `task`.
-   */
+  /** Send a compression task to the shared writer pool. */
   def queueWriteTask[T](task: Callable[T]): Future[T] = {
     writerPool.submit(task)
   }
@@ -210,15 +177,9 @@ object RapidsShuffleInternalManagerBase extends Logging {
     task
   }
 
-  /**
-   * Send a task to a specific read slot.
-   * @param slotNum the slot to submit to
-   * @param task a task to execute
-   * @note there must not be an uncaught exception while calling
-   *      `task`.
-   */
-  def queueReadTask[T](slotNum: Int, task: Callable[T]): Future[T] = {
-    readerSlots(slotNum % numReaderSlots).offer(task)
+  /** Send a deserialization task to the shared reader pool. */
+  def queueReadTask[T](task: Callable[T]): Future[T] = {
+    readerPool.submit(task)
   }
 
   /** Send a short-lived merger step to the shared merger pool. */
@@ -239,12 +200,6 @@ object RapidsShuffleInternalManagerBase extends Logging {
       numReaderThreads: Int): Unit = synchronized {
     if (!mtShuffleInitialized) {
       mtShuffleInitialized = true
-      numReaderSlots = numReaderThreads
-      if (readerSlots.isEmpty) {
-        (0 until numReaderSlots).foreach { slotNum =>
-          readerSlots.put(slotNum, new Slot(slotNum, "reader"))
-        }
-      }
       if (numWriterThreads > 0) {
         writerPool = Executors.newFixedThreadPool(numWriterThreads, new ThreadFactoryBuilder()
           .setNameFormat("rapids-shuffle-writer-%d")
@@ -252,6 +207,12 @@ object RapidsShuffleInternalManagerBase extends Logging {
           .build())
         mergerPool = Executors.newFixedThreadPool(numWriterThreads, new ThreadFactoryBuilder()
           .setNameFormat("rapids-shuffle-merger-%d")
+          .setDaemon(true)
+          .build())
+      }
+      if (numReaderThreads > 0) {
+        readerPool = Executors.newFixedThreadPool(numReaderThreads, new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-reader-%d")
           .setDaemon(true)
           .build())
       }
@@ -265,20 +226,19 @@ object RapidsShuffleInternalManagerBase extends Logging {
       writerPool = null
     }
 
-    readerSlots.values.foreach(_.shutdownNow())
-    readerSlots.clear()
+    if (readerPool != null) {
+      readerPool.shutdownNow()
+      readerPool = null
+    }
 
     if (mergerPool != null) {
       mergerPool.shutdownNow()
       mergerPool = null
     }
 
-    // Reset slot counters to ensure clean state for next initialization
-    readerSlotNumber.set(0)
     mergerSlotNumber.set(0)
   }
 
-  def getNextReaderSlot: Int = Math.abs(readerSlotNumber.incrementAndGet())
   def getNextMergerSlot: Int = Math.abs(mergerSlotNumber.incrementAndGet())
 }
 
@@ -1450,8 +1410,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     }
 
     private def deserializeTask(blockState: BlockState, acquiredSize: Long): Unit = {
-      val slot = RapidsShuffleInternalManagerBase.getNextReaderSlot
-      futures += RapidsShuffleInternalManagerBase.queueReadTask(slot, () => {
+      futures += RapidsShuffleInternalManagerBase.queueReadTask(() => {
         var success = false
         // Track the size we need to release (starts with the pre-acquired size)
         var sizeToRelease = acquiredSize
