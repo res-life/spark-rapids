@@ -94,6 +94,35 @@ class FailingTestColumnarBatchSerializer extends TestColumnarBatchSerializer {
   }
 }
 
+class OutOfOrderTestColumnarBatchSerializer(
+    firstStarted: CountDownLatch,
+    secondSerialized: CountDownLatch,
+    releaseFirst: CountDownLatch) extends TestColumnarBatchSerializer {
+  override def newInstance(): SerializerInstance = new TestColumnarBatchSerializerInstance() {
+    override def serializeStream(s: OutputStream): SerializationStream =
+      new TestColumnarBatchSerializationStream(s) {
+        private var key = -1
+
+        override def writeKey[T: ClassTag](value: T): SerializationStream = {
+          key = value.asInstanceOf[Int]
+          if (key == 0) {
+            firstStarted.countDown()
+            releaseFirst.await()
+          }
+          super.writeKey(value)
+        }
+
+        override def writeValue[T: ClassTag](value: T): SerializationStream = {
+          val result = super.writeValue(value)
+          if (key == 7) {
+            secondSerialized.countDown()
+          }
+          result
+        }
+      }
+  }
+}
+
 class TestColumnarBatchSerializerInstance extends SerializerInstance {
   override def serialize[T: ClassTag](t: T): ByteBuffer = {
     val bos = new ByteArrayOutputStream()
@@ -225,6 +254,36 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       1024 * 1024, shuffleExecutorComponents, numWriterThreads)
   }
 
+  private def useUncompressedShuffleOutput(): Unit = {
+    conf.set("spark.shuffle.compress", "false")
+    when(blockManager.serializerManager)
+      .thenReturn(new SerializerManager(new TestColumnarBatchSerializer(), conf))
+  }
+
+  private def readPartitionKeys(
+      writer: RapidsShuffleThreadedWriter[Int, ColumnarBatch],
+      partitionId: Int): Seq[Int] = {
+    val lengths = writer.getPartitionLengths
+    val partitionStart = lengths.take(partitionId).sum
+    val partitionEnd = partitionStart + lengths(partitionId)
+    val keys = new ArrayBuffer[Int]()
+    val input = new RandomAccessFile(outputFile, "r")
+    try {
+      input.seek(partitionStart)
+      while (input.getFilePointer < partitionEnd) {
+        keys += input.readInt()
+        val numColumns = input.readInt()
+        (0 until numColumns).foreach { _ =>
+          val size = input.readInt()
+          input.seek(input.getFilePointer + size)
+        }
+      }
+    } finally {
+      input.close()
+    }
+    keys.toSeq
+  }
+
   /**
    * Verify write results including partition data presence.
    * @param partitionsWithData Set of partition IDs that should have data
@@ -285,6 +344,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(numWriterThreads, 0)
     TaskContext.setTaskContext(taskContext)
     MockitoAnnotations.openMocks(this).close()
+    conf.set("spark.shuffle.compress", "true")
     tempDir = Utils.createTempDir()
     outputFile = File.createTempFile("shuffle", null, tempDir)
     taskMetrics = spy(new TaskMetrics)
@@ -498,6 +558,53 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   // ==================== Merger Pool Tests ====================
 
+  test("writer pool preserves partition order when compression completes out of order") {
+    useUncompressedShuffleOutput()
+    val firstStarted = new CountDownLatch(1)
+    val secondSerialized = new CountDownLatch(1)
+    val releaseFirst = new CountDownLatch(1)
+    when(dependency.serializer).thenReturn(
+      new OutOfOrderTestColumnarBatchSerializer(firstStarted, secondSerialized, releaseFirst))
+    val writer = createWriter()
+    @volatile var writeFailure: Throwable = null
+    val writeThread = new Thread(() => {
+      try {
+        writer.write(createTestRecords(Iterator(0, 7)))
+      } catch {
+        case t: Throwable => writeFailure = t
+      }
+    })
+
+    try {
+      writeThread.start()
+      assert(firstStarted.await(5, TimeUnit.SECONDS), "first compression task did not start")
+      assert(secondSerialized.await(5, TimeUnit.SECONDS),
+        "second compression task did not complete ahead of the first")
+      releaseFirst.countDown()
+      writeThread.join(5000)
+      assert(!writeThread.isAlive, "writer did not finish")
+      if (writeFailure != null) {
+        throw writeFailure
+      }
+      writer.stop(true)
+      assert(readPartitionKeys(writer, 0) === Seq(0, 7))
+    } finally {
+      releaseFirst.countDown()
+      writer.stop(false)
+      if (writeThread.isAlive) {
+        writeThread.join(5000)
+      }
+    }
+  }
+
+  test("writer pool preserves record order across multiple batches") {
+    useUncompressedShuffleOutput()
+    val writer = createWriter()
+    writer.write(createTestRecords(Iterator(0, 6, 7, 14)))
+    writer.stop(true)
+    assert(readPartitionKeys(writer, 0) === Seq(0, 7, 14))
+  }
+
   test("mergers yield while producers are blocked") {
     val producersBlocked = new CountDownLatch(numWriterThreads)
     val releaseProducers = new CountDownLatch(1)
@@ -589,8 +696,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
   test("merger resumes after compression future completes") {
     val blockersStarted = new CountDownLatch(numWriterThreads)
     val releaseBlockers = new CountDownLatch(1)
-    val writerBlockers = (0 until numWriterThreads).map { slotNum =>
-      RapidsShuffleInternalManagerBase.queueWriteTask(slotNum, () => {
+    val writerBlockers = (0 until numWriterThreads).map { _ =>
+      RapidsShuffleInternalManagerBase.queueWriteTask(() => {
         blockersStarted.countDown()
         releaseBlockers.await()
         null
@@ -642,8 +749,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
   test("merger propagates an exceptional compression future without hanging") {
     val blockersStarted = new CountDownLatch(numWriterThreads)
     val releaseBlockers = new CountDownLatch(1)
-    val writerBlockers = (0 until numWriterThreads).map { slotNum =>
-      RapidsShuffleInternalManagerBase.queueWriteTask(slotNum, () => {
+    val writerBlockers = (0 until numWriterThreads).map { _ =>
+      RapidsShuffleInternalManagerBase.queueWriteTask(() => {
         blockersStarted.countDown()
         releaseBlockers.await()
         null

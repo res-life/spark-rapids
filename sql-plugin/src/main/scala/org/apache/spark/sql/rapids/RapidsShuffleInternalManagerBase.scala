@@ -183,14 +183,12 @@ object RapidsShuffleInternalManagerBase extends Logging {
   // shuffle mode is utilized, as per these configs:
   //   spark.rapids.shuffle.multiThreaded.writer.threads
   //   spark.rapids.shuffle.multiThreaded.reader.threads
-  private var numWriterSlots: Int = 0
   private var numReaderSlots: Int = 0
-  private lazy val writerSlots = new mutable.HashMap[Int, Slot]()
   private lazy val readerSlots = new mutable.HashMap[Int, Slot]()
+  private var writerPool: ExecutorService = _
   private var mergerPool: ExecutorService = _
 
   // used by callers to obtain a unique slot
-  private val writerSlotNumber = new AtomicInteger(0)
   private val readerSlotNumber= new AtomicInteger(0)
   private val mergerSlotNumber = new AtomicInteger(0)
 
@@ -203,12 +201,12 @@ object RapidsShuffleInternalManagerBase extends Logging {
    * @note there must not be an uncaught exception while calling
    *      `task`.
    */
-  def queueWriteTask[T](slotNum: Int, task: Callable[T]): Future[T] = {
-    writerSlots(slotNum % numWriterSlots).offer(task)
+  def queueWriteTask[T](task: Callable[T]): Future[T] = {
+    writerPool.submit(task)
   }
 
-  def queueWriteTask[T](slotNum: Int, task: FutureTask[T]): Future[T] = {
-    writerSlots(slotNum % numWriterSlots).execute(task)
+  def queueWriteTask[T](task: FutureTask[T]): Future[T] = {
+    writerPool.execute(task)
     task
   }
 
@@ -241,19 +239,17 @@ object RapidsShuffleInternalManagerBase extends Logging {
       numReaderThreads: Int): Unit = synchronized {
     if (!mtShuffleInitialized) {
       mtShuffleInitialized = true
-      numWriterSlots = numWriterThreads
       numReaderSlots = numReaderThreads
-      if (writerSlots.isEmpty) {
-        (0 until numWriterSlots).foreach { slotNum =>
-          writerSlots.put(slotNum, new Slot(slotNum, "writer"))
-        }
-      }
       if (readerSlots.isEmpty) {
         (0 until numReaderSlots).foreach { slotNum =>
           readerSlots.put(slotNum, new Slot(slotNum, "reader"))
         }
       }
       if (numWriterThreads > 0) {
+        writerPool = Executors.newFixedThreadPool(numWriterThreads, new ThreadFactoryBuilder()
+          .setNameFormat("rapids-shuffle-writer-%d")
+          .setDaemon(true)
+          .build())
         mergerPool = Executors.newFixedThreadPool(numWriterThreads, new ThreadFactoryBuilder()
           .setNameFormat("rapids-shuffle-merger-%d")
           .setDaemon(true)
@@ -264,8 +260,10 @@ object RapidsShuffleInternalManagerBase extends Logging {
 
   def stopThreadPool(): Unit = synchronized {
     mtShuffleInitialized = false
-    writerSlots.values.foreach(_.shutdownNow())
-    writerSlots.clear()
+    if (writerPool != null) {
+      writerPool.shutdownNow()
+      writerPool = null
+    }
 
     readerSlots.values.foreach(_.shutdownNow())
     readerSlots.clear()
@@ -276,12 +274,10 @@ object RapidsShuffleInternalManagerBase extends Logging {
     }
 
     // Reset slot counters to ensure clean state for next initialization
-    writerSlotNumber.set(0)
     readerSlotNumber.set(0)
     mergerSlotNumber.set(0)
   }
 
-  def getNextWriterSlot: Int = Math.abs(writerSlotNumber.incrementAndGet())
   def getNextReaderSlot: Int = Math.abs(readerSlotNumber.incrementAndGet())
   def getNextMergerSlot: Int = Math.abs(mergerSlotNumber.incrementAndGet())
 }
@@ -686,11 +682,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
     var previousMaxPartition: Int = -1
     var isMultiBatch: Boolean = false
 
-    // Maps partitionId -> writer slot number. Ensures all compression tasks for the same
-    // partition run serially in the same single-threaded slot, preventing concurrent writes
-    // to the same partition buffer. Different partitions can still run in parallel.
-    val partitionSlots = new ConcurrentHashMap[Int, Int]()
-
     // Create initial batch state
     var currentBatch = createBatchState(currentBatchId, mapOutputWriter)
 
@@ -759,10 +750,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         limiter.acquireOrBlock(recordSize)
         waitTimeOnLimiterNs += System.nanoTime() - waitOnLimiterStart
 
-        // Get or assign a slot number for this partition to ensure
-        // all tasks for the same partition run serially in the same slot
-        val slotNum = partitionSlots.computeIfAbsent(reducePartitionId,
-          _ => RapidsShuffleInternalManagerBase.getNextWriterSlot)
         val batchForRecord = currentBatch
         val compressionTask = new FutureTask[CompressedRecord](new Callable[CompressedRecord] {
           override def call(): CompressedRecord = {
@@ -814,7 +801,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             batchForRecord.scheduleMerger()
           }
         }
-        val future = RapidsShuffleInternalManagerBase.queueWriteTask(slotNum, compressionTask)
+        val future = RapidsShuffleInternalManagerBase.queueWriteTask(compressionTask)
 
         currentBatch.maxPartitionIdQueued.synchronized {
           recordQueue.add(future)
