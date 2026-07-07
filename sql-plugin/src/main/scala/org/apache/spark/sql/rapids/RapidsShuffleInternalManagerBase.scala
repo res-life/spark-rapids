@@ -1089,7 +1089,9 @@ class BytesInFlightLimiter(maxBytesInFlight: Long) {
     notifyAll()
   }
 
-  def getBytesInFlight: Long = inFlight
+  def getBytesInFlight: Long = synchronized {
+    inFlight
+  }
 }
 
 abstract class RapidsShuffleThreadedReaderBase[K, C](

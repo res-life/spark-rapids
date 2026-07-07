@@ -284,6 +284,22 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     keys.toSeq
   }
 
+  private def countThreads(prefix: String): Int = {
+    Thread.getAllStackTraces.keySet().toArray.count {
+      case thread: Thread => thread.isAlive && thread.getName.startsWith(prefix)
+      case _ => false
+    }
+  }
+
+  private def waitForThreadCount(prefix: String, expectedMaximum: Int): Unit = {
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    while (countThreads(prefix) > expectedMaximum && System.nanoTime() < deadline) {
+      Thread.sleep(10)
+    }
+    assert(countThreads(prefix) <= expectedMaximum,
+      s"Threads with prefix $prefix did not fall to $expectedMaximum or fewer")
+  }
+
   /**
    * Verify write results including partition data presence.
    * @param partitionsWithData Set of partition IDs that should have data
@@ -603,6 +619,69 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     writer.write(createTestRecords(Iterator(0, 6, 7, 14)))
     writer.stop(true)
     assert(readPartitionKeys(writer, 0) === Seq(0, 7, 14))
+  }
+
+  test("shuffle pools remain bounded across shutdown and reinitialization") {
+    val writerThreads = 2
+    val readerThreads = 3
+    RapidsShuffleInternalManagerBase.stopThreadPool()
+    waitForThreadCount("rapids-shuffle-writer-", 0)
+    waitForThreadCount("rapids-shuffle-reader-", 0)
+    waitForThreadCount("rapids-shuffle-merger-", 0)
+
+    try {
+      RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(writerThreads, readerThreads)
+      val writerStarted = new CountDownLatch(writerThreads)
+      val readerStarted = new CountDownLatch(readerThreads)
+      val mergerStarted = new CountDownLatch(writerThreads)
+      val releaseTasks = new CountDownLatch(1)
+      val writerTasks = (0 until writerThreads * 2).map { _ =>
+        RapidsShuffleInternalManagerBase.queueWriteTask(() => {
+          writerStarted.countDown()
+          releaseTasks.await()
+          null
+        })
+      }
+      val readerTasks = (0 until readerThreads * 2).map { _ =>
+        RapidsShuffleInternalManagerBase.queueReadTask(() => {
+          readerStarted.countDown()
+          releaseTasks.await()
+          null
+        })
+      }
+      val mergerTasks = (0 until writerThreads * 2).map { _ =>
+        RapidsShuffleInternalManagerBase.queueMergerTask(() => {
+          mergerStarted.countDown()
+          releaseTasks.await()
+          null
+        })
+      }
+
+      assert(writerStarted.await(5, TimeUnit.SECONDS), "writer pool did not reach its limit")
+      assert(readerStarted.await(5, TimeUnit.SECONDS), "reader pool did not reach its limit")
+      assert(mergerStarted.await(5, TimeUnit.SECONDS), "merger pool did not reach its limit")
+      assert(countThreads("rapids-shuffle-writer-") <= writerThreads)
+      assert(countThreads("rapids-shuffle-reader-") <= readerThreads)
+      assert(countThreads("rapids-shuffle-merger-") <= writerThreads)
+
+      releaseTasks.countDown()
+      (writerTasks ++ readerTasks ++ mergerTasks).foreach(_.get(5, TimeUnit.SECONDS))
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+      waitForThreadCount("rapids-shuffle-writer-", 0)
+      waitForThreadCount("rapids-shuffle-reader-", 0)
+      waitForThreadCount("rapids-shuffle-merger-", 0)
+
+      RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(1, 1)
+      RapidsShuffleInternalManagerBase.queueWriteTask(() => null).get(5, TimeUnit.SECONDS)
+      RapidsShuffleInternalManagerBase.queueReadTask(() => null).get(5, TimeUnit.SECONDS)
+      RapidsShuffleInternalManagerBase.queueMergerTask(() => null).get(5, TimeUnit.SECONDS)
+      assert(countThreads("rapids-shuffle-writer-") <= 1)
+      assert(countThreads("rapids-shuffle-reader-") <= 1)
+      assert(countThreads("rapids-shuffle-merger-") <= 1)
+    } finally {
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+      RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(numWriterThreads, 0)
+    }
   }
 
   test("mergers yield while producers are blocked") {
