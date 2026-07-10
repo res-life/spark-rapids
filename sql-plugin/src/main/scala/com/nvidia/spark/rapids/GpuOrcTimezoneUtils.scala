@@ -20,33 +20,18 @@ import ai.rapids.cudf.{ColumnView, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
-import java.time.{DateTimeException, LocalDateTime, ZoneId}
+import java.time.{DateTimeException, ZoneId}
 import java.util.Optional
 import scala.collection.mutable.ArrayBuffer
 
 object GpuOrcTimezoneUtils {
 
   /**
-   * Returns the fixed ORC base-timestamp offset, in microseconds, between the JVM timezone and
-   * UTC at 2015-01-01 00:00:00.
-   *
-   * ORC derives a base timestamp from the writer timezone using this reference instant. The JNI
-   * conversion uses the offset to reconstruct that timestamp frame before applying the negative
-   * nanos borrow.
-   */
-  private def getOffsetForJanuaryFirst2015(jvmTz: ZoneId): Long = {
-    val t1 = LocalDateTime.of(2015, 1, 1, 0, 0, 0).atZone(jvmTz).toInstant.getEpochSecond
-    val t2 = LocalDateTime.of(2015, 1, 1, 0, 0, 0).atZone(ZoneId.of("UTC")).toInstant.getEpochSecond
-    val diffMicros: Long = (t2 - t1) * 1000000L // convert seconds to microseconds
-    diffMicros
-  }
-
-  /**
    * Rebase ORC timestamps considering writer and reader timezones.
    *
    * Uses the JNI kernel `GpuTimeZoneDB.convertOrcTimezones` for both same- and cross-timezone
    * reads. Even when the timezone rules match, the kernel must reconstruct the writer-specific
-   * ORC epoch before deciding whether to apply the negative nanos borrow.
+   * ORC 2015 base before deciding whether to apply the negative nanos borrow.
    *
    * @param input the input table (timestamps read as UTC via ignoreTimezoneInStripeFooter)
    * @param writerTimezone the writer timezone from the ORC stripe footer
@@ -86,20 +71,16 @@ object GpuOrcTimezoneUtils {
    */
   private def rebaseWithWriterTimezone(
       input: Table, writerTz: String, readerTz: String): Table = {
-    val writerZoneId = ZoneId.of(writerTz)
-    val writerBaseOffsetMicros = getOffsetForJanuaryFirst2015(writerZoneId)
-
     withResource(input) { _ =>
       withResource(GpuTimeZoneDB.buildOrcTimezoneContext(writerTz, readerTz)) { tzCtx =>
         val newColumns = (0 until input.getNumberOfColumns).safeMap { colIdx =>
           val col = input.getColumn(colIdx)
           val dType = col.getType
           if (dType.hasTimeResolution) {
-            GpuTimeZoneDB.convertOrcTimezones(col, writerBaseOffsetMicros, tzCtx)
+            GpuTimeZoneDB.convertOrcTimezones(col, tzCtx)
           } else if (dType == DType.LIST || dType == DType.STRUCT) {
             withResource(new ArrayBuffer[ColumnView]) { toClose =>
-              val rebased = rebaseNestedWithWriterTimezone(
-                col, tzCtx, writerBaseOffsetMicros, toClose)
+              val rebased = rebaseNestedWithWriterTimezone(col, tzCtx, toClose)
               if (rebased eq col) {
                 col.incRefCount()
               } else {
@@ -121,17 +102,15 @@ object GpuOrcTimezoneUtils {
   private def rebaseNestedWithWriterTimezone(
       col: ColumnView,
       tzCtx: GpuTimeZoneDB.OrcTimezoneContext,
-      writerBaseOffsetMicros: Long,
       toClose: ArrayBuffer[ColumnView]): ColumnView = {
     val addToClose = (v: ColumnView) => { toClose += v; v }
     val dType = col.getType
 
     if (dType.hasTimeResolution) {
-      GpuTimeZoneDB.convertOrcTimezones(col, writerBaseOffsetMicros, tzCtx)
+      GpuTimeZoneDB.convertOrcTimezones(col, tzCtx)
     } else if (dType == DType.LIST) {
       val child = addToClose(col.getChildColumnView(0))
-      val newChild = rebaseNestedWithWriterTimezone(
-        child, tzCtx, writerBaseOffsetMicros, toClose)
+      val newChild = rebaseNestedWithWriterTimezone(child, tzCtx, toClose)
       if (newChild ne child) {
         col.replaceListChild(addToClose(newChild))
       } else {
@@ -140,8 +119,7 @@ object GpuOrcTimezoneUtils {
     } else if (dType == DType.STRUCT) {
       val newViews = (0 until col.getNumChildren).safeMap { i =>
         val child = addToClose(col.getChildColumnView(i))
-        val newChild = rebaseNestedWithWriterTimezone(
-          child, tzCtx, writerBaseOffsetMicros, toClose)
+        val newChild = rebaseNestedWithWriterTimezone(child, tzCtx, toClose)
         if (newChild ne child) addToClose(newChild)
         newChild
       }
