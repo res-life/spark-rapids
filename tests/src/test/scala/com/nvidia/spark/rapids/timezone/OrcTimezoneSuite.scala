@@ -57,6 +57,8 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
 
   private val RowCount = 1024L * 1024L
+  // Exact Asia/Shanghai writer=reader reproducer for the ORC epoch borrow correction.
+  private val ShanghaiEpochBorrowTsUs = -7713116127L
 
   // Includes legacy/alias IDs ("US/Pacific", "PST") alongside canonical region IDs to
   // exercise the read path against the kinds of writer-timezone strings ORC footers can
@@ -70,9 +72,6 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "US/Pacific",
     "PST"
   )
-
-  // start timestamp from 1970-01-02 instead of 1970-01-01 to avoid the epoch boundary issue:
-  // https://github.com/rapidsai/cudf/issues/21993
 
   private val minTs =
     LocalDateTime.of(1970, 1, 2, 0, 0, 0).toEpochSecond(ZoneOffset.UTC) *
@@ -90,6 +89,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     import spark.implicits._
     val rowCount = RowCount.toInt
     val micros = random.longs(rowCount.toLong, minTs, maxTs).toArray
+    micros(0) = ShanghaiEpochBorrowTsUs
     val rows = (0 until rowCount).map { i =>
       val us = micros(i)
       val seconds = Math.floorDiv(us, TimeUnit.SECONDS.toMicros(1))
