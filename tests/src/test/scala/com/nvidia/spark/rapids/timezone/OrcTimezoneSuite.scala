@@ -18,11 +18,11 @@ package com.nvidia.spark.rapids.timezone
 
 import java.io.File
 import java.sql.Timestamp
-import java.time.{Instant, LocalDateTime, ZoneOffset}
+import java.time.{Instant, LocalDateTime, ZoneId, ZoneOffset}
 import java.util.{Random, TimeZone}
 import java.util.concurrent.TimeUnit
 
-import com.nvidia.spark.rapids.SparkQueryCompareTestSuite
+import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -55,6 +55,26 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
  * Each stripe has a timezone in its metadata.
  */
 class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
+
+  test("resolve and compare ORC writer timezones") {
+    val defaultZone = ZoneId.systemDefault()
+    assert(GpuOrcTimezoneUtils.resolveWriterTimezone("") === defaultZone)
+
+    val aliases = Seq("America/Los_Angeles", "US/Pacific", "PST")
+      .map(GpuOrcTimezoneUtils.resolveWriterTimezone)
+    assert(GpuOrcTimezoneUtils.writerTimezonesShareRules(aliases))
+    assert(GpuOrcTimezoneUtils.writerTimezonesShareRules(Seq(
+      GpuOrcTimezoneUtils.resolveWriterTimezone("UTC"),
+      GpuOrcTimezoneUtils.resolveWriterTimezone("GMT"))))
+    assert(!GpuOrcTimezoneUtils.writerTimezonesShareRules(Seq(
+      GpuOrcTimezoneUtils.resolveWriterTimezone("UTC"),
+      GpuOrcTimezoneUtils.resolveWriterTimezone("America/Los_Angeles"))))
+
+    val error = intercept[IllegalArgumentException] {
+      GpuOrcTimezoneUtils.resolveWriterTimezone("Not/AZone")
+    }
+    assert(error.getMessage.contains("Not/AZone"))
+  }
 
   private val RowCount = 1024L * 1024L
   // Exact Asia/Shanghai writer=reader reproducer for the ORC epoch borrow correction.

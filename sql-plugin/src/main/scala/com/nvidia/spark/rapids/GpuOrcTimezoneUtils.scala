@@ -26,6 +26,28 @@ import scala.collection.mutable.ArrayBuffer
 
 object GpuOrcTimezoneUtils {
 
+  /** Resolve an ORC stripe footer timezone once at the metadata boundary. */
+  private[rapids] def resolveWriterTimezone(writerTimezone: String): ZoneId = {
+    if (writerTimezone.isEmpty) {
+      ZoneId.systemDefault()
+    } else {
+      try {
+        ZoneId.of(writerTimezone, ZoneId.SHORT_IDS)
+      } catch {
+        case e: DateTimeException =>
+          throw new IllegalArgumentException(
+            s"Unrecognized writer timezone in ORC stripe footer: '$writerTimezone'", e)
+      }
+    }
+  }
+
+  /** Return whether every timezone has the same rules. */
+  private[rapids] def writerTimezonesShareRules(writerTimezones: Iterable[ZoneId]): Boolean = {
+    writerTimezones.headOption.forall { head =>
+      writerTimezones.forall(_.getRules == head.getRules)
+    }
+  }
+
   /**
    * Rebase ORC timestamps considering writer and reader timezones.
    *
@@ -34,29 +56,11 @@ object GpuOrcTimezoneUtils {
    * ORC 2015 base before deciding whether to apply the negative nanos borrow.
    *
    * @param input the input table (timestamps read as UTC via ignoreTimezoneInStripeFooter)
-   * @param writerTimezone the writer timezone from the ORC stripe footer
+   * @param writerTimezone the resolved writer timezone from the ORC stripe footer
    * @return table with rebased timestamp columns; input is closed
    */
-  def rebaseOrcTimestamps(input: Table, writerTimezone: String): Table = {
-    val readerTz = ZoneId.systemDefault().getId
-    // ORC footers can carry legacy/short IDs (e.g. "PST", "CST", "ACT") that
-    // ZoneId.of() rejects on its own, so resolve via the SHORT_IDS alias map.
-    // We deliberately avoid TimeZone.getTimeZone here because it silently
-    // returns "GMT" for any unrecognized id, which would silently corrupt
-    // cross-TZ reads. ZoneId.of throws DateTimeException instead.
-    val writerTz = if (writerTimezone.isEmpty) {
-      readerTz
-    } else {
-      try {
-        ZoneId.of(writerTimezone, ZoneId.SHORT_IDS).getId
-      } catch {
-        case e: DateTimeException =>
-          throw new IllegalArgumentException(
-            s"Unrecognized writer timezone in ORC stripe footer: '$writerTimezone'", e)
-      }
-    }
-
-    rebaseWithWriterTimezone(input, writerTz, readerTz)
+  def rebaseOrcTimestamps(input: Table, writerTimezone: ZoneId): Table = {
+    rebaseWithWriterTimezone(input, writerTimezone.getId, ZoneId.systemDefault().getId)
   }
 
   /**

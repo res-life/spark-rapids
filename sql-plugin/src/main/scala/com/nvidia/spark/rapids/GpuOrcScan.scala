@@ -21,6 +21,7 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.nio.charset.StandardCharsets
+import java.time.ZoneId
 import java.util
 import java.util.regex.Pattern
 
@@ -757,7 +758,7 @@ case class OrcOutputStripe(
  * @param readerOpts  options for creating a RecordReader.
  * @param blockIterator an iterator over the ORC output stripes
  * @param requestedMapping the optional requested column ids
- * @param writerTimezone the writer timezone from ORC stripe footers; empty string if absent
+ * @param writerTimezone the resolved writer timezone from ORC stripe footers
  */
 case class OrcPartitionReaderContext(
     filePath: Path,
@@ -771,14 +772,14 @@ case class OrcPartitionReaderContext(
     readerOpts: Reader.Options,
     blockIterator: BufferedIterator[OrcOutputStripe],
     requestedMapping: Option[Array[Int]],
-    writerTimezone: String = "")
+    writerTimezone: ZoneId = ZoneId.systemDefault())
 
 case class OrcBlockMetaForSplitCheck(
     filePath: Path,
     typeDescription: TypeDescription,
     compressionKind: CompressionKind,
     requestedMapping: Option[Array[Int]],
-    writerTimezone: String) {
+    writerTimezone: ZoneId) {
 }
 
 object OrcBlockMetaForSplitCheck {
@@ -794,7 +795,7 @@ object OrcBlockMetaForSplitCheck {
   def apply(filePathStr: String, typeDescription: TypeDescription,
       compressionKind: CompressionKind,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: String): OrcBlockMetaForSplitCheck = {
+      writerTimezone: ZoneId): OrcBlockMetaForSplitCheck = {
     OrcBlockMetaForSplitCheck(new Path(new URI(filePathStr)), typeDescription,
       compressionKind, requestedMapping, writerTimezone)
   }
@@ -981,25 +982,17 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       return true
     }
 
-    if (nextMeta.writerTimezone != curMeta.writerTimezone &&
-        !writerTimezonesShareRules(curMeta.writerTimezone, nextMeta.writerTimezone)) {
-      // Compare by timezone rule-equivalence (e.g. "US/Pacific" vs "America/Los_Angeles",
-      // "UTC" vs "GMT", "" vs the JVM default) rather than by raw string equality, so that
-      // semantically equivalent IDs across files don't trigger a spurious split. Mirrors
-      // the intra-file check in buildOutputStripes.
+    if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(
+        Seq(curMeta.writerTimezone, nextMeta.writerTimezone))) {
+      // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
+      // across files don't trigger a spurious split. Mirrors the intra-file check in
+      // buildOutputStripes.
       logInfo(s"ORC writer timezone for the next file ${nextMeta.filePath}" +
         s" doesn't match current ${curMeta.filePath}, splitting it into another batch!")
       return true
     }
 
     false
-  }
-
-  private def writerTimezonesShareRules(a: String, b: String): Boolean = {
-    val readerDefaultTz = java.util.TimeZone.getDefault
-    val tzA = if (a.isEmpty) readerDefaultTz else java.util.TimeZone.getTimeZone(a)
-    val tzB = if (b.isEmpty) readerDefaultTz else java.util.TimeZone.getTimeZone(b)
-    tzA.hasSameRules(tzB)
   }
 
   protected implicit def toStripe(block: DataBlockBase): OrcStripeWithMeta =
@@ -1552,7 +1545,7 @@ private case class GpuOrcFileFilterHandler(
         ignoreNonUtf8BloomFilter: Boolean,
         writerVersion: OrcFile.WriterVersion,
         updatedReadSchema: TypeDescription,
-        fileIncluded: Array[Boolean]): (Seq[OrcOutputStripe], String) = {
+        fileIncluded: Array[Boolean]): (Seq[OrcOutputStripe], ZoneId) = {
       val columnMapping = columnRemap(fileIncluded)
       val writerTimezones = new ArrayBuffer[String]()
       val wrappedGen = (stripe: StripeInformation, footer: OrcProto.StripeFooter,
@@ -1565,26 +1558,15 @@ private case class GpuOrcFileFilterHandler(
         wrappedGen, evolution,
         sargApp, sargColumns, ignoreNonUtf8BloomFilter,
         writerVersion, fileIncluded, columnMapping).toSeq
-      val distinctTzs = writerTimezones.distinct
-      // Compare by timezone rule-equivalence (e.g. "US/Pacific" vs "America/Los_Angeles",
-      // "UTC" vs "GMT", "" vs the JVM default) rather than by raw string equality, so that
-      // semantically equivalent IDs across stripes don't trigger a spurious failure.
-      val writerTz = if (distinctTzs.length <= 1) {
-        distinctTzs.headOption.getOrElse("")
-      } else {
-        val readerDefaultTz = java.util.TimeZone.getDefault
-        val zones = distinctTzs.map { tz =>
-          if (tz.isEmpty) readerDefaultTz else java.util.TimeZone.getTimeZone(tz)
-        }
-        val head = zones.head
-        if (zones.tail.forall(head.hasSameRules)) {
-          // Prefer the first non-empty TZ string so downstream code carries an explicit ID.
-          distinctTzs.find(_.nonEmpty).getOrElse("")
-        } else {
-          throw new IOException(
-            s"ORC file has stripes with different writer timezones: " +
-            s"${distinctTzs.mkString(", ")}. This is not supported on GPU.")
-        }
+      val distinctTzs = writerTimezones.distinct.map(
+        GpuOrcTimezoneUtils.resolveWriterTimezone)
+      // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
+      // across stripes don't trigger a spurious failure.
+      val writerTz = distinctTzs.headOption.getOrElse(ZoneId.systemDefault())
+      if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(distinctTzs)) {
+        throw new IOException(
+          s"ORC file has stripes with different writer timezones: " +
+          s"${distinctTzs.mkString(", ")}. This is not supported on GPU.")
       }
       (outputStripes, writerTz)
     }
@@ -2100,7 +2082,7 @@ class MultiFileCloudOrcPartitionReader(
       updatedReadSchema: TypeDescription,
       compressionKind: CompressionKind,
       requestedMapping: Option[Array[Int]],
-      writerTimezone: String = "",
+      writerTimezone: ZoneId = ZoneId.systemDefault(),
       override val allPartValues: Option[Array[(Long, InternalRow)]] = None)
     extends HostMemoryBuffersWithMetaDataBase
 
@@ -2312,7 +2294,7 @@ class MultiFileCloudOrcPartitionReader(
       isCaseSensitive: Boolean,
       partedFile: PartitionedFile,
       allPartValues: Option[Array[(Long, InternalRow)]],
-      writerTimezone: String) : Iterator[ColumnarBatch] = {
+      writerTimezone: ZoneId) : Iterator[ColumnarBatch] = {
     val (parseOpts, tableSchema) = closeOnExcept(hostBuffer) { _ =>
       getORCOptionsAndSchema(memFileSchema, requestedMapping, readDataSchema)
     }
@@ -2612,7 +2594,7 @@ private[rapids] case class OrcDataStripe(stripeMeta: OrcStripeWithMeta) extends 
 /** Orc extra information containing the requested column ids for the current coalescing stripes */
 case class OrcExtraInfo(
     requestedMapping: Option[Array[Int]],
-    writerTimezone: String = "") extends ExtraInfo
+    writerTimezone: ZoneId = ZoneId.systemDefault()) extends ExtraInfo
 
 // Contains meta about a single stripe of an ORC file
 private case class OrcSingleStripeMeta(
@@ -2902,7 +2884,7 @@ object MakeOrcTableProducer extends Logging {
       splits: Array[PartitionedFile],
       debugDumpPrefix: Option[String],
       debugDumpAlways: Boolean,
-      writerTimezone: String = ""
+      writerTimezone: ZoneId = ZoneId.systemDefault()
   ): GpuDataProducer[Table] = {
     debugDumpPrefix.foreach { prefix =>
       if (debugDumpAlways) {
@@ -2965,7 +2947,7 @@ case class OrcTableReader(
     splits: Array[PartitionedFile],
     debugDumpPrefix: Option[String],
     debugDumpAlways: Boolean,
-    writerTimezone: String = "") extends GpuDataProducer[Table] with Logging {
+    writerTimezone: ZoneId = ZoneId.systemDefault()) extends GpuDataProducer[Table] with Logging {
 
   private[this] val reader = new ORCChunkedReader(chunkSizeByteLimit,
     maxChunkedReaderMemoryUsageSizeBytes, parseOpts, buffer, offset, bufferSize)
