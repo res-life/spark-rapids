@@ -1067,14 +1067,14 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
 # The `spark.sql.session.timeZone` here does not impact reader and writer timezone, but any way, we test it.
 # For the tests that reader and writer timezones are different, refer to `OrcTimezoneSuite`
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('end_timestamp', [None, datetime(2199, 1, 1, tzinfo=timezone.utc)], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize("timezone_pair", [("UTC", "Asia/Shanghai"), ("Asia/Shanghai", "UTC"), ("Asia/Shanghai", "America/Los_Angeles")], ids=idfn)
 @tz_sensitive_test
-def test_orc_reader_writer_the_same_timezone(reader_confs, end_timestamp, spark_tmp_path, v1_enabled_list, timezone_pair):
+def test_orc_reader_writer_the_same_timezone(reader_confs, spark_tmp_path, v1_enabled_list, timezone_pair):
     d_gen = DateGen(start=date(1590, 1, 1))
     # Update start year to 1590 when https://github.com/NVIDIA/spark-rapids/issues/13272 is fixed.
-    ts_gen = TimestampGen(start=datetime(1970, 1, 2, tzinfo=timezone.utc), end=end_timestamp, nullable=True)
+    # The default end covers the full timestamp range through year 9999, including years > 2200.
+    ts_gen = TimestampGen(start=datetime(1970, 1, 2, tzinfo=timezone.utc), nullable=True)
     date_timestamp_gens = [('c1', d_gen), ('c2', ts_gen)]
 
     (write_timezone, read_timezone) = timezone_pair
