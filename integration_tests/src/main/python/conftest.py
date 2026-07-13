@@ -100,6 +100,21 @@ def is_databricks_runtime():
 def is_emr_runtime():
     return runtime_env() == "emr"
 
+def is_emr_version_or_later(major, minor):
+    if not is_emr_runtime():
+        return False
+
+    version_parts = os.environ.get('EMR_VERSION', '').split('.')
+    if len(version_parts) < 2:
+        return False
+
+    try:
+        emr_version = (int(version_parts[0]), int(version_parts[1]))
+    except ValueError:
+        return False
+
+    return emr_version >= (major, minor)
+
 def is_dataproc_runtime():
     return runtime_env() == "dataproc"
 
