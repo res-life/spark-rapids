@@ -723,7 +723,8 @@ def test_csv_read_gbk_encoded_data(std_input_path):
 @pytest.mark.xfail(
     condition=is_emr_runtime() and is_emr_version_or_later(7, 13),
     reason='EMR 7.13+ CPU CSV behavior differs from OSS Spark; '
-           'see https://github.com/NVIDIA/cudf-spark/issues/15254')
+           'see https://github.com/NVIDIA/cudf-spark/issues/15254',
+    strict=True)
 def test_csv_read_blank_lines_with_control_chars(std_input_path, v1_enabled_list):
     """Verify that lines consisting only of control characters (<= 0x20) are filtered out,
     matching Spark CPU behavior (CSVExprUtils.filterCommentAndEmpty uses String.trim)."""
