@@ -104,14 +104,17 @@ def is_emr_version_or_later(major, minor):
     if not is_emr_runtime():
         return False
 
-    version_parts = os.environ.get('EMR_VERSION', '').split('.')
-    if len(version_parts) < 2:
-        return False
+    version = os.environ.get('EMR_VERSION')
+    if version is None:
+        raise RuntimeError('EMR_VERSION must be set for the EMR runtime')
 
-    try:
-        emr_version = (int(version_parts[0]), int(version_parts[1]))
-    except ValueError:
-        return False
+    # The EMR test runner supplies <major>.<minor> or <major>.<minor>.<patch>.
+    version_parts = version.split('.')
+    if len(version_parts) not in (2, 3) or not all(part.isdigit() for part in version_parts):
+        raise ValueError(
+            f'EMR_VERSION must use <major>.<minor>[.<patch>] format, got {version!r}')
+
+    emr_version = (int(version_parts[0]), int(version_parts[1]))
 
     return emr_version >= (major, minor)
 
