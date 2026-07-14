@@ -106,7 +106,7 @@ def is_emr_version_or_later(major, minor):
 
     version = os.environ.get('EMR_VERSION')
     if version is None:
-        raise RuntimeError('EMR_VERSION must be set for the EMR runtime')
+        return False
 
     # The EMR test runner supplies <major>.<minor> or <major>.<minor>.<patch>.
     version_parts = version.split('.')
