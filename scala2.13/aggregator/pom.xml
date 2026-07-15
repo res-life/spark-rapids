@@ -69,7 +69,7 @@
             <groupId>com.nvidia</groupId>
             <artifactId>rapids-4-spark-private_${scala.binary.version}</artifactId>
             <version>${spark-rapids-private.version}</version>
-            <classifier>${spark.version.classifier}</classifier>
+            <classifier>${spark-rapids-private.classifier}</classifier>
         </dependency>
         <!--
             Placeholders for the maximum number of delta-lake shims per Spark shim:
