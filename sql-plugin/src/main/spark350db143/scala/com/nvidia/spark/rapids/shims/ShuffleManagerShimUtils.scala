@@ -27,5 +27,7 @@ spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.shims
 
 object ShuffleManagerShimUtils {
-  def eagerlyInitialized = true  
+  def eagerlyInitialized = true
+
+  def supportsAutoConfiguration = true
 }

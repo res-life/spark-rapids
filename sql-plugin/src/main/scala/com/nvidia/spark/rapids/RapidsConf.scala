@@ -2213,6 +2213,19 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
+  val SHUFFLE_MANAGER_AUTO_CONFIGURE_DEFAULT = true
+
+  val SHUFFLE_MANAGER_AUTO_CONFIGURE =
+    conf("spark.rapids.shuffle.autoConfigure.enabled")
+      .doc("Automatically configure spark.shuffle.manager with the RAPIDS Shuffle Manager " +
+        "class for the active Spark shim when Spark supports configuring the shuffle manager " +
+        "during plugin initialization. An explicitly configured spark.shuffle.manager takes " +
+        "precedence.")
+      .internal()
+      .startupOnly()
+      .booleanConf
+      .createWithDefault(SHUFFLE_MANAGER_AUTO_CONFIGURE_DEFAULT)
+
   object RapidsShuffleManagerMode extends Enumeration {
     val UCX, CACHE_ONLY, MULTITHREADED = Value
   }
@@ -3821,6 +3834,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shouldHiveReadDecimals: Boolean = get(ENABLE_READ_HIVE_DECIMALS)
 
   lazy val shuffleManagerEnabled: Boolean = get(SHUFFLE_MANAGER_ENABLED)
+
+  lazy val shuffleManagerAutoConfigure: Boolean = get(SHUFFLE_MANAGER_AUTO_CONFIGURE)
 
   lazy val shuffleManagerMode: String = get(SHUFFLE_MANAGER_MODE)
 
