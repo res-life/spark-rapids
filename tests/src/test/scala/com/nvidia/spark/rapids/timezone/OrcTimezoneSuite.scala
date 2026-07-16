@@ -135,10 +135,6 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       .orc(outputPath.getCanonicalPath)
   }
 
-  private def readFile(path: File)(spark: SparkSession): DataFrame = {
-    spark.read.orc(path.getCanonicalPath)
-  }
-
   for {
     writerTimeZone <- timezones
     v1SourceList <- v1SourceLists
@@ -163,7 +159,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
             val (fromCpu, fromGpu) = runOnCpuAndGpu(
               spark => {
                 setSessionTimeZone(spark, readerTimeZone)
-                readFile(fileRoot)(spark)
+                spark.read.orc(fileRoot.getCanonicalPath)
               },
               _.orderBy("id"),
               conf = conf,
