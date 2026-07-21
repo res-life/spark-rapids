@@ -50,6 +50,7 @@ import org.apache.spark.sql.functions._
  */
 class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfterAll {
 
+  private val originalTimeZone = TimeZone.getDefault
   private val enablePerfTest = java.lang.Boolean.getBoolean("enableOrcTimeZonePerf")
   private val writerTZ = System.getProperty("orcPerfWriterTZ", "America/Los_Angeles")
   private val readerTZ = System.getProperty("orcPerfReaderTZ", "UTC")
@@ -95,9 +96,13 @@ class OrcTimezonePerfSuite extends SparkQueryCompareTestSuite with BeforeAndAfte
   }
 
   override def afterAll(): Unit = {
-    super.afterAll()
-    if (enablePerfTest) {
-      FileUtils.deleteRecursively(new File(path))
+    try {
+      super.afterAll()
+      if (enablePerfTest) {
+        FileUtils.deleteRecursively(new File(path))
+      }
+    } finally {
+      TimeZone.setDefault(originalTimeZone)
     }
   }
 

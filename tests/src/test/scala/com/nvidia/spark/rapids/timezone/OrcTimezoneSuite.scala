@@ -180,38 +180,43 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
   } {
     val dsLabel = if (v1SourceList == "orc") "v1" else "v2"
     test(s"ORC timezone matrix ($dsLabel) for writer timezone $writerTimeZone") {
+      val originalTimeZone = TimeZone.getDefault
       // Use a fixed seed for reproducibility; tests must not be non-deterministic.
       val runSeed = 42L
       val random = new Random(runSeed)
       val conf = baseConf(v1SourceList)
       val existClass = if (v1SourceList == "orc") "GpuFileSourceScanExec" else "GpuBatchScan"
 
-      withTempPath { fileRoot =>
-        withCpuSparkSession(spark => {
-          setSessionTimeZone(spark, writerTimeZone)
-          writeFile(spark, fileRoot, random)
-        }, conf = conf)
+      try {
+        withTempPath { fileRoot =>
+          withCpuSparkSession(spark => {
+            setSessionTimeZone(spark, writerTimeZone)
+            writeFile(spark, fileRoot, random)
+          }, conf = conf)
 
-        timezones.foreach { readerTimeZone =>
-          withClue(s"writerTimezone=$writerTimeZone readerTimezone=$readerTimeZone " +
-              s"datasource=$dsLabel") {
-            val (fromCpu, fromGpu) = runOnCpuAndGpu(
-              spark => {
-                setSessionTimeZone(spark, readerTimeZone)
-                spark.read.orc(fileRoot.getCanonicalPath)
-              },
-              _.orderBy("id"),
-              conf = conf,
-              repart = 0,
-              skipCanonicalizationCheck = true,
-              existClasses = existClass)
-            compareResults(
-              sort = false,
-              floatEpsilon = 0.0,
-              fromCpu = fromCpu,
-              fromGpu = fromGpu)
+          timezones.foreach { readerTimeZone =>
+            withClue(s"writerTimezone=$writerTimeZone readerTimezone=$readerTimeZone " +
+                s"datasource=$dsLabel") {
+              val (fromCpu, fromGpu) = runOnCpuAndGpu(
+                spark => {
+                  setSessionTimeZone(spark, readerTimeZone)
+                  spark.read.orc(fileRoot.getCanonicalPath)
+                },
+                _.orderBy("id"),
+                conf = conf,
+                repart = 0,
+                skipCanonicalizationCheck = true,
+                existClasses = existClass)
+              compareResults(
+                sort = false,
+                floatEpsilon = 0.0,
+                fromCpu = fromCpu,
+                fromGpu = fromGpu)
+            }
           }
         }
+      } finally {
+        TimeZone.setDefault(originalTimeZone)
       }
     }
   }
