@@ -44,6 +44,7 @@ import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext,
 import org.apache.spark.internal.Logging
 import org.apache.spark.rapids.hybrid.HybridExecutionUtils
 import org.apache.spark.serializer.{JavaSerializer, KryoSerializer}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
@@ -67,9 +68,9 @@ object RapidsShuffleManagerAutoConfigurator {
   }
 }
 
-case class ColumnarOverrideRules() extends ColumnarRule with Logging {
-  lazy val overrides: Rule[SparkPlan] = GpuOverrides()
-  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides()
+case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRule with Logging {
+  lazy val overrides: Rule[SparkPlan] = GpuOverrides(sparkSession)
+  lazy val overrideTransitions: Rule[SparkPlan] = new GpuTransitionOverrides(sparkSession)
 
   override def preColumnarTransitions : Rule[SparkPlan] = overrides
 
