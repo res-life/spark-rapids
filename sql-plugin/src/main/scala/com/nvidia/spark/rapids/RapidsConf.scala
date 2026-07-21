@@ -2206,25 +2206,15 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createWithDefault(true)
 
   val SHUFFLE_MANAGER_ENABLED = conf("spark.rapids.shuffle.enabled")
-    .doc("Enable or disable the RAPIDS Shuffle Manager at runtime. " +
-      "The [RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
-      "/additional-functionality/rapids-shuffle.html) must " +
-      "already be configured. When set to `false`, the built-in Spark shuffle will be used. ")
+    .doc("Enable or disable the RAPIDS Shuffle Manager implementation at runtime. On supported " +
+      "Spark versions, including Spark 4.0.0 and later, the " +
+      "[RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
+      "/additional-functionality/rapids-shuffle.html) is configured automatically unless " +
+      "spark.shuffle.manager is explicitly set. On earlier Spark versions, the RAPIDS Shuffle " +
+      "Manager must already be configured. When set to `false`, the built-in Spark shuffle " +
+      "implementation will be used. ")
     .booleanConf
     .createWithDefault(true)
-
-  val SHUFFLE_MANAGER_AUTO_CONFIGURE_DEFAULT = true
-
-  val SHUFFLE_MANAGER_AUTO_CONFIGURE =
-    conf("spark.rapids.shuffle.autoConfigure.enabled")
-      .doc("Automatically configure spark.shuffle.manager with the RAPIDS Shuffle Manager " +
-        "class for the active Spark shim when Spark supports configuring the shuffle manager " +
-        "during plugin initialization. An explicitly configured spark.shuffle.manager takes " +
-        "precedence.")
-      .internal()
-      .startupOnly()
-      .booleanConf
-      .createWithDefault(SHUFFLE_MANAGER_AUTO_CONFIGURE_DEFAULT)
 
   object RapidsShuffleManagerMode extends Enumeration {
     val UCX, CACHE_ONLY, MULTITHREADED = Value
@@ -3834,8 +3824,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shouldHiveReadDecimals: Boolean = get(ENABLE_READ_HIVE_DECIMALS)
 
   lazy val shuffleManagerEnabled: Boolean = get(SHUFFLE_MANAGER_ENABLED)
-
-  lazy val shuffleManagerAutoConfigure: Boolean = get(SHUFFLE_MANAGER_AUTO_CONFIGURE)
 
   lazy val shuffleManagerMode: String = get(SHUFFLE_MANAGER_MODE)
 

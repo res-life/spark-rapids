@@ -60,8 +60,6 @@ object RapidsShuffleManagerAutoConfigurator {
 
   def configure(conf: SparkConf): Unit = {
     if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
-        conf.getBoolean(RapidsConf.SHUFFLE_MANAGER_AUTO_CONFIGURE.key,
-          RapidsConf.SHUFFLE_MANAGER_AUTO_CONFIGURE_DEFAULT) &&
         !conf.contains(SHUFFLE_MANAGER_KEY)) {
       conf.set(SHUFFLE_MANAGER_KEY, ShimLoader.getRapidsShuffleManagerClass)
     }

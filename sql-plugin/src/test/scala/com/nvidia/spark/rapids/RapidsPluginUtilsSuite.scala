@@ -22,10 +22,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.apache.spark.SparkConf
 
 class RapidsPluginUtilsSuite extends AnyFunSuite {
-  test("shuffle manager auto-configuration is enabled by default") {
+  test("shuffle manager auto-configuration follows Spark initialization support") {
     val conf = new SparkConf(false)
-
-    assert(new RapidsConf(conf).shuffleManagerAutoConfigure)
 
     RapidsShuffleManagerAutoConfigurator.configure(conf)
 
@@ -36,18 +34,8 @@ class RapidsPluginUtilsSuite extends AnyFunSuite {
     }
   }
 
-  test("shuffle manager auto-configuration can be disabled") {
-    val conf = new SparkConf(false)
-      .set(RapidsConf.SHUFFLE_MANAGER_AUTO_CONFIGURE.key, "false")
-
-    RapidsShuffleManagerAutoConfigurator.configure(conf)
-
-    assert(!conf.contains("spark.shuffle.manager"))
-  }
-
   test("shuffle manager auto-configuration preserves an explicit setting") {
     val conf = new SparkConf(false)
-      .set(RapidsConf.SHUFFLE_MANAGER_AUTO_CONFIGURE.key, "true")
       .set("spark.shuffle.manager", "custom.ShuffleManager")
 
     RapidsShuffleManagerAutoConfigurator.configure(conf)
@@ -55,9 +43,9 @@ class RapidsPluginUtilsSuite extends AnyFunSuite {
     assert(conf.get("spark.shuffle.manager") === "custom.ShuffleManager")
   }
 
-  test("enabled shuffle manager auto-configuration follows Spark initialization support") {
+  test("shuffle manager runtime setting does not control auto-configuration") {
     val conf = new SparkConf(false)
-      .set(RapidsConf.SHUFFLE_MANAGER_AUTO_CONFIGURE.key, "true")
+      .set(RapidsConf.SHUFFLE_MANAGER_ENABLED.key, "false")
 
     RapidsShuffleManagerAutoConfigurator.configure(conf)
 
