@@ -16,13 +16,15 @@
 
 package com.nvidia.spark.rapids
 
+import java.time.{DateTimeException, ZoneId}
+import java.util.Optional
+
+import scala.collection.mutable.ArrayBuffer
+
 import ai.rapids.cudf.{ColumnView, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
-import java.time.{DateTimeException, ZoneId}
-import java.util.Optional
-import scala.collection.mutable.ArrayBuffer
 
 object GpuOrcTimezoneUtils {
 
