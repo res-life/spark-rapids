@@ -64,6 +64,17 @@ object GpuOrcTimezoneUtils {
   }
 
   /**
+   * Rebase ORC timestamps assuming the writer timezone matches the system default timezone.
+   *
+   * @param input the input table (timestamps read as UTC via ignoreTimezoneInStripeFooter)
+   * @return table with rebased timestamp columns; input is closed
+   */
+  @deprecated("Use rebaseOrcTimestamps with the ORC writer timezone", "26.08")
+  def rebaseTimeZone(input: Table): Table = {
+    rebaseOrcTimestamps(input, ZoneId.systemDefault())
+  }
+
+  /**
    * Rebase timestamps using the writer and reader timezones.
    *
    * cuDF reads ORC timestamps with `ignoreTimezoneInStripeFooter`, so the base_timestamp
