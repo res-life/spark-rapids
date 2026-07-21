@@ -77,7 +77,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     assert(error.getMessage.contains("Not/AZone"))
   }
 
-  private val RowCount = 1024L * 1024L
+  private val RandomRowCount = 4096L
   // Exact Asia/Shanghai writer=reader reproducer for the ORC epoch borrow correction.
   private val ShanghaiEpochBorrowTsUs = -7713116127L
 
@@ -101,6 +101,23 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     LocalDateTime.of(9999, 12, 31, 23, 59, 59).toEpochSecond(ZoneOffset.UTC) *
       TimeUnit.SECONDS.toMicros(1) + 999999L
 
+  // 2024 DST transitions for the two canonical DST zones in the test matrix.
+  private val DstTransitions = Seq(
+    Instant.parse("2024-03-10T07:00:00Z"), // America/New_York spring forward
+    Instant.parse("2024-11-03T06:00:00Z"), // America/New_York fall back
+    Instant.parse("2024-03-10T10:00:00Z"), // America/Los_Angeles spring forward
+    Instant.parse("2024-11-03T09:00:00Z")  // America/Los_Angeles fall back
+  )
+
+  private val ExplicitTimestampMicros = {
+    val dstBoundaries = DstTransitions.flatMap { transition =>
+      val atTransition = TimeUnit.SECONDS.toMicros(transition.getEpochSecond) +
+        TimeUnit.NANOSECONDS.toMicros(transition.getNano)
+      Seq(atTransition - 1L, atTransition, atTransition + 1L)
+    }
+    Seq(ShanghaiEpochBorrowTsUs, minTs, maxTs) ++ dstBoundaries
+  }
+
   private def setSessionTimeZone(spark: SparkSession, tzId: String): Unit = {
     TimeZone.setDefault(TimeZone.getTimeZone(tzId))
     spark.conf.set("spark.sql.session.timeZone", tzId)
@@ -108,11 +125,9 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
 
   private def fileDataFrame(spark: SparkSession, random: Random): DataFrame = {
     import spark.implicits._
-    val rowCount = RowCount.toInt
-    val micros = random.longs(rowCount.toLong, minTs, maxTs).toArray
-    micros(0) = ShanghaiEpochBorrowTsUs
-    val rows = (0 until rowCount).map { i =>
-      val us = micros(i)
+    val randomMicros = random.longs(RandomRowCount, minTs, maxTs).toArray
+    val micros = ExplicitTimestampMicros ++ randomMicros
+    val rows = micros.zipWithIndex.map { case (us, i) =>
       val seconds = Math.floorDiv(us, TimeUnit.SECONDS.toMicros(1))
       val microsWithinSecond = Math.floorMod(us, TimeUnit.SECONDS.toMicros(1))
       val ts = Timestamp.from(Instant.ofEpochSecond(seconds, microsWithinSecond * 1000L))
