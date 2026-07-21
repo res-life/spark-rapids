@@ -162,15 +162,7 @@ object RapidsShuffleInternalManagerBase extends Logging {
   private var readerPool: ExecutorService = _
   private var mergerPool: ExecutorService = _
 
-  // Kept for compatibility with callers that used the old slot-based merger API.
-  private val mergerSlotNumber = new AtomicInteger(0)
-
   private var mtShuffleInitialized: Boolean = false
-
-  /** Send a compression task to the shared writer pool. */
-  def queueWriteTask[T](task: Callable[T]): Future[T] = {
-    writerPool.submit(task)
-  }
 
   def queueWriteTask[T](task: FutureTask[T]): Future[T] = {
     writerPool.execute(task)
@@ -180,17 +172,6 @@ object RapidsShuffleInternalManagerBase extends Logging {
   /** Send a deserialization task to the shared reader pool. */
   def queueReadTask[T](task: Callable[T]): Future[T] = {
     readerPool.submit(task)
-  }
-
-  /** Send a short-lived merger step to the shared merger pool. */
-  def queueMergerTask[T](task: Callable[T]): Future[T] = {
-    mergerPool.submit(task)
-  }
-
-  // Keep the slot-based signature for compatibility. Cooperative merger steps do not need
-  // affinity, so the slot number is intentionally ignored.
-  def queueMergerTask[T](_slotNum: Int, task: Callable[T]): Future[T] = {
-    queueMergerTask(task)
   }
 
   def executeMergerTask(task: Runnable): Unit = mergerPool.execute(task)
@@ -235,11 +216,7 @@ object RapidsShuffleInternalManagerBase extends Logging {
       mergerPool.shutdownNow()
       mergerPool = null
     }
-
-    mergerSlotNumber.set(0)
   }
-
-  def getNextMergerSlot: Int = Math.abs(mergerSlotNumber.incrementAndGet())
 }
 
 trait RapidsShuffleWriterShimHelper {
