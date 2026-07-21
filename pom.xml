@@ -2086,9 +2086,3 @@ This will force full Scala code rebuild in downstream modules.
         </pluginRepository>
     </pluginRepositories>
 </project>
-
-
-
-
-
-
