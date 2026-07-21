@@ -22,7 +22,8 @@ import java.time.{Instant, LocalDateTime, ZoneId, ZoneOffset}
 import java.util.{Random, TimeZone}
 import java.util.concurrent.TimeUnit
 
-import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, SparkQueryCompareTestSuite}
+import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, RapidsConf, RapidsReaderType,
+  SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -123,7 +124,10 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     spark.conf.set("spark.sql.session.timeZone", tzId)
   }
 
-  private def fileDataFrame(spark: SparkSession, random: Random): DataFrame = {
+  private def fileDataFrame(
+      spark: SparkSession,
+      random: Random,
+      idOffset: Long = 0L): DataFrame = {
     import spark.implicits._
     val randomMicros = random.longs(RandomRowCount, minTs, maxTs).toArray
     val micros = ExplicitTimestampMicros ++ randomMicros
@@ -131,7 +135,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       val seconds = Math.floorDiv(us, TimeUnit.SECONDS.toMicros(1))
       val microsWithinSecond = Math.floorMod(us, TimeUnit.SECONDS.toMicros(1))
       val ts = Timestamp.from(Instant.ofEpochSecond(seconds, microsWithinSecond * 1000L))
-      (i.toLong, ts)
+      (idOffset + i, ts)
     }
     rows.toDF("id", "ts")
   }
@@ -173,6 +177,61 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
               spark.read.schema(readSchema).orc(fileRoot.getCanonicalPath)
             },
             identity,
+            conf = conf,
+            repart = 0,
+            skipCanonicalizationCheck = true,
+            existClasses = "GpuFileSourceScanExec")
+          compareResults(
+            sort = false,
+            floatEpsilon = 0.0,
+            fromCpu = fromCpu,
+            fromGpu = fromGpu)
+        }
+      } finally {
+        TimeZone.setDefault(originalTimeZone)
+      }
+    }
+  }
+
+  Seq(false, true).foreach { useChunkedReader =>
+    test(s"coalescing files with different writer timezones, chunked=$useChunkedReader") {
+      val originalTimeZone = TimeZone.getDefault
+      val conf = baseConf("orc")
+        .set(RapidsConf.ORC_READER_TYPE.key, RapidsReaderType.COALESCING.toString)
+        .set(RapidsConf.CHUNKED_READER.key, useChunkedReader.toString)
+        .set(RapidsConf.MAX_READER_BATCH_SIZE_ROWS.key, Integer.MAX_VALUE.toString)
+        .set(RapidsConf.MAX_READER_BATCH_SIZE_BYTES.key, (1L << 30).toString)
+        .set("spark.sql.files.maxPartitionBytes", (1L << 30).toString)
+
+      try {
+        withTempPath { fileRoot =>
+          val utcPath = new File(fileRoot, "utc")
+          val losAngelesPath = new File(fileRoot, "los-angeles")
+          withCpuSparkSession(spark => {
+            setSessionTimeZone(spark, "UTC")
+            fileDataFrame(spark, new Random(1L))
+              .coalesce(1)
+              .write
+              .orc(utcPath.getCanonicalPath)
+
+            setSessionTimeZone(spark, "America/Los_Angeles")
+            fileDataFrame(spark, new Random(2L), idOffset = RandomRowCount * 2)
+              .coalesce(1)
+              .write
+              .orc(losAngelesPath.getCanonicalPath)
+          }, conf = conf)
+
+          val (fromCpu, fromGpu) = runOnCpuAndGpu(
+            spark => {
+              setSessionTimeZone(spark, "UTC")
+              val df = spark.read.orc(
+                utcPath.getCanonicalPath,
+                losAngelesPath.getCanonicalPath)
+              assert(df.queryExecution.executedPlan.execute().getNumPartitions === 1,
+                "the two ORC files must be assigned to one coalescing reader")
+              df
+            },
+            _.orderBy("id"),
             conf = conf,
             repart = 0,
             skipCanonicalizationCheck = true,
