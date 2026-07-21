@@ -1004,8 +1004,9 @@ trait OrcCommonFunctions extends OrcCodecWritingHelper { self: FilePartitionRead
       // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
       // across files don't trigger a spurious split. Mirrors the intra-file check in
       // buildOutputStripes.
-      logInfo(s"ORC writer timezone for the next file ${nextMeta.filePath}" +
-        s" doesn't match current ${curMeta.filePath}, splitting it into another batch!")
+      logInfo(s"ORC writer timezone for the next file ${nextMeta.filePath} " +
+        s"(${nextMeta.writerTimezone}) doesn't match current ${curMeta.filePath} " +
+        s"(${curMeta.writerTimezone}), splitting it into another batch!")
       return true
     }
 
