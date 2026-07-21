@@ -1564,26 +1564,21 @@ private case class GpuOrcFileFilterHandler(
         updatedReadSchema: TypeDescription,
         fileIncluded: Array[Boolean]): (Seq[OrcOutputStripe], ZoneId) = {
       val columnMapping = columnRemap(fileIncluded)
-      val writerTimezones = new ArrayBuffer[String]()
-      val wrappedGen = (stripe: StripeInformation, footer: OrcProto.StripeFooter,
-          colMapping: Array[Int]) => {
-        val tz = if (footer.hasWriterTimezone) footer.getWriterTimezone else ""
-        writerTimezones += tz
-        buildOutputStripe(stripe, footer, colMapping)
-      }
       val outputStripes = OrcShims.filterStripes(stripes, conf, orcReader, dataReader,
-        wrappedGen, evolution,
+        buildOutputStripe, evolution,
         sargApp, sargColumns, ignoreNonUtf8BloomFilter,
         writerVersion, fileIncluded, columnMapping).toSeq
-      val distinctTzs = writerTimezones.distinct.map(
-        GpuOrcTimezoneUtils.resolveWriterTimezone)
+      val distinctTzs = outputStripes.map { stripe =>
+        if (stripe.footer.hasWriterTimezone) stripe.footer.getWriterTimezone else ""
+      }.distinct.map(GpuOrcTimezoneUtils.resolveWriterTimezone)
       // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
       // across stripes don't trigger a spurious failure.
       val writerTz = distinctTzs.headOption.getOrElse(ZoneId.systemDefault())
       if (!GpuOrcTimezoneUtils.writerTimezonesShareRules(distinctTzs)) {
         throw new IOException(
           s"ORC file has stripes with different writer timezones: " +
-          s"${distinctTzs.mkString(", ")}. This is not supported on GPU.")
+          s"${distinctTzs.mkString(", ")}. This is not supported on GPU. Set " +
+          s"spark.rapids.sql.format.orc.read.enabled=false to fall back to the CPU ORC reader.")
       }
       (outputStripes, writerTz)
     }
