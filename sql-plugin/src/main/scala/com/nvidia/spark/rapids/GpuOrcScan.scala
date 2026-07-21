@@ -40,7 +40,7 @@ import com.nvidia.spark.rapids.SchemaUtils._
 import com.nvidia.spark.rapids.filecache.FileCache
 import com.nvidia.spark.rapids.fileio.hadoop.HadoopFileIO
 import com.nvidia.spark.rapids.io.async._
-import com.nvidia.spark.rapids.jni.{CastStrings, RmmSpark}
+import com.nvidia.spark.rapids.jni.{CastStrings, GpuTimeZoneDB, RmmSpark}
 import com.nvidia.spark.rapids.shims.{ColumnDefaultValuesShims, GpuOrcDataReader, NullOutputStreamShim, OrcCastingShims, OrcReadingShims, OrcShims, ShimFilePartitionReaderFactory}
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.output.CountingOutputStream
@@ -321,7 +321,10 @@ object GpuOrcScan {
       // {bool, integer types} to timestamp(micro seconds)
       case (DType.BOOL8 | DType.INT8 | DType.INT16 | DType.INT32 | DType.INT64,
       DType.TIMESTAMP_MICROSECONDS) =>
-        OrcCastingShims.castIntegerToTimestamp(col, fromDt)
+        withResource(OrcCastingShims.castIntegerToTimestamp(col, fromDt)) { timestamp =>
+          GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+            timestamp, ZoneId.systemDefault().normalized())
+        }
 
       // float to bool/integral
       case (DType.FLOAT32 | DType.FLOAT64, DType.BOOL8 | DType.INT8 | DType.INT16 | DType.INT32
@@ -417,7 +420,10 @@ object GpuOrcScan {
           withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_MILLIS)) { thousand =>
             withResource(milliseconds.mul(thousand)) { microseconds =>
                 withResource(microseconds.castTo(DType.INT64)) { longVec =>
-                  longVec.castTo(DType.TIMESTAMP_MICROSECONDS)
+                  withResource(longVec.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamp =>
+                    GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+                      timestamp, ZoneId.systemDefault().normalized())
+                  }
                 }
             }
           }
@@ -3011,10 +3017,10 @@ object MakeOrcTableProducer extends Logging {
         }
       }
       metrics(NUM_OUTPUT_BATCHES) += 1
-      val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(table, tableSchema,
+      val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
+      val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
         readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(evolvedSchemaTable, writerTimezone)
-      new SingleGpuDataProducer(rebased)
+      new SingleGpuDataProducer(evolvedSchemaTable)
     }
   }
 }
@@ -3068,9 +3074,9 @@ case class OrcTableReader(
       }
     }
     metrics(NUM_OUTPUT_BATCHES) += 1
-    val evolvedSchemaTable = SchemaUtils.evolveSchemaIfNeededAndClose(table, tableSchema,
+    val rebased = GpuOrcTimezoneUtils.rebaseOrcTimestamps(table, writerTimezone)
+    SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
       readDataSchema, isSchemaCaseSensitive, Some(GpuOrcScan.castColumnTo))
-    GpuOrcTimezoneUtils.rebaseOrcTimestamps(evolvedSchemaTable, writerTimezone)
   }
 
   override def close(): Unit = {

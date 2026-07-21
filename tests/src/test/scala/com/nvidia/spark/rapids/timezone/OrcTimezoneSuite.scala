@@ -26,6 +26,7 @@ import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, SparkQueryCompareTestSuite}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.types.{StructField, StructType, TimestampType}
 
 /**
  * Test suite for ORC reader/writer timezones.
@@ -133,6 +134,44 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       .write
       .mode("overwrite")
       .orc(outputPath.getCanonicalPath)
+  }
+
+  Seq(false, true).foreach { useChunkedReader =>
+    test(s"schema evolution from integer to timestamp, chunked=$useChunkedReader") {
+      val originalTimeZone = TimeZone.getDefault
+      val conf = baseConf("orc")
+        .set("spark.rapids.sql.reader.chunked", useChunkedReader.toString)
+      val readSchema = StructType(Seq(StructField("ts", TimestampType)))
+
+      try {
+        withTempPath { fileRoot =>
+          withCpuSparkSession(spark => {
+            import spark.implicits._
+            setSessionTimeZone(spark, "UTC")
+            // 2020-07-01T12:00:00Z exercises the DST offset in America/Los_Angeles.
+            Seq(1593604800).toDF("ts").write.orc(fileRoot.getCanonicalPath)
+          }, conf = conf)
+
+          val (fromCpu, fromGpu) = runOnCpuAndGpu(
+            spark => {
+              setSessionTimeZone(spark, "America/Los_Angeles")
+              spark.read.schema(readSchema).orc(fileRoot.getCanonicalPath)
+            },
+            identity,
+            conf = conf,
+            repart = 0,
+            skipCanonicalizationCheck = true,
+            existClasses = "GpuFileSourceScanExec")
+          compareResults(
+            sort = false,
+            floatEpsilon = 0.0,
+            fromCpu = fromCpu,
+            fromGpu = fromGpu)
+        }
+      } finally {
+        TimeZone.setDefault(originalTimeZone)
+      }
+    }
   }
 
   for {
