@@ -109,6 +109,7 @@ pipeline {
                     }
 
                     def title = githubHelper.getIssue().title.toLowerCase()
+                    env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
                     if (title ==~ /.*\[skip ci\].*/) {
                         githubHelper.updateCommitStatus("", "Skipped", GitHubCommitState.SUCCESS)
                         currentBuild.result == "SUCCESS"
