@@ -45,8 +45,10 @@ package org.apache.spark.sql.rapids
 
 import java.io._
 import java.nio.ByteBuffer
+import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -68,8 +70,10 @@ import org.apache.spark.executor.{ShuffleWriteMetrics, TaskMetrics}
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer._
 import org.apache.spark.shuffle.IndexShuffleBlockResolver
-import org.apache.spark.shuffle.api.ShuffleExecutorComponents
-import org.apache.spark.shuffle.sort.io.RapidsLocalDiskShuffleExecutorComponents
+import org.apache.spark.shuffle.api.{ShuffleExecutorComponents, ShuffleMapOutputWriter,
+  ShufflePartitionWriter, WritableByteChannelWrapper}
+import org.apache.spark.shuffle.sort.io.{RapidsLocalDiskShuffleExecutorComponents,
+  RapidsLocalDiskShuffleMapOutputWriter}
 import org.apache.spark.sql.rapids.shims.RapidsShuffleThreadedWriter
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.storage._
@@ -322,6 +326,59 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     assert(future.isDone)
     assert(future.isCancelled)
     assertThrows[CancellationException](future.get())
+  }
+
+  private def useOutOfOrderBatchCompletion(
+      firstBatchBlocked: CountDownLatch,
+      releaseFirstBatch: CountDownLatch,
+      secondBatchCompleted: CountDownLatch): Unit = {
+    val nextWriterNumber = new AtomicInteger(0)
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        val writerNumber = nextWriterNumber.getAndIncrement()
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def getPartitionWriter(reducePartitionId: Int): ShufflePartitionWriter = {
+            val delegate = super.getPartitionWriter(reducePartitionId)
+            new ShufflePartitionWriter {
+              override def openStream(): OutputStream = {
+                new FilterOutputStream(delegate.openStream()) {
+                  override def write(bytes: Array[Byte], offset: Int, length: Int): Unit = {
+                    if (writerNumber == 0 && reducePartitionId == 0) {
+                      firstBatchBlocked.countDown()
+                      assert(releaseFirstBatch.await(5, TimeUnit.SECONDS),
+                        "second batch merger did not complete")
+                    }
+                    super.write(bytes, offset, length)
+                  }
+
+                  override def close(): Unit = {
+                    super.close()
+                    if (writerNumber == 1 && reducePartitionId == numPartitions - 1) {
+                      // Batch 1 occupies the other merger thread. This marker cannot run until
+                      // the current batch 2 merger step returns and completes its future.
+                      RapidsShuffleInternalManagerBase.executeMergerTask(() => {
+                        secondBatchCompleted.countDown()
+                        releaseFirstBatch.countDown()
+                      })
+                    }
+                  }
+                }
+              }
+
+              override def openChannelWrapper(): Optional[WritableByteChannelWrapper] =
+                delegate.openChannelWrapper()
+
+              override def getNumBytesWritten(): Long = delegate.getNumBytesWritten
+            }
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -637,12 +694,31 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     }
   }
 
-  test("writer pool preserves record order across multiple batches") {
+  test("writer preserves record order when batch mergers complete out of order") {
     useUncompressedShuffleOutput()
+    val firstBatchBlocked = new CountDownLatch(1)
+    val releaseFirstBatch = new CountDownLatch(1)
+    val secondBatchCompleted = new CountDownLatch(1)
+    useOutOfOrderBatchCompletion(
+      firstBatchBlocked, releaseFirstBatch, secondBatchCompleted)
+
+    val keys = Iterator(0, 6, 7, 14).zipWithIndex.map { case (key, index) =>
+      if (index == 1) {
+        assert(firstBatchBlocked.await(5, TimeUnit.SECONDS), "first batch merger did not block")
+      }
+      key
+    }
     val writer = createWriter()
-    writer.write(createTestRecords(Iterator(0, 6, 7, 14)))
-    writer.stop(true)
-    assert(readPartitionKeys(writer, 0) === Seq(0, 7, 14))
+    try {
+      writer.write(createTestRecords(keys))
+      assert(secondBatchCompleted.await(5, TimeUnit.SECONDS),
+        "second batch merger did not finish before the first")
+      writer.stop(true)
+      assert(readPartitionKeys(writer, 0) === Seq(0, 7, 14))
+    } finally {
+      releaseFirstBatch.countDown()
+      writer.stop(false)
+    }
   }
 
   test("shuffle pools remain bounded across shutdown and reinitialization") {
