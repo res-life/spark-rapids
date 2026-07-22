@@ -161,8 +161,20 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       .orc(outputPath.getCanonicalPath)
   }
 
-  Seq(false, true).foreach { useChunkedReader =>
-    test(s"schema evolution from integer to timestamp, chunked=$useChunkedReader") {
+  private val timestampSourceTypes = Seq(
+    "boolean" -> "true",
+    "tinyint" -> "1",
+    "smallint" -> "1",
+    "int" -> "1593604800",
+    "bigint" -> "1593604800",
+    "float" -> "1593604800.25",
+    "double" -> "1593604800.25")
+
+  for {
+    (sourceType, value) <- timestampSourceTypes
+    useChunkedReader <- Seq(false, true)
+  } {
+    test(s"schema evolution from $sourceType to timestamp, chunked=$useChunkedReader") {
       val originalTimeZone = TimeZone.getDefault
       val conf = baseConf("orc")
         .set("spark.rapids.sql.reader.chunked", useChunkedReader.toString)
@@ -171,10 +183,10 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       try {
         withTempPath { fileRoot =>
           withCpuSparkSession(spark => {
-            import spark.implicits._
             setSessionTimeZone(spark, "UTC")
-            // 2020-07-01T12:00:00Z exercises the DST offset in America/Los_Angeles.
-            Seq(1593604800).toDF("ts").write.orc(fileRoot.getCanonicalPath)
+            spark.range(1)
+              .selectExpr(s"CAST($value AS $sourceType) AS ts")
+              .write.orc(fileRoot.getCanonicalPath)
           }, conf = conf)
 
           val (fromCpu, fromGpu) = runOnCpuAndGpu(
