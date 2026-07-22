@@ -134,7 +134,7 @@ object GpuOrcTimezoneUtils {
         col
       }
     } else if (dType == DType.STRUCT) {
-      val newViews = (0 until col.getNumChildren).safeMap { i =>
+      val newViews = (0 until col.getNumChildren).map { i =>
         val child = addToClose(col.getChildColumnView(i))
         val newChild = rebaseNestedWithWriterTimezone(child, tzCtx, toClose)
         if (newChild ne child) addToClose(newChild)
