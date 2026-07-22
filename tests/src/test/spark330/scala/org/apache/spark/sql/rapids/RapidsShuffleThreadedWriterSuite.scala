@@ -46,7 +46,7 @@ package org.apache.spark.sql.rapids
 import java.io._
 import java.nio.ByteBuffer
 import java.util.UUID
-import java.util.concurrent.{CountDownLatch, FutureTask, TimeUnit}
+import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -316,6 +316,12 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     })
     RapidsShuffleInternalManagerBase.executeMergerTask(task)
     task
+  }
+
+  private def assertCancelled(future: Future[_]): Unit = {
+    assert(future.isDone)
+    assert(future.isCancelled)
+    assertThrows[CancellationException](future.get())
   }
 
   /**
@@ -887,40 +893,55 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   // ==================== Cancellation Tests ====================
 
-  test("merger thread responds to cancellation during write") {
-    // Test that merger thread properly exits when task is cancelled.
-    // This validates the fix for zombie merger thread issue where
-    // merger could get stuck in wait() when task is killed.
-    val writer = createWriter()
+  test("shuffle pool shutdown cancels queued tasks") {
+    val numReaderThreads = 2
+    RapidsShuffleInternalManagerBase.stopThreadPool()
+    RapidsShuffleInternalManagerBase.startThreadPoolIfNeeded(
+      numWriterThreads, numReaderThreads)
 
-    // Start writing in a separate thread to simulate async operation
-    val writeThread = new Thread(() => {
-      try {
-        // Write some data that will keep merger busy
-        writer.write(createTestRecords(Iterator(0, 1, 2, 3, 4, 5, 6)))
-      } catch {
-        case _: Exception => // Expected if cancelled
+    val writerBlockersStarted = new CountDownLatch(numWriterThreads)
+    val readerBlockersStarted = new CountDownLatch(numReaderThreads)
+    val mergerBlockersStarted = new CountDownLatch(numWriterThreads)
+    val releaseBlockers = new CountDownLatch(1)
+
+    try {
+      (0 until numWriterThreads).foreach { _ =>
+        submitWriterTask {
+          writerBlockersStarted.countDown()
+          releaseBlockers.await()
+        }
       }
-    })
-    writeThread.start()
+      (0 until numReaderThreads).foreach { _ =>
+        RapidsShuffleInternalManagerBase.queueReadTask(() => {
+          readerBlockersStarted.countDown()
+          releaseBlockers.await()
+          null
+        })
+      }
+      (0 until numWriterThreads).foreach { _ =>
+        submitMergerTask {
+          mergerBlockersStarted.countDown()
+          releaseBlockers.await()
+        }
+      }
 
-    // Give writer time to start processing
-    Thread.sleep(100)
+      assert(writerBlockersStarted.await(5, TimeUnit.SECONDS))
+      assert(readerBlockersStarted.await(5, TimeUnit.SECONDS))
+      assert(mergerBlockersStarted.await(5, TimeUnit.SECONDS))
 
-    // Simulate task cancellation by calling stop(false)
-    // This should trigger cleanup and cancel merger futures
-    val stopStartTime = System.currentTimeMillis()
-    writer.stop(false)
-    val stopDuration = System.currentTimeMillis() - stopStartTime
+      val queuedWriter = submitWriterTask(())
+      val queuedReader = RapidsShuffleInternalManagerBase.queueReadTask(() => null)
+      val queuedMerger = submitMergerTask(())
 
-    // Wait for write thread to finish
-    writeThread.join(5000)
+      RapidsShuffleInternalManagerBase.stopThreadPool()
 
-    // Verify stop() completed in reasonable time (not stuck waiting for merger)
-    // If merger thread was stuck in wait(), stop() would hang
-    assert(stopDuration < 3000,
-      s"stop() took ${stopDuration}ms, suggesting merger thread may be stuck")
-    assert(!writeThread.isAlive, "Write thread should have finished")
+      assertCancelled(queuedWriter)
+      assertCancelled(queuedReader)
+      assertCancelled(queuedMerger)
+    } finally {
+      releaseBlockers.countDown()
+      RapidsShuffleInternalManagerBase.stopThreadPool()
+    }
   }
 
   test("merger thread handles interrupt flag correctly") {

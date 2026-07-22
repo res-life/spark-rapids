@@ -176,6 +176,13 @@ object RapidsShuffleInternalManagerBase extends Logging {
 
   def executeMergerTask(task: Runnable): Unit = mergerPool.execute(task)
 
+  private def shutdownNow(pool: ExecutorService): Unit = {
+    pool.shutdownNow().asScala.foreach {
+      case future: Future[_] => future.cancel(false)
+      case _ =>
+    }
+  }
+
   def startThreadPoolIfNeeded(
       numWriterThreads: Int,
       numReaderThreads: Int): Unit = synchronized {
@@ -203,17 +210,17 @@ object RapidsShuffleInternalManagerBase extends Logging {
   def stopThreadPool(): Unit = synchronized {
     mtShuffleInitialized = false
     if (writerPool != null) {
-      writerPool.shutdownNow()
+      shutdownNow(writerPool)
       writerPool = null
     }
 
     if (readerPool != null) {
-      readerPool.shutdownNow()
+      shutdownNow(readerPool)
       readerPool = null
     }
 
     if (mergerPool != null) {
-      mergerPool.shutdownNow()
+      shutdownNow(mergerPool)
       mergerPool = null
     }
   }
