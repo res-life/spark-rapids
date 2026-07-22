@@ -33,7 +33,7 @@
         <rapids.module>tests</rapids.module>
         <rapids.default.jar.excludePattern>**/*</rapids.default.jar.excludePattern>
         <rapids.shim.jar.phase>package</rapids.shim.jar.phase>
-        <parallelForkCount>4</parallelForkCount>
+        <parallelForkCount>8</parallelForkCount>
         <parallelSparkConfs/>
         <!-- Per-suite hang watchdog: a suite exceeding this many seconds gets a thread dump
              captured and its JVM killed, failing the run instead of hanging it. -->
