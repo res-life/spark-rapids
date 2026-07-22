@@ -944,7 +944,6 @@
         <spark.test.version>${spark.version}</spark.test.version>
         <parquet.hadoop.version>1.10.1</parquet.hadoop.version>
         <spark.version.classifier>spark${buildver}</spark.version.classifier>
-        <spark-rapids-private.classifier>${spark.version.classifier}</spark-rapids-private.classifier>
         <cuda.version>cuda12</cuda.version>
         <jni.classifier>${cuda.version}</jni.classifier>
         <spark-rapids-jni.version>26.08.0-SNAPSHOT</spark-rapids-jni.version>
