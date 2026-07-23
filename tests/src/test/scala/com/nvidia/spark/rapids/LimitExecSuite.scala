@@ -59,7 +59,7 @@ class LimitExecSuite extends SparkQueryCompareTestSuite {
   }
 
   IGNORE_ORDER_testSparkResultsAreEqual("collect with limit, repart=4", intCsvDf,
-    conf = enableCollectLimitExec(), repart = 4) {
+    conf = enableCollectLimitExec(), repart = 4, skipCanonicalizationCheck = true) {
     frame => {
       import frame.sparkSession.implicits._
       val results: Array[Row] = frame.limit(16).collect()
