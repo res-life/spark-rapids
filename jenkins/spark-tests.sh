@@ -180,14 +180,14 @@ if [[ $PARALLEL_TEST == "true" ]]; then
     PARALLELISM=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader | \
       awk '{if (MAX < $1){ MAX = $1}} END {print int(MAX / (2 * 1024))}')
   fi
-  # Limit parallelism to match the L4 premerge worker resource budget.
+  # parallelism > 5 could slow down the whole process, so we have a limitation for it
   # this is based on our CI gpu types, so we do not put it into the run_pyspark_from_build.sh
-  # 1. If TEST_MODE is DEFAULT: Always limit to 8.
+  # 1. If TEST_MODE is DEFAULT: Always limit to 5.
   # 2. If TEST_MODE is NOT DEFAULT:
   #    a. If user set PARALLELISM: Use it directly (no limit).
-  #    b. If user did NOT set PARALLELISM (calculated): Limit to 8.
+  #    b. If user did NOT set PARALLELISM (calculated): Limit to 5.
   if [[ "${TEST_MODE:-DEFAULT}" == "DEFAULT" || "${USER_SET_PARALLELISM}" == "false" ]]; then
-    [[ ${PARALLELISM} -gt 8 ]] && PARALLELISM=8
+    [[ ${PARALLELISM} -gt 5 ]] && PARALLELISM=5
   fi
   MEMORY_FRACTION=$(python -c "print(1/($PARALLELISM + 0.1))")
 

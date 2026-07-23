@@ -29,8 +29,7 @@ import org.apache.spark.sql.SparkSession
 
 class GpuSemaphoreSuite extends AnyFunSuite
     with BeforeAndAfterEach with MockitoSugar with TimeLimits  with TimeLimitedTests {
-  // SparkSession startup can exceed 10 seconds when multiple isolated test JVMs start together.
-  val timeLimit: Span = Span(30, Seconds)
+  val timeLimit: Span = Span(10, Seconds)
 
   override def beforeEach(): Unit = {
     ScalableTaskCompletion.reset()
