@@ -58,6 +58,9 @@ class LimitExecSuite extends SparkQueryCompareTestSuite {
     }
   }
 
+  // The unordered limit result is materialized into a LocalTableScan whose canonicalized plan
+  // includes row data. RAPIDS shuffle can return rows in a different order across runs, so the
+  // canonicalization comparison is not meaningful here; CPU/GPU result comparison still runs.
   IGNORE_ORDER_testSparkResultsAreEqual("collect with limit, repart=4", intCsvDf,
     conf = enableCollectLimitExec(), repart = 4, skipCanonicalizationCheck = true) {
     frame => {
