@@ -539,12 +539,17 @@ def _combination_for_position(position, factors):
         position //= size
     return tuple(indices[factor[1]] for factor in factors)
 
-def _select_precommit_cases(config, items):
-    """Select each-choice combinations while covering every parameter value at least once."""
-    if not is_precommit_run():
-        return
+def _reduced_it_required_items(items):
+    """Return (required_items, each_choice_test_count) for reduced IT selection.
 
-    original_items = list(items)
+    ``required_items`` is the subset of ``items`` to keep. Every value of every
+    stacked ``parametrize`` decorator is guaranteed to appear in at least one
+    kept item. Tests with fewer than two parametrize decorators, or whose
+    collected cases do not form the expected Cartesian product (iterator,
+    fixture, or otherwise dynamic parametrization), are kept in full. This is
+    each-choice (1-wise) coverage, not pairwise: parameter interactions are not
+    guaranteed. Kept as a pure helper so it can be unit tested without pytest
+    config or pre-commit gating (see reduced_it_selection_test.py)."""
     groups = {}
     for item in items:
         groups.setdefault(item.nodeid.split('[', 1)[0], []).append(item)
@@ -575,7 +580,15 @@ def _select_precommit_cases(config, items):
             combination = _combination_for_position(position, factors)
             if combination in selected_combinations:
                 required.add(item)
+    return required, each_choice_test_count
 
+def _select_precommit_cases(config, items):
+    """Select each-choice combinations while covering every parameter value at least once."""
+    if not is_precommit_run():
+        return
+
+    original_items = list(items)
+    required, each_choice_test_count = _reduced_it_required_items(original_items)
     items[:] = [item for item in original_items if item in required]
     deselected = [item for item in original_items if item not in required]
     if deselected:
