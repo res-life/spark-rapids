@@ -1123,6 +1123,7 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
 # The `spark.sql.session.timeZone` here does not impact reader and writer timezone, but any way, we test it.
 # For the tests that reader and writer timezones are different, refer to `OrcTimezoneSuite`
 @tz_sensitive_test
+@ignore_order(local=True)
 @pytest.mark.xfail(
     is_not_utc(),
     reason="https://github.com/rapidsai/cudf/issues/23422")
