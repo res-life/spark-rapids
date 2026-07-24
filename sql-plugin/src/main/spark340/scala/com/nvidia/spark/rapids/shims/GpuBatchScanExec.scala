@@ -139,7 +139,8 @@ case class GpuBatchScanExec(
         val newPartValues = commonPartitionValues.get.flatMap { case (partValue, numSplits) =>
           Seq.fill(numSplits)(partValue)
         }
-        k.copy(numPartitions = newPartValues.length, partitionValues = newPartValues)
+        KeyGroupedPartitioningShim.copyWithNewPartitionValues(
+          k, newPartValues, applyPartialClustering)
       case p => p
     }
   }
