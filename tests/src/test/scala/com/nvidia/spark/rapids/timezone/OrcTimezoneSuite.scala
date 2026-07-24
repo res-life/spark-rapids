@@ -224,13 +224,13 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
   }
 
   private val timestampSourceTypes = Seq(
-    "boolean" -> "true",
-    "tinyint" -> "1",
-    "smallint" -> "1",
-    "int" -> "1593604800",
-    "bigint" -> "1593604800",
-    "float" -> "1593604800.25",
-    "double" -> "1593604800.25")
+    "boolean" -> Seq("NULL", "false", "true"),
+    "tinyint" -> Seq("NULL", "-1", "0", "1"),
+    "smallint" -> Seq("NULL", "-1", "0", "1"),
+    "int" -> Seq("NULL", "-1", "0", "1593604800"),
+    "bigint" -> Seq("NULL", "-1", "0", "1593604800"),
+    "float" -> Seq("NULL", "-0.25", "0.0", "1593604800.25"),
+    "double" -> Seq("NULL", "-0.25", "0.0", "1593604800.25"))
 
   test("skip writer timezone validation without a timestamp projection") {
     val originalTimeZone = TimeZone.getDefault
@@ -288,7 +288,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
   }
 
   for {
-    (sourceType, value) <- timestampSourceTypes
+    (sourceType, values) <- timestampSourceTypes
     useChunkedReader <- Seq(false, true)
   } {
     test(s"schema evolution from $sourceType to timestamp, chunked=$useChunkedReader") {
@@ -301,8 +301,10 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
         withTempPath { fileRoot =>
           withCpuSparkSession(spark => {
             setSessionTimeZone(spark, "UTC")
-            spark.range(1)
-              .selectExpr(s"CAST($value AS $sourceType) AS ts")
+            val valueRows = values.map(v => s"($v)").mkString(", ")
+            spark.sql(
+              s"""SELECT CAST(value AS $sourceType) AS ts
+                 |FROM VALUES $valueRows AS t(value)""".stripMargin)
               .write.orc(fileRoot.getCanonicalPath)
           }, conf = conf)
 
