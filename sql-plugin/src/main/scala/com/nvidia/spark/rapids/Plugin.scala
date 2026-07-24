@@ -57,10 +57,14 @@ case class CudfVersionMismatchException(errorMsg: String) extends PluginExceptio
 
 object RapidsShuffleManagerAutoConfigurator {
   private val SHUFFLE_MANAGER_KEY = "spark.shuffle.manager"
+  private val SHUFFLE_DATA_IO_PLUGIN_KEY = "spark.shuffle.sort.io.plugin.class"
+  private val RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX = "RapidsLocalDiskShuffleDataIO"
 
   def configure(conf: SparkConf): Unit = {
     if (ShuffleManagerShimUtils.supportsAutoConfiguration &&
-        !conf.contains(SHUFFLE_MANAGER_KEY)) {
+        !conf.contains(SHUFFLE_MANAGER_KEY) &&
+        conf.getOption(SHUFFLE_DATA_IO_PLUGIN_KEY)
+          .forall(_.endsWith(RAPIDS_SHUFFLE_DATA_IO_CLASS_SUFFIX))) {
       conf.set(SHUFFLE_MANAGER_KEY, ShimLoader.getRapidsShuffleManagerClass)
     }
   }

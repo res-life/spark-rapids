@@ -43,6 +43,29 @@ class RapidsPluginUtilsSuite extends AnyFunSuite {
     assert(conf.get("spark.shuffle.manager") === "custom.ShuffleManager")
   }
 
+  test("shuffle manager auto-configuration allows the RAPIDS shuffle data IO plugin") {
+    val conf = new SparkConf(false)
+      .set("spark.shuffle.sort.io.plugin.class",
+        "org.apache.spark.shuffle.sort.io.RapidsLocalDiskShuffleDataIO")
+
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
+    if (ShuffleManagerShimUtils.supportsAutoConfiguration) {
+      assert(conf.get("spark.shuffle.manager") === ShimLoader.getRapidsShuffleManagerClass)
+    } else {
+      assert(!conf.contains("spark.shuffle.manager"))
+    }
+  }
+
+  test("shuffle manager auto-configuration preserves an incompatible shuffle data IO plugin") {
+    val conf = new SparkConf(false)
+      .set("spark.shuffle.sort.io.plugin.class", "custom.ShuffleDataIO")
+
+    RapidsShuffleManagerAutoConfigurator.configure(conf)
+
+    assert(!conf.contains("spark.shuffle.manager"))
+  }
+
   test("shuffle manager runtime setting does not control auto-configuration") {
     val conf = new SparkConf(false)
       .set(RapidsConf.SHUFFLE_MANAGER_ENABLED.key, "false")
