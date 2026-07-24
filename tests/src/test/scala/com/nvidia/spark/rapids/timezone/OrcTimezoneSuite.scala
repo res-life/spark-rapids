@@ -22,8 +22,14 @@ import java.time.{Instant, LocalDateTime, ZoneId, ZoneOffset}
 import java.util.{Random, TimeZone}
 import java.util.concurrent.TimeUnit
 
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.rapids.{GpuOrcTimezoneUtils, RapidsConf, RapidsReaderType,
   SparkQueryCompareTestSuite}
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
+import org.apache.orc.{CompressionKind, OrcFile, TypeDescription}
+import org.apache.orc.impl.{RecordReaderImpl, WriterImpl}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -161,6 +167,62 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       .orc(outputPath.getCanonicalPath)
   }
 
+  private def getOrcFile(dir: File): File = {
+    val files = dir.listFiles(_.getName.endsWith(".orc"))
+    assert(files != null && files.length === 1)
+    files.head
+  }
+
+  private def appendStripes(
+      conf: Configuration,
+      sourceFile: File,
+      writer: WriterImpl): Unit = {
+    val sourcePath = new Path(sourceFile.getCanonicalPath)
+    val reader = OrcFile.createReader(sourcePath, OrcFile.readerOptions(conf))
+    val stripeStats = reader.getOrcProtoStripeStatistics.asScala
+    reader.getStripes.asScala.zip(stripeStats).foreach { case (stripe, stats) =>
+      val stripeLength = Math.toIntExact(stripe.getLength)
+      val stripeBytes = new Array[Byte](stripeLength)
+      val in = sourcePath.getFileSystem(conf).open(sourcePath)
+      try {
+        in.readFully(stripe.getOffset, stripeBytes)
+      } finally {
+        in.close()
+      }
+      writer.appendStripe(stripeBytes, 0, stripeLength, stripe, stats)
+    }
+  }
+
+  private def mergeOrcStripes(
+      conf: Configuration,
+      sourceFiles: Seq[File],
+      outputFile: File): Unit = {
+    val schema = TypeDescription.fromString("struct<id:bigint,ts:timestamp>")
+    val writer = OrcFile.createWriter(
+      new Path(outputFile.getCanonicalPath),
+      OrcFile.writerOptions(conf).setSchema(schema).compress(CompressionKind.NONE))
+      .asInstanceOf[WriterImpl]
+    try {
+      sourceFiles.foreach(appendStripes(conf, _, writer))
+    } finally {
+      writer.close()
+    }
+  }
+
+  private def getWriterTimezones(conf: Configuration, orcFile: File): Seq[String] = {
+    val reader = OrcFile.createReader(
+      new Path(orcFile.getCanonicalPath),
+      OrcFile.readerOptions(conf))
+    val rows = reader.rows().asInstanceOf[RecordReaderImpl]
+    try {
+      reader.getStripes.asScala.map(rows.readStripeFooter)
+        .map(_.getWriterTimezone)
+        .toSeq
+    } finally {
+      rows.close()
+    }
+  }
+
   private val timestampSourceTypes = Seq(
     "boolean" -> "true",
     "tinyint" -> "1",
@@ -169,6 +231,61 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     "bigint" -> "1593604800",
     "float" -> "1593604800.25",
     "double" -> "1593604800.25")
+
+  test("skip writer timezone validation without a timestamp projection") {
+    val originalTimeZone = TimeZone.getDefault
+    val conf = baseConf("orc")
+      .set(RapidsConf.ORC_READER_TYPE.key, RapidsReaderType.PERFILE.toString)
+
+    try {
+      withTempPath { fileRoot =>
+        val utcPath = new File(fileRoot, "utc")
+        val losAngelesPath = new File(fileRoot, "los-angeles")
+        val mixedTimezoneFile = new File(fileRoot, "mixed-timezones.orc")
+        withCpuSparkSession(spark => {
+          setSessionTimeZone(spark, "UTC")
+          timestampDataFrame(spark, Seq(0L))
+            .coalesce(1)
+            .write
+            .option("compression", "none")
+            .orc(utcPath.getCanonicalPath)
+
+          setSessionTimeZone(spark, "America/Los_Angeles")
+          timestampDataFrame(spark, Seq(0L), idOffset = 1L)
+            .coalesce(1)
+            .write
+            .option("compression", "none")
+            .orc(losAngelesPath.getCanonicalPath)
+
+          mergeOrcStripes(
+            spark.sparkContext.hadoopConfiguration,
+            Seq(getOrcFile(utcPath), getOrcFile(losAngelesPath)),
+            mixedTimezoneFile)
+          assert(getWriterTimezones(
+            spark.sparkContext.hadoopConfiguration,
+            mixedTimezoneFile) === Seq("UTC", "America/Los_Angeles"))
+        }, conf = conf)
+
+        val (fromCpu, fromGpu) = runOnCpuAndGpu(
+          spark => {
+            setSessionTimeZone(spark, "UTC")
+            spark.read.orc(mixedTimezoneFile.getCanonicalPath).select("id")
+          },
+          _.orderBy("id"),
+          conf = conf,
+          repart = 0,
+          skipCanonicalizationCheck = true,
+          existClasses = "GpuFileSourceScanExec")
+        compareResults(
+          sort = false,
+          floatEpsilon = 0.0,
+          fromCpu = fromCpu,
+          fromGpu = fromGpu)
+      }
+    } finally {
+      TimeZone.setDefault(originalTimeZone)
+    }
+  }
 
   for {
     (sourceType, value) <- timestampSourceTypes

@@ -1428,7 +1428,9 @@ private case class GpuOrcFileFilterHandler(
           metrics)) {
           dataReader =>
             new GpuOrcPartitionReaderUtils(filePath, taskConf, partFile, orcFileReaderOpts,
-              orcReader, readerOpts, dataReader, requestedMapping).getOrcPartitionReaderContext
+              orcReader, readerOpts, dataReader, requestedMapping,
+              readDataSchema.exists(f =>
+                GpuOverrides.isOrContainsTimestamp(f.dataType))).getOrcPartitionReaderContext
         }
       }
     }
@@ -1459,7 +1461,8 @@ private case class GpuOrcFileFilterHandler(
       orcReader: Reader,
       readerOpts: Reader.Options,
       dataReader: DataReader,
-      requestedMapping: Option[Array[Int]]) {
+      requestedMapping: Option[Array[Int]],
+      needsTimezoneRebase: Boolean) {
 
     private val ORC_STREAM_KINDS_IGNORED = util.EnumSet.of(
       OrcProto.Stream.Kind.BLOOM_FILTER,
@@ -1569,9 +1572,13 @@ private case class GpuOrcFileFilterHandler(
         buildOutputStripe, evolution,
         sargApp, sargColumns, ignoreNonUtf8BloomFilter,
         writerVersion, fileIncluded, columnMapping).toSeq
-      val distinctTzs = outputStripes.map { stripe =>
-        if (stripe.footer.hasWriterTimezone) stripe.footer.getWriterTimezone else ""
-      }.distinct.map(GpuOrcTimezoneUtils.resolveWriterTimezone)
+      val distinctTzs = if (needsTimezoneRebase) {
+        outputStripes.map { stripe =>
+          if (stripe.footer.hasWriterTimezone) stripe.footer.getWriterTimezone else ""
+        }.distinct.map(GpuOrcTimezoneUtils.resolveWriterTimezone)
+      } else {
+        Seq.empty
+      }
       // Compare the resolved timezones by rule-equivalence so semantically equivalent IDs
       // across stripes don't trigger a spurious failure.
       val writerTz = distinctTzs.headOption.getOrElse(ZoneId.systemDefault())
