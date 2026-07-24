@@ -141,7 +141,15 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       val ts = Timestamp.from(Instant.ofEpochSecond(seconds, microsWithinSecond * 1000L))
       (idOffset + i, ts)
     }
-    rows.toDF("id", "ts")
+    rows.toDF("id", "ts").selectExpr(
+      "id",
+      "ts",
+      """IF(id % 2 = 0,
+        |  named_struct('value', ts),
+        |  CAST(NULL AS STRUCT<value:TIMESTAMP>)) AS struct_ts""".stripMargin,
+      """IF(id % 2 = 1,
+        |  array(ts, CAST(NULL AS TIMESTAMP)),
+        |  CAST(NULL AS ARRAY<TIMESTAMP>)) AS array_ts""".stripMargin)
   }
 
   private def fileDataFrame(
@@ -197,7 +205,9 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       conf: Configuration,
       sourceFiles: Seq[File],
       outputFile: File): Unit = {
-    val schema = TypeDescription.fromString("struct<id:bigint,ts:timestamp>")
+    val schema = TypeDescription.fromString(
+      "struct<id:bigint,ts:timestamp,struct_ts:struct<value:timestamp>," +
+        "array_ts:array<timestamp>>")
     val writer = OrcFile.createWriter(
       new Path(outputFile.getCanonicalPath),
       OrcFile.writerOptions(conf).setSchema(schema).compress(CompressionKind.NONE))
