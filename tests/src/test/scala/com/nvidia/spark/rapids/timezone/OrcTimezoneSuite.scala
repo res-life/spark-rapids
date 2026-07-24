@@ -187,7 +187,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       writer: WriterImpl): Unit = {
     val sourcePath = new Path(sourceFile.getCanonicalPath)
     val reader = OrcFile.createReader(sourcePath, OrcFile.readerOptions(conf))
-    val stripeStats = reader.getOrcProtoStripeStatistics.asScala
+    val stripeStats = reader.getStripeStatistics.asScala
     reader.getStripes.asScala.zip(stripeStats).foreach { case (stripe, stats) =>
       val stripeLength = Math.toIntExact(stripe.getLength)
       val stripeBytes = new Array[Byte](stripeLength)
@@ -197,7 +197,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       } finally {
         in.close()
       }
-      writer.appendStripe(stripeBytes, 0, stripeLength, stripe, stats)
+      writer.appendStripe(stripeBytes, 0, stripeLength, stripe, Array(stats))
     }
   }
 
