@@ -1122,6 +1122,21 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
 # the `tz_sensitive_test` mark guarantees the write and read are in the same timezone
 # The `spark.sql.session.timeZone` here does not impact reader and writer timezone, but any way, we test it.
 # For the tests that reader and writer timezones are different, refer to `OrcTimezoneSuite`
+@tz_sensitive_test
+@pytest.mark.xfail(
+    is_not_utc(),
+    reason="https://github.com/rapidsai/cudf/issues/23422")
+def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
+    data_path = spark_tmp_path + "/ORC_GPU_WRITE_TZ"
+    assert_gpu_and_cpu_writes_are_equal_collect(
+        lambda spark, path: (
+            spark.range(3)
+                .selectExpr("CAST(1593604800 + id AS TIMESTAMP) AS ts")
+                .write.orc(path)),
+        lambda spark, path: spark.read.orc(path),
+        data_path)
+
+
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize("timezone_pair", [("UTC", "Asia/Shanghai"), ("Asia/Shanghai", "UTC"), ("Asia/Shanghai", "America/Los_Angeles")], ids=idfn)
