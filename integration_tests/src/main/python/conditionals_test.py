@@ -224,16 +224,10 @@ def test_ifnull(data_gen):
                 'ifnull(a, {})'.format(null_lit)))
 
 @pytest.mark.parametrize('data_gen', [IntegerGen().with_special_case(2147483647)], ids=idfn)
-def test_conditional_with_side_effects_col_col(data_gen):
+def test_conditional_with_side_effects_integral(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr(
-                'IF(a < 2147483647, a + 1, a)'),
-            conf = ansi_enabled_conf)
-
-@pytest.mark.parametrize('data_gen', [IntegerGen().with_special_case(2147483647)], ids=idfn)
-def test_conditional_with_side_effects_col_scalar(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr(
+                'IF(a < 2147483647, a + 1, a)',
                 'IF(a < 2147483647, a + 1, 2147483647)',
                 'IF(a >= 2147483646, 2147483647, a + 1)'),
             conf = ansi_enabled_conf)

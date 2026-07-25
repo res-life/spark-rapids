@@ -526,28 +526,28 @@ def test_signum(data_gen):
 
 @pytest.mark.parametrize('data_gen', numeric_gens + _arith_decimal_gens_low_precision, ids=idfn)
 @disable_ansi_mode
-def test_unary_minus(data_gen):
+def test_unary_ops(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a', 'abs(a)'))
 
 @pytest.mark.parametrize('data_gen', _arith_decimal_gens_high_precision, ids=idfn)
 @pytest.mark.skipif(is_scala213(), reason="Apache Spark built with Scala 2.13 produces inconsistent results at high precision (SPARK-45438)")
-def test_unary_minus_decimal128(data_gen):
+def test_unary_ops_decimal128(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a', 'abs(a)'))
 
 @pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens + [float_gen, double_gen] +
     _arith_decimal_gens_low_precision, ids=idfn)
-def test_unary_minus_ansi_no_overflow(data_gen):
+def test_unary_ops_ansi_no_overflow(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a'),
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a', 'abs(a)'),
             conf=ansi_enabled_conf)
 
 @pytest.mark.parametrize('data_gen', _arith_decimal_gens_high_precision, ids=idfn)
 @pytest.mark.skipif(is_scala213(), reason="Apache Spark built with Scala 2.13 produces inconsistent results at high precision (SPARK-45438)")
-def test_unary_minus_ansi_no_overflow_decimal128(data_gen):
+def test_unary_ops_ansi_no_overflow_decimal128(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a'),
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('-a', 'a', 'abs(a)'),
             conf=ansi_enabled_conf)
 
 @pytest.mark.parametrize('data_type,value', [
@@ -573,33 +573,6 @@ def test_unary_minus_ansi_overflow(data_type, value):
 def test_unary_positive(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, data_gen).selectExpr('+a'))
-
-@pytest.mark.parametrize('data_gen', numeric_gens + _arith_decimal_gens_low_precision, ids=idfn)
-@disable_ansi_mode
-def test_abs(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('abs(a)'))
-
-@pytest.mark.parametrize('data_gen', _arith_decimal_gens_high_precision, ids=idfn)
-@pytest.mark.skipif(is_scala213(), reason="Apache Spark built with Scala 2.13 produces inconsistent results at high precision (SPARK-45438)")
-def test_abs_decimal128(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('abs(a)'))
-
-# ANSI is ignored for abs prior to 3.2.0, but still okay to test it a little more.
-@pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens + [float_gen, double_gen] +
-    _arith_decimal_gens_low_precision, ids=idfn)
-def test_abs_ansi_no_overflow(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('abs(a)'),
-            conf=ansi_enabled_conf)
-
-@pytest.mark.parametrize('data_gen', _arith_decimal_gens_high_precision, ids=idfn)
-@pytest.mark.skipif(is_scala213(), reason="Apache Spark built with Scala 2.13 produces inconsistent results at high precision")
-def test_abs_ansi_no_overflow_decimal128(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('a','abs(a)'),
-            conf=ansi_enabled_conf)
 
 # Only run this test for Spark v3.2.0 and later to verify abs will
 # throw exceptions for overflow when ANSI mode is enabled.

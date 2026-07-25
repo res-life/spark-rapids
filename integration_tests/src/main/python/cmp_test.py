@@ -22,226 +22,71 @@ from pyspark.sql.types import *
 from marks import datagen_overrides, allow_non_gpu
 import pyspark.sql.functions as f
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_eq(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
+def _comparison_exprs(data_gen, s1, s2, compare, include_b_scalar=False):
     data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') == s1,
-                s2 == f.col('b'),
-                f.lit(None).cast(data_type) == f.col('a'),
-                f.col('b') == f.lit(None).cast(data_type),
-                f.col('a') == f.col('b')))
+    exprs = [
+        compare(f.col('a'), s1),
+        compare(s2, f.col('b'))]
+    if include_b_scalar:
+        exprs.append(compare(f.col('b'), s2))
+    exprs.extend([
+        compare(f.lit(None).cast(data_type), f.col('a')),
+        compare(f.col('b'), f.lit(None).cast(data_type)),
+        compare(f.col('a'), f.col('b'))])
+    return exprs
 
-def test_eq_for_interval():
-    def test_func(data_gen):
-        (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-        data_type = data_gen.data_type
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') == s1,
-                s2 == f.col('b'),
-                f.lit(None).cast(data_type) == f.col('a'),
-                f.col('b') == f.lit(None).cast(data_type),
-                f.col('a') == f.col('b')))
-    # DayTimeIntervalType not supported inside Structs -- issue #6184
-    # data_gens = [DayTimeIntervalGen(),
-    # StructGen([['child0', StructGen([['child2', DayTimeIntervalGen()]])], ['child1', short_gen]])]
-    data_gens = [DayTimeIntervalGen()]
-    for data_gen in data_gens:
-        test_func(data_gen)
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_eq_ns(data_gen):
+_equality_comparisons = [
+    lambda lhs, rhs: lhs == rhs,
+    lambda lhs, rhs: lhs.eqNullSafe(rhs),
+    lambda lhs, rhs: lhs != rhs]
+
+_ordering_comparisons = [
+    (lambda lhs, rhs: lhs < rhs, False),
+    (lambda lhs, rhs: lhs <= rhs, True),
+    (lambda lhs, rhs: lhs > rhs, True),
+    (lambda lhs, rhs: lhs >= rhs, True)]
+
+
+def _assert_comparisons(data_gen, comparisons):
     (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
+        lambda spark: gen_scalars(
+            data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
+    exprs = []
+    for compare, include_b_scalar in comparisons:
+        exprs.extend(_comparison_exprs(
+            data_gen, s1, s2, compare, include_b_scalar=include_b_scalar))
+    exprs = [expr.alias(f'comparison_{index}') for index, expr in enumerate(exprs)]
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a').eqNullSafe(s1),
-                s2.eqNullSafe(f.col('b')),
-                f.lit(None).cast(data_type).eqNullSafe(f.col('a')),
-                f.col('b').eqNullSafe(f.lit(None).cast(data_type)),
-                f.col('a').eqNullSafe(f.col('b'))))
+        lambda spark: binary_op_df(spark, data_gen).select(*exprs))
 
-def test_eq_ns_for_interval():
-    data_gen = DayTimeIntervalGen()
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : binary_op_df(spark, data_gen).select(
-            f.col('a').eqNullSafe(s1),
-            s2.eqNullSafe(f.col('b')),
-            f.lit(None).cast(data_type).eqNullSafe(f.col('a')),
-            f.col('b').eqNullSafe(f.lit(None).cast(data_type)),
-            f.col('a').eqNullSafe(f.col('b'))))
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_ne(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') != s1,
-                s2 != f.col('b'),
-                f.lit(None).cast(data_type) != f.col('a'),
-                f.col('b') != f.lit(None).cast(data_type),
-                f.col('a') != f.col('b')))
+@pytest.mark.parametrize(
+    'data_gen',
+    eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list,
+    ids=idfn)
+def test_equality_comparisons(data_gen):
+    _assert_comparisons(data_gen, [(compare, False) for compare in _equality_comparisons])
 
-def test_ne_for_interval():
-    def test_func(data_gen):
-        (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-        data_type = data_gen.data_type
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') != s1,
-                s2 != f.col('b'),
-                f.lit(None).cast(data_type) != f.col('a'),
-                f.col('b') != f.lit(None).cast(data_type),
-                f.col('a') != f.col('b')))
-    # DayTimeIntervalType not supported inside Structs -- issue #6184
-    # data_gens = [DayTimeIntervalGen(),
-    # StructGen([['child0', StructGen([['child2', DayTimeIntervalGen()]])], ['child1', short_gen]])]
-    data_gens = [DayTimeIntervalGen()]
-    for data_gen in data_gens:
-        test_func(data_gen)
-
-@pytest.mark.parametrize('data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_lt(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') < s1,
-                s2 < f.col('b'),
-                f.lit(None).cast(data_type) < f.col('a'),
-                f.col('b') < f.lit(None).cast(data_type),
-                f.col('a') < f.col('b')))
-
-def test_lt_for_interval():
-    def test_func(data_gen):
-        (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-        data_type = data_gen.data_type
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') < s1,
-                s2 < f.col('b'),
-                f.lit(None).cast(data_type) < f.col('a'),
-                f.col('b') < f.lit(None).cast(data_type),
-                f.col('a') < f.col('b')))
-    # DayTimeIntervalType not supported inside Structs -- issue #6184
-    # data_gens = [DayTimeIntervalGen(),
-    # StructGen([['child0', StructGen([['child2', DayTimeIntervalGen()]])], ['child1', short_gen]])]
-    data_gens = [DayTimeIntervalGen()]
-    for data_gen in data_gens:
-        test_func(data_gen)
-
-@pytest.mark.parametrize('data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_lte(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') <= s1,
-                s2 <= f.col('b'),
-                f.col('b') <= s2,
-                f.lit(None).cast(data_type) <= f.col('a'),
-                f.col('b') <= f.lit(None).cast(data_type),
-                f.col('a') <= f.col('b')))
-
-def test_lte_for_interval():
-    def test_func(data_gen):
-        (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-        data_type = data_gen.data_type
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') <= s1,
-                s2 <= f.col('b'),
-                f.lit(None).cast(data_type) <= f.col('a'),
-                f.col('b') <= f.lit(None).cast(data_type),
-                f.col('a') <= f.col('b')))
-    # DayTimeIntervalType not supported inside Structs -- issue #6184
-    # data_gens = [DayTimeIntervalGen(),
-    # StructGen([['child0', StructGen([['child2', DayTimeIntervalGen()]])], ['child1', short_gen]])]
-    data_gens = [DayTimeIntervalGen()]
-    for data_gen in data_gens:
-        test_func(data_gen)
 
 @pytest.mark.parametrize('data_gen', orderable_gens, ids=idfn)
-def test_gt(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') > s1,
-                s2 > f.col('b'),
-                f.col('b') > s2,
-                f.lit(None).cast(data_type) > f.col('a'),
-                f.col('b') > f.lit(None).cast(data_type),
-                f.col('a') > f.col('b')))
+def test_ordering_comparisons(data_gen):
+    _assert_comparisons(data_gen, _ordering_comparisons)
 
-def test_gt_interval():
-    def test_func(data_gen):
-        (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-        data_type = data_gen.data_type
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') > s1,
-                s2 > f.col('b'),
-                f.lit(None).cast(data_type) > f.col('a'),
-                f.col('b') > f.lit(None).cast(data_type),
-                f.col('a') > f.col('b')))
-    # DayTimeIntervalType not supported inside Structs -- issue #6184
-    # data_gens = [DayTimeIntervalGen(),
-    # StructGen([['child0', StructGen([['child2', DayTimeIntervalGen()]])], ['child1', short_gen]])]
-    data_gens = [DayTimeIntervalGen()]
-    for data_gen in data_gens:
-        test_func(data_gen)
 
-@pytest.mark.parametrize('data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_gte(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') >= s1,
-                s2 >= f.col('b'),
-                f.col('b') >= s2,
-                f.lit(None).cast(data_type) >= f.col('a'),
-                f.col('b') >= f.lit(None).cast(data_type),
-                f.col('a') >= f.col('b')))
+@pytest.mark.parametrize('data_gen', struct_gens_sample_with_decimal128_no_list, ids=idfn)
+def test_struct_ordering_comparisons(data_gen):
+    # Greater-than was not supported by the original struct comparison coverage.
+    _assert_comparisons(
+        data_gen,
+        [comparison for index, comparison in enumerate(_ordering_comparisons) if index != 2])
 
-def test_gte_for_interval():
-    def test_func(data_gen):
-        (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-        data_type = data_gen.data_type
-        assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') >= s1,
-                s2 >= f.col('b'),
-                f.lit(None).cast(data_type) >= f.col('a'),
-                f.col('b') >= f.lit(None).cast(data_type),
-                f.col('a') >= f.col('b')))
-    # DayTimeIntervalType not supported inside Structs -- issue #6184
-    # data_gens = [DayTimeIntervalGen(),
-    # StructGen([['child0', StructGen([['child2', DayTimeIntervalGen()]])], ['child1', short_gen]])]
-    data_gens = [DayTimeIntervalGen()]
-    for data_gen in data_gens:
-        test_func(data_gen)
+
+def test_interval_comparisons():
+    # DayTimeIntervalType is not supported inside structs -- issue #6184.
+    comparisons = [(compare, False) for compare in _equality_comparisons]
+    comparisons.extend([(compare, False) for compare, _ in _ordering_comparisons])
+    _assert_comparisons(DayTimeIntervalGen(), comparisons)
 
 @pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + [binary_gen] + array_gens_sample + struct_gens_sample + map_gens_sample, ids=idfn)
 def test_isnull(data_gen):
