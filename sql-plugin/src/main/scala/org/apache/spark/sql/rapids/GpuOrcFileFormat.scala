@@ -16,6 +16,8 @@
 
 package org.apache.spark.sql.rapids
 
+import java.time.ZoneId
+
 import ai.rapids.cudf._
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.jni.fileio.RapidsFileIO
@@ -31,6 +33,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.datasources.FileFormat
 import org.apache.spark.sql.execution.datasources.orc.{OrcFileFormat, OrcOptions, OrcUtils}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
 
@@ -82,8 +85,19 @@ object GpuOrcFileFormat extends Logging {
         t.isInstanceOf[BooleanType])
     }
 
-    // ORC writing always uses UTC internally (cuDF writes writerTimezone="UTC").
-    // The reader side handles timezone conversion. No write-side timezone restriction needed.
+    // cuDF's ORC writer always stamps writerTimezone="UTC" in the stripe footer and cannot
+    // record the actual JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422).
+    // Because ORC's `timestamp` type is timezone-agnostic, a file written on the GPU in a
+    // non-UTC JVM is read back shifted by the zone offset by a CPU ORC reader. Fall back to CPU
+    // for non-UTC timestamp writes so the output stays interoperable. Reads use the JVM default
+    // (systemDefault) zone, so the write-side gate matches the reader on the same check.
+    val types = schema.map(_.dataType).toSet
+    if (types.exists(GpuOverrides.isOrContainsTimestamp) &&
+        !GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
+      meta.willNotWorkOnGpu("Writing ORC timestamps is only supported in the UTC timezone " +
+        s"(JVM: ${ZoneId.systemDefault()}, session: ${SQLConf.get.sessionLocalTimeZone}). " +
+        "See https://github.com/rapidsai/cudf/issues/23422")
+    }
 
     if (hasBools && !meta.conf.isOrcBoolTypeEnabled) {
       meta.willNotWorkOnGpu("Nullable Booleans can not work in certain cases with ORC writer." +

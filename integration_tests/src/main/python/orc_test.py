@@ -1118,24 +1118,25 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
                              conf={},
                              error_message="ParseException")
 
-# test ORC reader and writer with the same timezone
-# the `tz_sensitive_test` mark guarantees the write and read are in the same timezone
-# The `spark.sql.session.timeZone` here does not impact reader and writer timezone, but any way, we test it.
-# For the tests that reader and writer timezones are different, refer to `OrcTimezoneSuite`
+# Timestamp writes: in UTC the GPU writes on the GPU; in a non-UTC JVM the GPU write must fall
+# back to CPU. cuDF's ORC writer always stamps writerTimezone="UTC" in the stripe footer and
+# cannot record the JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422), so a
+# GPU-written non-UTC file would be read back shifted by the zone offset by a CPU ORC reader.
+# The `tz_sensitive_test` mark runs this in both UTC and non-UTC JVM timezones.
 @tz_sensitive_test
 @ignore_order(local=True)
-@pytest.mark.xfail(
-    is_not_utc(),
-    reason="https://github.com/rapidsai/cudf/issues/23422")
 def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
     data_path = spark_tmp_path + "/ORC_GPU_WRITE_TZ"
-    assert_gpu_and_cpu_writes_are_equal_collect(
-        lambda spark, path: (
-            spark.range(3)
-                .selectExpr("CAST(1593604800 + id AS TIMESTAMP) AS ts")
-                .write.orc(path)),
-        lambda spark, path: spark.read.orc(path),
-        data_path)
+    write_func = lambda spark, path: (
+        spark.range(3)
+            .selectExpr("CAST(1593604800 + id AS TIMESTAMP) AS ts")
+            .write.orc(path))
+    read_func = lambda spark, path: spark.read.orc(path)
+    if is_not_utc():
+        # Non-UTC: the timestamp write must fall back to CPU (DataWritingCommandExec).
+        assert_gpu_fallback_write(write_func, read_func, data_path, 'DataWritingCommandExec')
+    else:
+        assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
 
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
