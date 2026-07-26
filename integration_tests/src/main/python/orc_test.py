@@ -1123,8 +1123,11 @@ def test_orc_not_support_timestamp_ltz(std_input_path):
 # cannot record the JVM writer timezone (https://github.com/rapidsai/cudf/issues/23422), so a
 # GPU-written non-UTC file would be read back shifted by the zone offset by a CPU ORC reader.
 # The `tz_sensitive_test` mark runs this in both UTC and non-UTC JVM timezones.
+non_utc_orc_write_allow = ['DataWritingCommandExec'] if is_not_utc() else []
+
 @tz_sensitive_test
 @ignore_order(local=True)
+@allow_non_gpu(*non_utc_orc_write_allow)
 def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
     data_path = spark_tmp_path + "/ORC_GPU_WRITE_TZ"
     write_func = lambda spark, path: (
