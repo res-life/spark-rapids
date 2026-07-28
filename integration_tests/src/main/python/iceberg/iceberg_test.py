@@ -14,13 +14,15 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
+    assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
 from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import is_databricks_runtime, with_cpu_session, \
+from spark_session import is_databricks_runtime, is_spark_359, with_cpu_session, \
     with_gpu_session
 
 iceberg_map_gens = [MapGen(f(nullable=False), f()) for f in [
@@ -46,6 +48,62 @@ rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 _NO_FANOUT = _BASE_TBLPROPS_SQL
 
 pytestmark = iceberg_unsupported_mark
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(not is_spark_359(),
+                    reason="Partial-clustering marker was added in Apache Spark 3.5.9")
+def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
+    left_table = get_full_table_name(spark_tmp_table_factory)
+    right_table = get_full_table_name(spark_tmp_table_factory)
+    table_props = _build_tblprops({
+        # Keep separate INSERTs as separate scan splits so that id=1 is partially clustered.
+        "read.split.target-size": "1",
+        "read.split.open-file-cost": "1",
+    })
+    table_props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in table_props.items())
+
+    def setup_iceberg_tables(spark):
+        spark.sql(
+            f"CREATE TABLE {left_table} (id INT, price DOUBLE) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+        spark.sql(
+            f"CREATE TABLE {right_table} (id INT, value STRING) USING ICEBERG "
+            f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
+
+        # The two id=1 rows land in different files. Partial clustering assigns them to
+        # different join tasks and replicates the matching row from the other side.
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
+        spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+
+    with_cpu_session(setup_iceberg_tables)
+
+    conf = {
+        "spark.sql.adaptive.enabled": "false",
+        "spark.sql.autoBroadcastJoinThreshold": "-1",
+        "spark.sql.sources.v2.bucketing.enabled": "true",
+        "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
+        "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "true",
+    }
+
+    def distinct_after_spj(spark):
+        return spark.sql(
+            f"""
+            SELECT DISTINCT l.id
+            FROM {left_table} l
+            JOIN {right_table} r ON l.id = r.id
+            """)
+
+    # The SPJ itself is shuffle-free, so this exchange is the required post-join distinct
+    # shuffle. It also verifies that GpuBatchScanExec preserved Spark's partial-clustering marker.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        distinct_after_spj,
+        exist_classes="GpuBatchScanExec,GpuShuffleExchangeExec",
+        conf=conf,
+        require_non_empty=True)
+
 
 @allow_non_gpu("BatchScanExec")
 @iceberg
