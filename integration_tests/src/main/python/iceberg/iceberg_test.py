@@ -22,8 +22,8 @@ from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import is_databricks_runtime, is_spark_359, with_cpu_session, \
-    with_gpu_session
+from spark_session import is_databricks_runtime, is_spark_359, is_spark_403_or_404, \
+    with_cpu_session, with_gpu_session
 
 iceberg_map_gens = [MapGen(f(nullable=False), f()) for f in [
     BooleanGen, ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen, DateGen, TimestampGen ]] + \
@@ -52,8 +52,9 @@ pytestmark = iceberg_unsupported_mark
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(not is_spark_359(),
-                    reason="Partial-clustering marker was added in Apache Spark 3.5.9")
+@pytest.mark.skipif(
+    not (is_spark_359() or is_spark_403_or_404()),
+    reason="Requires Spark's partial-clustering correctness fix and GPU Iceberg scan support")
 def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
     left_table = get_full_table_name(spark_tmp_table_factory)
     right_table = get_full_table_name(spark_tmp_table_factory)
