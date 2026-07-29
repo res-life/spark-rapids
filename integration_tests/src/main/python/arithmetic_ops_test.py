@@ -108,7 +108,7 @@ def _get_overflow_df(spark, data, data_type, expr):
 
 @pytest.mark.parametrize('data_gen', _arith_data_gens, ids=idfn)
 @disable_ansi_mode
-def test_addition(data_gen):
+def test_addition_subtraction(data_gen):
     data_type = data_gen.data_type
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).select(
@@ -116,27 +116,7 @@ def test_addition(data_gen):
                 f.lit(-12).cast(data_type) + f.col('b'),
                 f.lit(None).cast(data_type) + f.col('a'),
                 f.col('b') + f.lit(None).cast(data_type),
-                f.col('a') + f.col('b')))
-
-# If it will not overflow for multiply it is good for add too
-@pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens, ids=idfn)
-def test_addition_ansi_no_overflow(data_gen):
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') + f.lit(100).cast(data_type),
-                f.lit(-12).cast(data_type) + f.col('b'),
-                f.lit(None).cast(data_type) + f.col('a'),
-                f.col('b') + f.lit(None).cast(data_type),
-                f.col('a') + f.col('b')),
-            conf=ansi_enabled_conf)
-
-@pytest.mark.parametrize('data_gen', _arith_data_gens, ids=idfn)
-@disable_ansi_mode
-def test_subtraction(data_gen):
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
+                f.col('a') + f.col('b'),
                 f.col('a') - f.lit(100).cast(data_type),
                 f.lit(-12).cast(data_type) - f.col('b'),
                 f.lit(None).cast(data_type) - f.col('a'),
@@ -156,12 +136,17 @@ def test_addition_subtraction_mixed(lhs, rhs, addOrSub):
         lambda spark : two_col_df(spark, lhs, rhs).selectExpr(f"a {addOrSub} b")
     )
 
-# If it will not overflow for multiply it is good for subtract too
+# If it will not overflow for multiply it is good for add and subtract too.
 @pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens, ids=idfn)
-def test_subtraction_ansi_no_overflow(data_gen):
+def test_addition_subtraction_ansi_no_overflow(data_gen):
     data_type = data_gen.data_type
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).select(
+                f.col('a') + f.lit(100).cast(data_type),
+                f.lit(-12).cast(data_type) + f.col('b'),
+                f.lit(None).cast(data_type) + f.col('a'),
+                f.col('b') + f.lit(None).cast(data_type),
+                f.col('a') + f.col('b'),
                 f.col('a') - f.lit(100).cast(data_type),
                 f.lit(-12).cast(data_type) - f.col('b'),
                 f.lit(None).cast(data_type) - f.col('a'),
@@ -593,12 +578,6 @@ def test_abs_ansi_overflow(data_type, value):
         conf=ansi_enabled_conf,
         error_message=_arithmetic_exception_string)
 
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_asin(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('asin(a)'))
-
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
 def test_sqrt(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -614,30 +593,21 @@ def test_hypot(data_gen):
         ))
 
 @pytest.mark.parametrize('data_gen', double_n_long_gens + _arith_decimal_gens_no_neg_scale + [DecimalGen(30, 15)], ids=idfn)
-def test_floor(data_gen):
+def test_floor_ceil(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a)', 'ceil(a)'))
 
 @pytest.mark.parametrize('data_gen', [long_gen] + _arith_decimal_gens_no_neg_scale, ids=idfn)
-def test_floor_scale_zero(data_gen):
+def test_floor_ceil_scale_zero(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a, 0)'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr(
+                'floor(a, 0)', 'ceil(a, 0)'))
 
 @allow_non_gpu('RoundFloor', 'Cast')
 @pytest.mark.parametrize('data_gen', [long_gen] + _arith_decimal_gens_no_neg_scale_38_0_overflow, ids=idfn)
 def test_floor_scale_nonzero(data_gen):
     assert_gpu_fallback_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('floor(a, -1)'), 'RoundFloor')
-
-@pytest.mark.parametrize('data_gen', double_n_long_gens + _arith_decimal_gens_no_neg_scale + [DecimalGen(30, 15)], ids=idfn)
-def test_ceil(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a)'))
-
-@pytest.mark.parametrize('data_gen', [long_gen] + _arith_decimal_gens_no_neg_scale, ids=idfn)
-def test_ceil_scale_zero(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('ceil(a, 0)'))
 
 @pytest.mark.parametrize('data_gen', [_decimal_gen_36_neg5, _decimal_gen_38_neg10], ids=idfn)
 def test_floor_ceil_overflow(data_gen):
@@ -658,35 +628,21 @@ def test_rint(data_gen):
             lambda spark : unary_op_df(spark, data_gen).selectExpr('rint(a)'))
 
 @pytest.mark.parametrize('data_gen', int_n_long_gens, ids=idfn)
-def test_shift_left(data_gen):
+def test_shift_ops(data_gen):
     string_type = to_cast_string(data_gen.data_type)
     assert_gpu_and_cpu_are_equal_collect(
-            # The version of shiftLeft exposed to dataFrame does not take a column for num bits
+            # The DataFrame shift functions do not take a column for the number of bits.
             lambda spark : two_col_df(spark, data_gen, IntegerGen()).selectExpr(
                 'shiftleft(a, cast(12 as INT))',
                 'shiftleft(cast(-12 as {}), b)'.format(string_type),
                 'shiftleft(cast(null as {}), b)'.format(string_type),
                 'shiftleft(a, cast(null as INT))',
-                'shiftleft(a, b)'))
-
-@pytest.mark.parametrize('data_gen', int_n_long_gens, ids=idfn)
-def test_shift_right(data_gen):
-    string_type = to_cast_string(data_gen.data_type)
-    assert_gpu_and_cpu_are_equal_collect(
-            # The version of shiftRight exposed to dataFrame does not take a column for num bits
-            lambda spark : two_col_df(spark, data_gen, IntegerGen()).selectExpr(
+                'shiftleft(a, b)',
                 'shiftright(a, cast(12 as INT))',
                 'shiftright(cast(-12 as {}), b)'.format(string_type),
                 'shiftright(cast(null as {}), b)'.format(string_type),
                 'shiftright(a, cast(null as INT))',
-                'shiftright(a, b)'))
-
-@pytest.mark.parametrize('data_gen', int_n_long_gens, ids=idfn)
-def test_shift_right_unsigned(data_gen):
-    string_type = to_cast_string(data_gen.data_type)
-    assert_gpu_and_cpu_are_equal_collect(
-            # The version of shiftRightUnsigned exposed to dataFrame does not take a column for num bits
-            lambda spark : two_col_df(spark, data_gen, IntegerGen()).selectExpr(
+                'shiftright(a, b)',
                 'shiftrightunsigned(a, cast(12 as INT))',
                 'shiftrightunsigned(cast(-12 as {}), b)'.format(string_type),
                 'shiftrightunsigned(cast(null as {}), b)'.format(string_type),
@@ -705,10 +661,11 @@ _arith_data_gens_for_round = numeric_gens + _arith_decimal_gens_no_neg_scale_38_
 
 @incompat
 @approximate_float
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9350")
+@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9350 "
+    "and https://github.com/NVIDIA/spark-rapids/issues/9847")
 @pytest.mark.parametrize('data_gen', _arith_data_gens_for_round, ids=idfn)
 @disable_ansi_mode
-def test_decimal_bround(data_gen):
+def test_decimal_rounding(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, data_gen).selectExpr(
                 'bround(a)',
@@ -716,16 +673,7 @@ def test_decimal_bround(data_gen):
                 'bround(a, -1)',
                 'bround(a, 1)',
                 'bround(a, 2)',
-                'bround(a, 10)'))
-
-@incompat
-@approximate_float
-@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9847")
-@pytest.mark.parametrize('data_gen', _arith_data_gens_for_round, ids=idfn)
-@disable_ansi_mode
-def test_decimal_round(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, data_gen).selectExpr(
+                'bround(a, 10)',
                 'round(a)',
                 'round(1.234, 2)',
                 'round(a, -1)',
@@ -788,22 +736,11 @@ def test_non_decimal_round_overflow():
     IntegerGen(min_val=-2000000000, max_val=2000000000, special_cases=[]),
     LongGen(min_val=-9000000000000000000, max_val=9000000000000000000, special_cases=[])
 ], ids=idfn)
-def test_round_ansi_no_overflow_integral(data_gen):
+def test_rounding_ansi_no_overflow_integral(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, data_gen).selectExpr(
             'round(a, -1)',
-            'round(a, -2)'),
-        conf=ansi_enabled_conf)
-
-@pytest.mark.parametrize('data_gen', [
-    ByteGen(min_val=-120, max_val=120, special_cases=[]),
-    ShortGen(min_val=-30000, max_val=30000, special_cases=[]),
-    IntegerGen(min_val=-2000000000, max_val=2000000000, special_cases=[]),
-    LongGen(min_val=-9000000000000000000, max_val=9000000000000000000, special_cases=[])
-], ids=idfn)
-def test_bround_ansi_no_overflow_integral(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, data_gen).selectExpr(
+            'round(a, -2)',
             'bround(a, -1)',
             'bround(a, -2)'),
         conf=ansi_enabled_conf)
@@ -837,13 +774,14 @@ def test_bround_ansi_overflow_integral(data_gen, scale):
 
 @approximate_float
 @pytest.mark.parametrize('data_gen', _math_unary_input_gens, ids=idfn)
-def test_cbrt(data_gen):
+def test_extended_math_unary_ops(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('cbrt(a)'),
+            lambda spark : unary_op_df(spark, data_gen).selectExpr(
+                'cbrt(a)', 'asinh(a)', 'atanh(a)'),
             conf=_math_unary_conf)
 
 @pytest.mark.parametrize('data_gen', integral_gens, ids=idfn)
-def test_bit_and(data_gen):
+def test_bitwise_binary_ops(data_gen):
     string_type = to_cast_string(data_gen.data_type)
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).selectExpr(
@@ -851,24 +789,12 @@ def test_bit_and(data_gen):
                 'cast(-12 as {}) & b'.format(string_type),
                 'cast(null as {}) & a'.format(string_type),
                 'b & cast(null as {})'.format(string_type),
-                'a & b'))
-
-@pytest.mark.parametrize('data_gen', integral_gens, ids=idfn)
-def test_bit_or(data_gen):
-    string_type = to_cast_string(data_gen.data_type)
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).selectExpr(
+                'a & b',
                 'a | cast(100 as {})'.format(string_type),
                 'cast(-12 as {}) | b'.format(string_type),
                 'cast(null as {}) | a'.format(string_type),
                 'b | cast(null as {})'.format(string_type),
-                'a | b'))
-
-@pytest.mark.parametrize('data_gen', integral_gens, ids=idfn)
-def test_bit_xor(data_gen):
-    string_type = to_cast_string(data_gen.data_type)
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).selectExpr(
+                'a | b',
                 'a ^ cast(100 as {})'.format(string_type),
                 'cast(-12 as {}) ^ b'.format(string_type),
                 'cast(null as {}) ^ a'.format(string_type),
@@ -922,30 +848,6 @@ def test_hex(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('hex(a)'))
 
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_cos(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('cos(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_acos(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('acos(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_cosh(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('cosh(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_acosh(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('acosh(a)'))
-
 # The default approximate is 1e-6 or 1 in a million
 # in some cases we need to adjust this because the algorithm is different
 @approximate_float(rel=1e-4, abs=1e-12)
@@ -959,28 +861,14 @@ def test_columnar_acosh_improved(data_gen):
 
 @approximate_float
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_sin(data_gen):
+def test_math_unary_ops(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('sin(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_sinh(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('sinh(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_asin(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('asin(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', _math_unary_input_gens, ids=idfn)
-def test_asinh(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('asinh(a)'),
-            conf=_math_unary_conf)
+            lambda spark : unary_op_df(spark, data_gen).selectExpr(
+                'cos(a)', 'acos(a)', 'cosh(a)', 'acosh(a)',
+                'sin(a)', 'sinh(a)', 'asin(a)',
+                'tan(a)', 'atan(a)', 'tanh(a)', 'cot(a)',
+                'exp(a)', 'expm1(a)',
+                'log(a)', 'log1p(a)', 'log2(a)', 'log10(a)'))
 
 # The default approximate is 1e-6 or 1 in a million
 # in some cases we need to adjust this because the algorithm is different
@@ -992,73 +880,6 @@ def test_columnar_asinh_improved(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).selectExpr('asinh(a)'),
             {'spark.rapids.sql.improvedFloatOps.enabled': 'true'})
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_tan(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('tan(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_atan(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('atan(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', _math_unary_input_gens, ids=idfn)
-def test_atanh(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('atanh(a)'),
-            conf=_math_unary_conf)
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_tanh(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('tanh(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_cot(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('cot(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_exp(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('exp(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_expm1(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('expm1(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_log(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('log(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_log1p(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('log1p(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_log2(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('log2(a)'))
-
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_log10(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('log10(a)'))
 
 @approximate_float
 def test_logarithm():
