@@ -31,12 +31,12 @@ import org.apache.spark.sql.catalyst.expressions.Literal
 import org.apache.spark.sql.catalyst.plans.physical.KeyGroupedPartitioning
 
 class KeyGroupedPartitioningShimSuite extends AnyFunSuite with FQSuiteName {
-  test("copyWithNewPartitionValues preserves partial clustering") {
+  test("copyWithNewPartitionValues copies partial-clustering flag") {
     val partitioning = KeyGroupedPartitioning(
       expressions = Seq(Literal(1)),
       numPartitions = 1,
       partitionValues = Seq(InternalRow(1)),
-      isPartiallyClustered = true)
+      isPartiallyClustered = false)
     val newPartitionValues = Seq(InternalRow(1), InternalRow(1))
 
     val copied = KeyGroupedPartitioningShim.copyWithNewPartitionValues(

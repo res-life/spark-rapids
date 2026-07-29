@@ -54,6 +54,37 @@ def _is_spark_patch_at_least(minimum):
     return int(spark_version().split(".")[2]) >= minimum
 
 
+def _collect_plan_nodes(plan):
+    nodes = [plan]
+    children = plan.children().iterator()
+    while children.hasNext():
+        nodes.extend(_collect_plan_nodes(children.next()))
+    return nodes
+
+
+def _assert_partial_clustering_spj_plan(plan):
+    nodes = _collect_plan_nodes(plan)
+
+    def nodes_of_class(class_name):
+        return [node for node in nodes if node.getClass().getSimpleName() == class_name]
+
+    scans = nodes_of_class("GpuBatchScanExec")
+    joins = nodes_of_class("GpuShuffledSymmetricHashJoinExec")
+    exchanges = nodes_of_class("GpuShuffleExchangeExec")
+
+    assert len(scans) == 2, f"Expected two GPU batch scans, found {len(scans)}:\n{plan}"
+    assert len(joins) == 1, f"Expected one GPU SPJ join, found {len(joins)}:\n{plan}"
+    assert len(exchanges) == 1, \
+        f"Expected one post-join GPU shuffle, found {len(exchanges)}:\n{plan}"
+
+    join_nodes = _collect_plan_nodes(joins[0])
+    join_exchanges = [
+        node for node in join_nodes
+        if node.getClass().getSimpleName() == "GpuShuffleExchangeExec"
+    ]
+    assert not join_exchanges, f"Expected shuffle-free SPJ inputs:\n{plan}"
+
+
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(
@@ -95,6 +126,7 @@ def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
         "spark.sql.sources.v2.bucketing.enabled": "true",
         "spark.sql.sources.v2.bucketing.pushPartValues.enabled": "true",
         "spark.sql.sources.v2.bucketing.partiallyClusteredDistribution.enabled": "true",
+        "spark.sql.iceberg.planning.preserve-data-grouping": "true",
     }
 
     def distinct_after_spj(spark):
@@ -105,13 +137,13 @@ def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
             JOIN {right_table} r ON l.id = r.id
             """)
 
-    # The SPJ itself is shuffle-free, so this exchange is the required post-join distinct
-    # shuffle. It also verifies that GpuBatchScanExec preserved Spark's partial-clustering marker.
+    # The SPJ itself is shuffle-free, so the distinct introduces a post-join shuffle.
+    # Comparing the results also exercises the replicated and padded scan partitions.
     assert_cpu_and_gpu_are_equal_collect_with_capture(
         distinct_after_spj,
-        exist_classes="GpuBatchScanExec,GpuShuffleExchangeExec",
         conf=conf,
-        require_non_empty=True)
+        require_non_empty=True,
+        gpu_plan_assertion=_assert_partial_clustering_spj_plan)
 
 
 @allow_non_gpu("BatchScanExec")

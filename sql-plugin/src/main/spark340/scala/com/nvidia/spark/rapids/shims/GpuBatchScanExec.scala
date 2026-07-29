@@ -237,7 +237,7 @@ case class GpuBatchScanExec(
         case _ =>
       }
 
-      new GpuDataSourceRDD(sparkContext, filteredPartitions, readerFactory)
+      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
     }
     postDriverMetrics()
     rdd
