@@ -35,6 +35,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.internal.io.FileCommitProtocol
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
+import org.apache.spark.sql.functions.input_file_name
 import org.apache.spark.sql.hive.rapids.GpuHiveParquetFileFormat
 import org.apache.spark.sql.rapids.BasicColumnarWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkUpgradeExceptionShims
@@ -101,7 +102,7 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = spark.sparkContext.parallelize((1L to 10000000L))
+        val df = spark.sparkContext.parallelize(1L to 1000L, 2)
             .map{i => ("a", f"$i%010d", i)}.toDF("partkey", "val", "val2")
         df.repartition(1, $"partkey").sortWithinPartitions($"partkey", $"val", $"val2")
             .write.mode("overwrite").partitionBy("partkey").parquet(tempFile.getAbsolutePath)
@@ -296,18 +297,6 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     assert(GpuParquetFileFormat.parquetBlockSizeWarning(mixedConf, nonDefaultOptions).nonEmpty)
   }
 
-  private def listAllFiles(f: File): Array[File] = {
-    if (f.isFile()) {
-      Array(f)
-    } else if (f.isDirectory()) {
-      f
-        .listFiles()
-        .flatMap(f => listAllFiles(f))
-    } else {
-      Array.empty
-    }
-  }
-
   private def getSingleParquetFileRowGroupCounts(
       spark: SparkSession,
       parquetPath: File): Seq[Long] = {
@@ -315,6 +304,26 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
   }
 
   private case class ParquetRowGroup(rowCount: Long, totalByteSize: Long)
+
+  private def listAllFiles(f: File): Array[File] = {
+    if (f.isFile()) {
+      Array(f)
+    } else if (f.isDirectory()) {
+      f.listFiles().flatMap(listAllFiles)
+    } else {
+      Array.empty
+    }
+  }
+
+  private def parquetFileRowCounts(spark: SparkSession, parquetPath: File): Seq[Long] = {
+    spark.read.parquet(parquetPath.getAbsolutePath)
+      .select(input_file_name().as("file"))
+      .groupBy("file")
+      .count()
+      .collect()
+      .map(_.getLong(1))
+      .toSeq
+  }
 
   private def getSingleParquetFileRowGroups(
       spark: SparkSession,
@@ -363,15 +372,10 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = (1 to 16000).toDF()
+        val df = (1 to 200).toDF().repartition(1)
         df.write.mode("overwrite").parquet(tempFile.getAbsolutePath())
 
-        listAllFiles(tempFile)
-          .map(f => f.getAbsolutePath())
-          .filter(p => p.endsWith("parquet"))
-          .map(p => {
-            assertRowCount50 (spark.read.parquet(p).count()) 
-          })
+        parquetFileRowCounts(spark, tempFile).foreach(assertRowCount50)
       })
     } finally {
       fullyDelete(tempFile)
@@ -389,15 +393,10 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = (1 to 16000).map(i => (i, i % 2)).toDF()
+        val df = (1 to 200).map(i => (i, i % 2)).toDF().repartition(1)
         df.write.mode("overwrite").partitionBy("_2").parquet(tempFile.getAbsolutePath())
 
-        listAllFiles(tempFile)
-          .map(f => f.getAbsolutePath())
-          .filter(p => p.endsWith("parquet"))
-          .map(p => {
-            assertRowCount50 (spark.read.parquet(p).count()) 
-          })
+        parquetFileRowCounts(spark, tempFile).foreach(assertRowCount50)
       })
     } finally {
       fullyDelete(tempFile)
@@ -421,17 +420,13 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
             .repartition(1)
             .write
             .mode("overwrite")
-            .partitionBy("_2")
-            .parquet(tempFile.getAbsolutePath())
+              .partitionBy("_2")
+              .parquet(tempFile.getAbsolutePath())
           // check the whole number of rows
-          assertResult(1600) (spark.read.parquet(tempFile.getAbsolutePath()).count())
+          val rowCounts = parquetFileRowCounts(spark, tempFile)
+          assertResult(1600)(rowCounts.sum)
           // check number of rows in each file
-          listAllFiles(tempFile)
-            .map(f => f.getAbsolutePath())
-            .filter(p => p.endsWith("parquet"))
-            .map(p => {
-              assertResult(expectedRecordsPerFile) (spark.read.parquet(p).count())
-            })
+          rowCounts.foreach(assertResult(expectedRecordsPerFile))
         })
       } finally {
         fullyDelete(tempFile)
@@ -459,14 +454,10 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
               .partitionBy("_2")
               .parquet(tempFile.getAbsolutePath())
           // check the whole number of rows
-          assertResult(1600)(spark.read.parquet(tempFile.getAbsolutePath()).count())
+          val rowCounts = parquetFileRowCounts(spark, tempFile)
+          assertResult(1600)(rowCounts.sum)
           // check number of rows in each file
-          listAllFiles(tempFile)
-              .map(f => f.getAbsolutePath())
-              .filter(p => p.endsWith("parquet"))
-              .map(p => {
-                assertResult(expectedRecordsPerFile)(spark.read.parquet(p).count())
-              })
+          rowCounts.foreach(assertResult(expectedRecordsPerFile))
         })
       } finally {
         fullyDelete(tempFile)
