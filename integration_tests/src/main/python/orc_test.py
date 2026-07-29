@@ -1144,7 +1144,12 @@ def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path):
         assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
 
 
-@pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
+# One PERFILE reader configuration is sufficient to cover the GpuTimeZoneDB ORC paths.
+# Keep all timezone pairs and V1/V2 readers to exercise both fixed and recurring DST rules.
+@pytest.mark.parametrize("reader_confs", [
+    pytest.param(reader_opt_confs[0], marks=tz_sensitive_test_for_precommit),
+    *reader_opt_confs[1:]
+], ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize("timezone_pair", [("UTC", "Asia/Shanghai"), ("Asia/Shanghai", "UTC"), ("Asia/Shanghai", "America/Los_Angeles")], ids=idfn)
 @tz_sensitive_test

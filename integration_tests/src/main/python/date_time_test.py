@@ -18,7 +18,8 @@ from conftest import is_utc, get_test_tz, is_databricks_runtime
 from data_gen import *
 from datetime import date, datetime, timezone
 from dateutil import tz
-from marks import allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode, ignore_order, incompat, tz_sensitive_test
+from marks import (allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode,
+                   ignore_order, incompat, tz_sensitive_test, tz_sensitive_test_for_precommit)
 from pyspark.sql.types import *
 from spark_session import with_cpu_session, is_before_spark_350, is_before_spark_400
 import pyspark.sql.functions as f
@@ -661,7 +662,10 @@ def test_to_timestamp_runtime_fallback(parser_policy):
 
 @disable_ansi_mode  # ANSI mode is tested separately.
 @tz_sensitive_test
-@pytest.mark.parametrize('parser_policy', ["CORRECTED", "EXCEPTION"], ids=idfn)
+@pytest.mark.parametrize('parser_policy', [
+    pytest.param("CORRECTED", marks=tz_sensitive_test_for_precommit),
+    "EXCEPTION"
+], ids=idfn)
 def test_to_timestamp_tz_rules(parser_policy):
     gen = StringGen("(19[0-9]{2}|20[0-9]{2}|21[0-9]{2})-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ([0-1][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]")
     if get_test_tz() == "Asia/Shanghai":

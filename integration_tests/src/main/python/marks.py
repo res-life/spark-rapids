@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ large_data_test = pytest.mark.large_data_test
 pyarrow_test = pytest.mark.pyarrow_test
 datagen_overrides = pytest.mark.datagen_overrides
 tz_sensitive_test = pytest.mark.tz_sensitive_test
+tz_sensitive_test_for_precommit = pytest.mark.tz_sensitive_test_for_precommit
 hybrid_test = pytest.mark.hybrid_test
 
 # Specific mark for allowing non-GPU Delta writes based on certain conditions.

@@ -18,7 +18,8 @@ from asserts import *
 from conftest import is_not_utc, is_supported_time_zone, is_dataproc_serverless_runtime
 from data_gen import *
 from spark_session import *
-from marks import allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode, tz_sensitive_test
+from marks import (allow_non_gpu, approximate_float, datagen_overrides, disable_ansi_mode,
+                   tz_sensitive_test, tz_sensitive_test_for_precommit)
 from pyspark.sql.types import *
 from spark_init_internal import spark_version
 from datetime import date, datetime, timedelta
@@ -167,7 +168,9 @@ def test_try_cast_string_date_fallback_340(invalid):
         'Cast',
         conf = ansi_enabled_conf)
 
-@pytest.mark.parametrize('data_gen', [StringGen(date_start_1_1_1),
+@pytest.mark.parametrize('data_gen', [
+                                      pytest.param(StringGen(date_start_1_1_1),
+                                                   marks=tz_sensitive_test_for_precommit),
                                       StringGen(date_start_1_1_1 + '[ T][0-3][0-9]:[0-6][0-9]:[0-6][0-9]'),
                                       StringGen(date_start_1_1_1 + '[ T][0-3][0-9]:[0-6][0-9]:[0-6][0-9]\.[0-9]{0,6}Z?'),
                                       # year < 2200, this is testing running on GPU when default TZ is DST
@@ -642,6 +645,7 @@ def test_cast_timestamp_to_string():
             .selectExpr("cast(a as string)"))
 
 @tz_sensitive_test
+@tz_sensitive_test_for_precommit
 @allow_non_gpu(*non_supported_tz_allow)
 def test_cast_timestamp_to_date():
     assert_gpu_and_cpu_are_equal_collect(
