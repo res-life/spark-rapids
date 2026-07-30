@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -125,6 +125,39 @@ def test_casting_from_double_to_timestamp(spark_tmp_path, data_gen):
     # the name of unique column is 'a', cast it into timestamp type
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.read.schema("a timestamp").orc(orc_path)
+    )
+
+
+@pytest.mark.skipif(not is_not_utc(), reason="non-UTC ORC timestamp regression test")
+@allow_non_gpu(*non_utc_allow_orc_scan)
+def test_non_utc_timestamp_regressions(spark_tmp_path):
+    integer_path = spark_tmp_path + '/orc_integer_timestamp_regression'
+    double_path = spark_tmp_path + '/orc_double_timestamp_regression'
+    physical_path = spark_tmp_path + '/orc_physical_timestamp_regression'
+
+    with_cpu_session(
+        lambda spark: spark.createDataFrame([(514952012,)], "a long")
+            .write.orc(integer_path)
+    )
+    with_cpu_session(
+        lambda spark: spark.createDataFrame(
+            [(0.0,), (-8589934591.999999,), (-7953731124.723491,)], "a double")
+            .write.orc(double_path)
+    )
+    with_cpu_session(
+        lambda spark: spark.range(1)
+            .selectExpr("timestamp_micros(-2957649381472612L) AS a")
+            .write.orc(physical_path)
+    )
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema("a timestamp").orc(integer_path)
+    )
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.schema("a timestamp").orc(double_path)
+    )
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.read.orc(physical_path)
     )
 
 
