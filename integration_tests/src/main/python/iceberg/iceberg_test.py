@@ -76,6 +76,8 @@ def _assert_partial_clustering_spj_plan(plan):
     assert len(joins) == 1, f"Expected one GPU SPJ join, found {len(joins)}:\n{plan}"
     assert len(exchanges) == 1, \
         f"Expected one post-join GPU shuffle, found {len(exchanges)}:\n{plan}"
+    assert any(scan.outputPartitioning().isPartiallyClustered() for scan in scans), \
+        f"Expected at least one partially clustered GPU batch scan:\n{plan}"
 
     join_nodes = _collect_plan_nodes(joins[0])
     join_exchanges = [
