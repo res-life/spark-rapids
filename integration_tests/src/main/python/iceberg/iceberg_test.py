@@ -51,7 +51,8 @@ pytestmark = iceberg_unsupported_mark
 
 
 def _is_spark_patch_at_least(minimum):
-    return int(spark_version().split(".")[2]) >= minimum
+    patch = spark_version().split(".")[2].split("-", 1)[0]
+    return int(patch) >= minimum
 
 
 def _collect_plan_nodes(plan):
