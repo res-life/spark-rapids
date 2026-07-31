@@ -50,9 +50,19 @@ _NO_FANOUT = _BASE_TBLPROPS_SQL
 pytestmark = iceberg_unsupported_mark
 
 
-def _is_spark_patch_at_least(minimum):
-    patch = spark_version().split(".")[2].split("-", 1)[0]
+def _is_spark_patch_at_least(version, minimum):
+    patch = version.split(".")[2].split("-", 1)[0]
     return int(patch) >= minimum
+
+
+@pytest.mark.parametrize("version, minimum, expected", [
+    ("3.5.9", 9, True),
+    ("3.5.9-SNAPSHOT", 9, True),
+    ("4.1.2-amzn-0", 2, True),
+    ("3.5.8-SNAPSHOT", 9, False),
+])
+def test_is_spark_patch_at_least(version, minimum, expected):
+    assert _is_spark_patch_at_least(version, minimum) == expected
 
 
 def _collect_plan_nodes(plan):
@@ -92,9 +102,9 @@ def _assert_partial_clustering_spj_plan(plan):
 @ignore_order(local=True)
 @pytest.mark.skipif(
     not (
-        (is_spark_35x() and _is_spark_patch_at_least(9))
-        or (is_spark_40x() and _is_spark_patch_at_least(3))
-        or (is_spark_41x() and _is_spark_patch_at_least(2))
+        (is_spark_35x() and _is_spark_patch_at_least(spark_version(), 9))
+        or (is_spark_40x() and _is_spark_patch_at_least(spark_version(), 3))
+        or (is_spark_41x() and _is_spark_patch_at_least(spark_version(), 2))
     ),
     reason="Requires Spark's partial-clustering correctness fix and GPU Iceberg scan support")
 def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
