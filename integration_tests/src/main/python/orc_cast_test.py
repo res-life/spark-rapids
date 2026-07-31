@@ -17,7 +17,7 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
 from conftest import is_not_utc
 from data_gen import *
-from marks import allow_non_gpu, datagen_overrides
+from marks import allow_non_gpu, datagen_overrides, tz_sensitive_test
 from pyspark.sql.types import *
 from spark_session import with_cpu_session
 from orc_test import reader_opt_confs
@@ -128,6 +128,7 @@ def test_casting_from_double_to_timestamp(spark_tmp_path, data_gen):
     )
 
 
+@tz_sensitive_test
 @pytest.mark.skipif(not is_not_utc(), reason="non-UTC ORC timestamp regression test")
 @allow_non_gpu(*non_utc_allow_orc_scan)
 def test_non_utc_timestamp_regressions(spark_tmp_path):
@@ -141,12 +142,20 @@ def test_non_utc_timestamp_regressions(spark_tmp_path):
     )
     with_cpu_session(
         lambda spark: spark.createDataFrame(
-            [(0.0,), (-8589934591.999999,), (-7953731124.723491,)], "a double")
+            [(0.0,),
+             (-8589934591.999999,),
+             (-7953731124.723491,),
+             (-0.0015,),
+             (-0.0005,),
+             (0.0005,),
+             (0.0015,)],
+            "a double")
             .write.orc(double_path)
     )
     with_cpu_session(
-        lambda spark: spark.range(1)
-            .selectExpr("timestamp_micros(-2957649381472612L) AS a")
+        lambda spark: spark.createDataFrame(
+            [(-2957649381472612,), (-3649379812521628,)], "a long")
+            .selectExpr("timestamp_micros(a) AS a")
             .write.orc(physical_path)
     )
 
@@ -162,10 +171,14 @@ def test_non_utc_timestamp_regressions(spark_tmp_path):
 
 
 @allow_non_gpu(*non_utc_allow_for_test_casting_from_overflow_long)
-def test_casting_from_overflow_double_to_timestamp(spark_tmp_path):
+# Keep both signs beyond the Long microsecond range after any timezone correction.
+@pytest.mark.parametrize("overflow_value", [9223372123255.0, -9223372123255.0])
+def test_casting_from_overflow_double_to_timestamp(spark_tmp_path, overflow_value):
     orc_path = spark_tmp_path + '/orc_casting_from_overflow_double_to_timestamp'
     with_cpu_session(
-        lambda spark: unary_op_df(spark, DoubleGen(min_exp=38)).write.orc(orc_path)
+        lambda spark: spark.createDataFrame(
+            [(overflow_value,)], "a double")
+            .write.orc(orc_path)
     )
     assert_gpu_and_cpu_error(
         df_fun=lambda spark: spark.read.schema("a timestamp").orc(orc_path).collect(),
