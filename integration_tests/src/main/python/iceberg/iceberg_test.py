@@ -126,10 +126,11 @@ def test_iceberg_spj_partial_clustering_distinct(spark_tmp_table_factory):
             f"PARTITIONED BY (id) TBLPROPERTIES ({table_props_sql})")
 
         # The two id=1 rows land in different files. Partial clustering assigns them to
-        # different join tasks and replicates the matching row from the other side.
+        # different join tasks and replicates the matching row from the other side. The missing
+        # id=3 on the right also pads that scan with an empty partition.
         spark.sql(f"INSERT INTO {left_table} VALUES (1, 40.0), (2, 10.0), (3, 15.5)")
         spark.sql(f"INSERT INTO {left_table} VALUES (1, 41.0)")
-        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+        spark.sql(f"INSERT INTO {right_table} VALUES (1, 'a'), (2, 'b')")
 
     with_cpu_session(setup_iceberg_tables)
 
