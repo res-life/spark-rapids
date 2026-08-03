@@ -145,6 +145,9 @@ def test_non_utc_timestamp_regressions(spark_tmp_path):
     with_cpu_session(
         lambda spark: spark.createDataFrame(
             [(0.0,),
+             (float('nan'),),
+             (float('inf'),),
+             (float('-inf'),),
              (-8589934591.999999,),
              (-7953731124.723491,),
              (-0.0015,),
