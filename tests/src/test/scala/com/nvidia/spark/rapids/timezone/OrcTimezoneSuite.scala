@@ -123,18 +123,29 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     Instant.parse("2024-10-27T01:00:00Z")  // Europe/Paris fall back
   )
 
+  private val ParisFirstTransitionLocalUs = {
+    val paris = ZoneId.of("Europe/Paris")
+    val firstTransitionMs = paris.getRules.getTransitions.get(0).getInstant.toEpochMilli
+    TimeUnit.MILLISECONDS.toMicros(
+      firstTransitionMs + TimeZone.getTimeZone(paris.getId).getRawOffset)
+  }
+
   private val ExplicitTimestampMicros = {
     val dstBoundaries = DstTransitions.flatMap { transition =>
       val atTransition = TimeUnit.SECONDS.toMicros(transition.getEpochSecond) +
         TimeUnit.NANOSECONDS.toMicros(transition.getNano)
       Seq(atTransition - 1L, atTransition, atTransition + 1L)
     }
+    val firstTransitionBoundaries = Seq(
+      ParisFirstTransitionLocalUs - 1L,
+      ParisFirstTransitionLocalUs,
+      ParisFirstTransitionLocalUs + 1L)
     Seq(
       newYorkHistoricalTsUs,
       shanghaiHistoricalTsUs,
       ShanghaiEpochBorrowTsUs,
       minTs,
-      maxTs) ++ dstBoundaries
+      maxTs) ++ dstBoundaries ++ firstTransitionBoundaries
   }
 
   private def setSessionTimeZone(spark: SparkSession, tzId: String): Unit = {
