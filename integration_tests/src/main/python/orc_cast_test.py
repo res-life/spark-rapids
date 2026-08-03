@@ -17,7 +17,8 @@ import pytest
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error
 from conftest import is_not_utc
 from data_gen import *
-from marks import allow_non_gpu, datagen_overrides, tz_sensitive_test
+from marks import (allow_non_gpu, datagen_overrides, tz_sensitive_test,
+                   validate_execs_in_gpu_plan)
 from pyspark.sql.types import *
 from spark_session import with_cpu_session
 from orc_test import reader_opt_confs
@@ -131,6 +132,7 @@ def test_casting_from_double_to_timestamp(spark_tmp_path, data_gen):
 @tz_sensitive_test
 @pytest.mark.skipif(not is_not_utc(), reason="non-UTC ORC timestamp regression test")
 @allow_non_gpu(*non_utc_allow_orc_scan)
+@validate_execs_in_gpu_plan('GpuFileSourceScanExec')
 def test_non_utc_timestamp_regressions(spark_tmp_path):
     integer_path = spark_tmp_path + '/orc_integer_timestamp_regression'
     double_path = spark_tmp_path + '/orc_double_timestamp_regression'
