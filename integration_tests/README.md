@@ -378,6 +378,21 @@ unaffected unless `RANDOM_SELECT` is explicitly configured. `RANDOM_SELECT` is n
 reduced IT mode because a second random selection could remove the only selected occurrence of a
 parameter value.
 
+### Sharding tests
+
+Set `TEST_SHARD_INDEX` and `TEST_SHARD_COUNT` together to split the collected tests into stable,
+disjoint shards. `TEST_SHARD_INDEX` is zero-based. The shard is selected from the Java
+`String.hashCode` of the complete pytest node id, so parametrized cases are distributed
+independently and repeated runs select the same cases.
+
+Selection such as `[reduced-it]`, `RANDOM_SELECT`, `TESTS`, `-k`, and `-m` is applied before
+sharding. For example, these commands cover the selected test set exactly once:
+
+```shell
+TEST_SHARD_INDEX=0 TEST_SHARD_COUNT=2 ./integration_tests/run_pyspark_from_build.sh
+TEST_SHARD_INDEX=1 TEST_SHARD_COUNT=2 ./integration_tests/run_pyspark_from_build.sh
+```
+
 ### Randomly selecting tests
 
 To shorten feedback cycles, you can ask the harness to execute only a random subset of the collected

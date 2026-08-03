@@ -608,12 +608,66 @@ def _select_precommit_cases(config, items):
                 f"each-choice tests={each_choice_test_count}.")
 
 
+def _java_string_hashcode(value):
+    """Return Java's deterministic String.hashCode for a pytest node id."""
+    result = 0
+    encoded = value.encode('utf-16-be', errors='surrogatepass')
+    for offset in range(0, len(encoded), 2):
+        code_unit = int.from_bytes(encoded[offset:offset + 2], byteorder='big')
+        result = (31 * result + code_unit) & 0xffffffff
+    return result if result < 0x80000000 else result - 0x100000000
+
+
+def _test_shard_config():
+    shard_index = os.environ.get('TEST_SHARD_INDEX')
+    shard_count = os.environ.get('TEST_SHARD_COUNT')
+    if shard_index is None and shard_count is None:
+        return None
+    if shard_index is None or shard_count is None:
+        raise pytest.UsageError(
+            "TEST_SHARD_INDEX and TEST_SHARD_COUNT must be set together")
+    try:
+        shard_index = int(shard_index)
+        shard_count = int(shard_count)
+    except ValueError as error:
+        raise pytest.UsageError(
+            "TEST_SHARD_INDEX and TEST_SHARD_COUNT must be integers") from error
+    if shard_count < 2:
+        raise pytest.UsageError("TEST_SHARD_COUNT must be at least 2")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise pytest.UsageError(
+            f"TEST_SHARD_INDEX must be between 0 and {shard_count - 1}")
+    return shard_index, shard_count
+
+
+def _apply_test_shard(config, items):
+    shard_config = _test_shard_config()
+    if shard_config is None:
+        return
+
+    shard_index, shard_count = shard_config
+    original_items = list(items)
+    items[:] = [
+        item for item in original_items
+        if _java_string_hashcode(item.nodeid) % shard_count == shard_index
+    ]
+    deselected = [item for item in original_items if item not in items]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    reporter = config.pluginmanager.get_plugin('terminalreporter')
+    if reporter:
+        reporter.write_line(
+            f"TEST_SHARD active: shard {shard_index + 1}/{shard_count} "
+            f"running {len(items)} of {len(original_items)} tests.")
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     if is_precommit_run() and is_reduced_it_run():
         _select_precommit_cases(config, items)
     else:
         _maybe_apply_random_select(config, items)
+    _apply_test_shard(config, items)
     r = random.Random(oom_random_injection_seed)
     for item in items:
         extras = []

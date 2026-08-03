@@ -303,6 +303,232 @@ ci_scala213() {
 
 }
 
+setup_premerge_java() {
+    export JAVA_HOME=$(echo /usr/lib/jvm/java-1.17.0-*)
+    update-java-alternatives --set $JAVA_HOME
+    java -version
+}
+
+run_filecache_ut() {
+    local pom_args=()
+    local buildver=${1:?'buildver is required'}
+    local scala_ver=${2:-2.12}
+    if [[ "$scala_ver" == "2.13" ]]; then
+        pom_args=(-f scala2.13/)
+    fi
+    env -u SPARK_HOME SPARK_CONF=spark.rapids.filecache.enabled=true \
+        $MVN "${pom_args[@]}" -B $MVN_URM_MIRROR -Dbuildver=$buildver \
+        test -rf tests $MVN_BUILD_ARGS -Dpytest.TEST_TAGS='' \
+        -DwildcardSuites=org.apache.spark.sql.rapids.filecache.FileCacheIntegrationSuite
+}
+
+run_scala212_ut() {
+    local buildver=${1:?'buildver is required'}
+    local phase=${2:-install}
+    env -u SPARK_HOME \
+        $MVN -U -B $MVN_URM_MIRROR -Dbuildver=$buildver clean "$phase" \
+        $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
+}
+
+run_scala213_ut() {
+    local buildver=${1:?'buildver is required'}
+    env -u SPARK_HOME \
+        $MVN -f scala2.13/ -U -B $MVN_URM_MIRROR -Dbuildver=$buildver clean install \
+        $MVN_BUILD_ARGS -Dpytest.TEST_TAGS=''
+    run_filecache_ut "$buildver" 2.13
+}
+
+run_base_scala212_ut() {
+    env -u SPARK_HOME \
+        $MVN -B $MVN_URM_MIRROR $PREMERGE_PROFILES clean verify $MVN_PARALLEL_UT_ARGS \
+        -Dpytest.TEST_TAGS='' -Dpytest.TEST_TYPE="pre-commit" \
+        -Dcuda.version=$CLASSIFIER
+}
+
+build_scala212_it_artifacts() {
+    $MVN -U -B $MVN_URM_MIRROR -Dbuildver=$SPARK_BASE_SHIM_VERSION \
+        clean package $MVN_BUILD_ARGS -DskipTests=true
+}
+
+build_scala213_it_artifacts() {
+    $MVN -f scala2.13/ -U -B $MVN_URM_MIRROR -Dbuildver=401 \
+        clean package $MVN_BUILD_ARGS -DskipTests=true
+}
+
+run_it_shard() {
+    local test_tags=${1:?'test tags are required'}
+    local shard_index=${2:?'shard index is required'}
+    local scala_ver=${3:-2.12}
+
+    export TEST_TAGS="$test_tags"
+    export TEST_TYPE="pre-commit"
+    export TEST_SHARD_INDEX="$shard_index"
+    export TEST_SHARD_COUNT=2
+
+    if [[ "$scala_ver" == "2.13" ]]; then
+        SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
+            ./integration_tests/run_pyspark_from_build.sh
+    else
+        ./integration_tests/run_pyspark_from_build.sh
+    fi
+
+    if [[ "$test_tags" == "not premerge_ci_1" ]]; then
+        run_avro_regexp_it_shard
+    fi
+}
+
+run_avro_regexp_it_shard() {
+    INCLUDE_SPARK_AVRO_JAR=true TEST='avro_test.py' \
+        ./integration_tests/run_pyspark_from_build.sh
+    LC_ALL="en_US.UTF-8" TEST="regexp_test.py" \
+        ./integration_tests/run_pyspark_from_build.sh
+}
+
+without_it_shard() {
+    local shard_index=$TEST_SHARD_INDEX
+    local shard_count=$TEST_SHARD_COUNT
+    unset TEST_SHARD_INDEX TEST_SHARD_COUNT
+    "$@"
+    export TEST_SHARD_INDEX=$shard_index
+    export TEST_SHARD_COUNT=$shard_count
+}
+
+run_scala212_ci1_shard() {
+    local shard_index=${1:?'shard index is required'}
+    build_scala212_it_artifacts
+    prepare_spark $SPARK_VER 2.12
+    run_it_shard "premerge_ci_1" "$shard_index" 2.12
+}
+
+run_scala212_ci2_shard() {
+    local shard_index=${1:?'shard index is required'}
+    build_scala212_it_artifacts
+    prepare_spark $SPARK_VER 2.12
+    run_it_shard "not premerge_ci_1" "$shard_index" 2.12
+}
+
+run_scala213_ci_shard() {
+    local shard_index=${1:?'shard index is required'}
+    local SPARK_VER=4.0.1
+    build_scala213_it_artifacts
+    prepare_spark $SPARK_VER 2.13
+    run_it_shard "not premerge_ci_1" "$shard_index" 2.13
+}
+
+run_mvn_verify_special_tests() {
+    unset TEST_TAGS TEST_TYPE
+    rapids_shuffle_smoke_test
+
+    source "$(dirname "$0")"/test-timezones.sh
+    for tz in "${time_zones_test_cases[@]}"
+    do
+        TZ=$tz ./integration_tests/run_pyspark_from_build.sh -m tz_sensitive_test
+    done
+
+    source "${WORKSPACE}/jenkins/hybrid_execution.sh"
+    if hybrid_prepare ; then
+        LOAD_HYBRID_BACKEND=1 ./integration_tests/run_pyspark_from_build.sh -m hybrid_test
+    fi
+}
+
+prepare_jacoco_classes() {
+    local SPK_VER=${JACOCO_SPARK_VER:-"330"}
+    mkdir -p target/jacoco_classes/
+    local FILE
+    FILE=$(ls dist/target/rapids-4-spark_2.12-*.jar | grep -v test | xargs readlink -f)
+    local UDF_JAR
+    UDF_JAR=$(ls ./udf-compiler/target/spark${SPK_VER}/rapids-4-spark-udf_2.12-*-spark${SPK_VER}.jar |
+        grep -v test | xargs readlink -f)
+    pushd target/jacoco_classes/
+    jar xf $FILE com org rapids spark-shared "spark${JACOCO_SPARK_VER:-330}/"
+    jar xf "$UDF_JAR" com/nvidia/spark/udf
+    rm -rf com/nvidia/shaded/ \
+        org/openucx/ spark-shared/com/nvidia/spark/udf/ \
+        spark${SPK_VER}/com/nvidia/spark/udf/ \
+        spark${SPK_VER}/META-INF/versions/*
+    popd
+}
+
+# Twelve Jenkins paths run concurrently: six UT executions and six IT shards.
+premerge_ut_1() {
+    setup_premerge_java
+
+    local BASE_REF
+    BASE_REF=$(git --no-pager log --oneline -1 | awk '{ print $NF }')
+    pre-commit run check-added-large-files --from-ref $BASE_REF --to-ref HEAD
+
+    run_scala212_ut 330 install
+    run_filecache_ut 330
+
+    for version in "${SPARK_SHIM_VERSIONS_PREMERGE_UTF8[@]}"
+    do
+        env -u SPARK_HOME LC_ALL="en_US.UTF-8" \
+            $MVN $MVN_URM_MIRROR -Dbuildver=$version package $MVN_BUILD_ARGS \
+            -Dpytest.TEST_TAGS='' \
+            -DwildcardSuites=com.nvidia.spark.rapids.ConditionalsSuite,com.nvidia.spark.rapids.RegularExpressionSuite,com.nvidia.spark.rapids.RegularExpressionTranspilerSuite
+    done
+}
+
+premerge_ut_2() {
+    setup_premerge_java
+    run_scala212_ut 340 install
+    run_filecache_ut 340
+}
+
+premerge_ut_3() {
+    setup_premerge_java
+    run_base_scala212_ut
+    prepare_jacoco_classes
+}
+
+premerge_ut_4() {
+    setup_premerge_java
+    run_scala212_ut 356 package
+}
+
+premerge_ut_5() {
+    setup_premerge_java
+    run_scala213_ut 350
+}
+
+premerge_ut_6() {
+    setup_premerge_java
+    run_scala213_ut 401
+}
+
+premerge_it_1() {
+    setup_premerge_java
+    run_scala212_ci1_shard 0
+    without_it_shard run_mvn_verify_special_tests
+}
+
+premerge_it_2() {
+    setup_premerge_java
+    run_scala212_ci1_shard 1
+}
+
+premerge_it_3() {
+    setup_premerge_java
+    run_scala212_ci2_shard 0
+}
+
+premerge_it_4() {
+    setup_premerge_java
+    run_scala212_ci2_shard 1
+}
+
+premerge_it_5() {
+    setup_premerge_java
+    run_scala213_ci_shard 0
+}
+
+premerge_it_6() {
+    setup_premerge_java
+    run_scala213_ci_shard 1
+    without_it_shard rapids_shuffle_smoke_test 4.0.1
+    without_it_shard run_iceberg_version_detect_tests 4.0.1 2.13
+}
+
 prepare_spark() {
     spark_version=${1:-'3.3.0'}
     scala_ver=${2:-'2.12'}
@@ -348,6 +574,54 @@ case $BUILD_TYPE in
 
     ci_scala213 )
         ci_scala213
+        ;;
+
+    premerge_ut_1 )
+        premerge_ut_1
+        ;;
+
+    premerge_ut_2 )
+        premerge_ut_2
+        ;;
+
+    premerge_ut_3 )
+        premerge_ut_3
+        ;;
+
+    premerge_ut_4 )
+        premerge_ut_4
+        ;;
+
+    premerge_ut_5 )
+        premerge_ut_5
+        ;;
+
+    premerge_ut_6 )
+        premerge_ut_6
+        ;;
+
+    premerge_it_1 )
+        premerge_it_1
+        ;;
+
+    premerge_it_2 )
+        premerge_it_2
+        ;;
+
+    premerge_it_3 )
+        premerge_it_3
+        ;;
+
+    premerge_it_4 )
+        premerge_it_4
+        ;;
+
+    premerge_it_5 )
+        premerge_it_5
+        ;;
+
+    premerge_it_6 )
+        premerge_it_6
         ;;
 
     *)

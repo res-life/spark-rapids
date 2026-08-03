@@ -626,7 +626,7 @@ manually trigger it by commenting `build`. It includes the following steps,
 1. Mergeable check
 2. Blackduck vulnerability scan
 3. Fetch merged code (merge the pull request HEAD into BASE branch, e.g. fea-001 into branch-x)
-4. Run `mvn verify` and unit tests for multiple Spark versions in parallel.
+4. Run six unit-test configurations and six integration-test shards in parallel.
 Ref: [spark-premerge-build.sh](jenkins/spark-premerge-build.sh)
 
 If it fails, you can click the `Details` link of this check, and go to `Upload log -> Jenkins log for pull request xxx (click here)` to
@@ -635,6 +635,9 @@ find the uploaded log.
 Options:
 1. Skip tests run by adding `[skip ci]` to title, this should only be used for doc-only change
 2. Run build and tests in databricks runtimes by adding `[databricks]` to title, this would add around 30-40 minutes
+3. Run each unit-test configuration with the parallel runner by adding `[fast-ut]` to the title
+4. Reduce multi-parameter integration-test combinations with deterministic each-choice selection
+   by adding `[reduced-it]` to the title
 
 
 ### Code Review Guidelines

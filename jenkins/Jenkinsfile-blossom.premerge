@@ -229,8 +229,9 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     !skipped && (normal_build || skills_build)
                 }
             }
-            // Parallel run mvn verify (build and integration tests) and unit tests (for multiple Spark versions)
-            // If any one is failed will abort another if not finish yet and will upload failure log to Github
+            // Run six UT configurations and six independent IT shards in parallel.
+            // The IT paths are two deterministic shards for each of three logical configurations.
+            // If any path fails, abort the unfinished paths and upload its failure log to GitHub.
             failFast true
             parallel {
                 stage('Skills Premerge Test') {
@@ -280,7 +281,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     }
                 } // end of Skills Premerge Test
 
-                stage('mvn verify') {
+                stage('Premerge UT 1: Spark 330 / Scala 2.12') {
                     when {
                         beforeAgent true
                         beforeOptions true
@@ -290,16 +291,14 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     }
 
                     options {
-                        // We have to use params to pass the resource label in options block,
-                        // this is a limitation of declarative pipeline. And we need to lock resource before agent start
                         lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
                     }
                     agent {
                         kubernetes {
-                            label "premerge-ci-1-${BUILD_TAG}"
+                            label "premerge-ut-1-${BUILD_TAG}"
                             cloud "${common.CLOUD_NAME}"
                             yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
-                            customWorkspace "${CUSTOM_WORKSPACE}"
+                            customWorkspace "${CUSTOM_WORKSPACE}-ut-1"
                         }
                     }
 
@@ -307,12 +306,100 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                         script {
                             unstash "source_tree"
                             container('gpu') {
-                                timeout(time: 6, unit: 'HOURS') { // step only timeout for test run
+                                timeout(time: 6, unit: 'HOURS') {
                                     try {
                                         common.resolveIncompatibleDriverIssue(this)
                                         common.restoreM2Cache(this)
                                         common.prepareArtNetrc(this)
-                                        sh "$PREMERGE_SCRIPT mvn_verify"
+                                        sh "$PREMERGE_SCRIPT premerge_ut_1"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-ut-1')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge UT 2: Spark 340 / Scala 2.12') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-ut-2-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-ut-2"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_ut_2"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-ut-2')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge UT 3: base Spark 330 / Scala 2.12') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-ut-3-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-ut-3"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_ut_3"
                                         step([$class                : 'JacocoPublisher',
                                               execPattern           : '**/target/jacoco.exec',
                                               classPattern          : 'target/jacoco_classes/',
@@ -321,7 +408,7 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         ])
                                     } catch(e) {
                                         common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'mvn-verify')
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-ut-3')
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
@@ -330,9 +417,9 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             }
                         }
                     }
-                } // end of mvn verify stage
+                }
 
-                stage('Premerge CI 2') {
+                stage('Premerge UT 4: Spark 356 / Scala 2.12') {
                     when {
                         beforeAgent true
                         beforeOptions true
@@ -346,10 +433,10 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                     }
                     agent {
                         kubernetes {
-                            label "premerge-ci-2-${BUILD_TAG}"
+                            label "premerge-ut-4-${BUILD_TAG}"
                             cloud "${common.CLOUD_NAME}"
                             yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
-                            customWorkspace "${CUSTOM_WORKSPACE}-ci-2" // Use different workspace to avoid conflict with IT
+                            customWorkspace "${CUSTOM_WORKSPACE}-ut-4"
                         }
                     }
 
@@ -362,10 +449,10 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.resolveIncompatibleDriverIssue(this)
                                         common.restoreM2Cache(this)
                                         common.prepareArtNetrc(this)
-                                        sh "$PREMERGE_SCRIPT ci_2"
+                                        sh "$PREMERGE_SCRIPT premerge_ut_4"
                                     } catch(e) {
                                         common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'ci-2')
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-ut-4')
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
@@ -374,9 +461,9 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             }
                         }
                     }
-                } // end of Unit Test stage
+                }
 
-                stage('CI scala 2.13') {
+                stage('Premerge UT 5: Spark 350 / Scala 2.13') {
                     when {
                         beforeAgent true
                         beforeOptions true
@@ -385,15 +472,15 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                         }
                     }
 
-                     options {
+                    options {
                         lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
                     }
                     agent {
                         kubernetes {
-                            label "ci-scala213-${BUILD_TAG}"
+                            label "premerge-ut-5-${BUILD_TAG}"
                             cloud "${common.CLOUD_NAME}"
                             yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
-                            customWorkspace "${CUSTOM_WORKSPACE}-scala-213" // Use different workspace to avoid conflict with IT
+                            customWorkspace "${CUSTOM_WORKSPACE}-ut-5"
                         }
                     }
 
@@ -406,10 +493,10 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                                         common.resolveIncompatibleDriverIssue(this)
                                         common.restoreM2Cache(this)
                                         common.prepareArtNetrc(this)
-                                        sh "$PREMERGE_SCRIPT ci_scala213"
+                                        sh "$PREMERGE_SCRIPT premerge_ut_5"
                                     } catch(e) {
                                         common.printJVMCoreDumps(this)
-                                        common.uploadDebugBundle(this, 'spark-rapids', 'scala-213')
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-ut-5')
                                         throw e
                                     } finally {
                                         common.publishPytestResult(this, "${STAGE_NAME}")
@@ -418,7 +505,315 @@ git --no-pager diff --name-only HEAD \$BASE -- ${PREMERGE_DOCKERFILE} || true"""
                             }
                         }
                     }
-                } // end of Unit Test stage
+                }
+
+                stage('Premerge UT 6: Spark 401 / Scala 2.13') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-ut-6-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-ut-6"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_ut_6"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-ut-6')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge IT 1: ci1 shard 1 / Spark 330 Scala 2.12') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-it-1-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-it-1"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_it_1"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-it-1')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge IT 2: ci1 shard 2 / Spark 330 Scala 2.12') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-it-2-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-it-2"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_it_2"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-it-2')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge IT 3: ci2 shard 1 / Spark 330 Scala 2.12') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-it-3-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-it-3"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_it_3"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-it-3')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge IT 4: ci2 shard 2 / Spark 330 Scala 2.12') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-it-4-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-it-4"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_it_4"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-it-4')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge IT 5: shard 1 / Spark 401 Scala 2.13') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-it-5-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-it-5"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_it_5"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-it-5')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Premerge IT 6: shard 2 / Spark 401 Scala 2.13') {
+                    when {
+                        beforeAgent true
+                        beforeOptions true
+                        expression {
+                            normal_build
+                        }
+                    }
+
+                    options {
+                        lock(label: "${params.GPU_POOL}", quantity: 1, variable: 'GPU_RESOURCE')
+                    }
+                    agent {
+                        kubernetes {
+                            label "premerge-it-6-${BUILD_TAG}"
+                            cloud "${common.CLOUD_NAME}"
+                            yaml pod.getGPUYAML("${IMAGE_PREMERGE}", "${env.GPU_RESOURCE}", '8', '32Gi')
+                            customWorkspace "${CUSTOM_WORKSPACE}-it-6"
+                        }
+                    }
+
+                    steps {
+                        script {
+                            unstash "source_tree"
+                            container('gpu') {
+                                timeout(time: 6, unit: 'HOURS') {
+                                    try {
+                                        common.resolveIncompatibleDriverIssue(this)
+                                        common.restoreM2Cache(this)
+                                        common.prepareArtNetrc(this)
+                                        sh "$PREMERGE_SCRIPT premerge_it_6"
+                                    } catch(e) {
+                                        common.printJVMCoreDumps(this)
+                                        common.uploadDebugBundle(this, 'spark-rapids', 'premerge-it-6')
+                                        throw e
+                                    } finally {
+                                        common.publishPytestResult(this, "${STAGE_NAME}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 stage('Databricks IT part1') {
                     when {

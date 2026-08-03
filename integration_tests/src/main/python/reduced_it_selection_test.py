@@ -278,10 +278,13 @@ def test_reduced_it_activation(monkeypatch, precommit, reduced_it, expected_path
     monkeypatch.setattr(
         conftest, "_maybe_apply_random_select",
         lambda config, items: selected_paths.append("random"))
+    monkeypatch.setattr(
+        conftest, "_apply_test_shard",
+        lambda config, items: selected_paths.append("shard"))
 
     conftest.pytest_collection_modifyitems(None, [])
 
-    assert selected_paths == [expected_path]
+    assert selected_paths == [expected_path, "shard"]
 
 
 def test_reduced_it_each_choice_selection():
