@@ -23,7 +23,7 @@ import pyspark.sql.functions as f
 
 @pytest.mark.parametrize('ansi_enabled', ['true', 'false'])
 @pytest.mark.parametrize('data_gen', boolean_gens, ids=idfn)
-def test_and(data_gen, ansi_enabled):
+def test_and_or(data_gen, ansi_enabled):
     ansi_conf = {'spark.sql.ansi.enabled': ansi_enabled}
     data_type = data_gen.data_type
     assert_gpu_and_cpu_are_equal_collect(
@@ -32,16 +32,7 @@ def test_and(data_gen, ansi_enabled):
                 f.lit(False) & f.col('b'),
                 f.lit(None).cast(data_type) & f.col('a'),
                 f.col('b') & f.lit(None).cast(data_type),
-                f.col('a') & f.col('b')),
-                conf=ansi_conf)
-
-@pytest.mark.parametrize('ansi_enabled', ['true', 'false'])
-@pytest.mark.parametrize('data_gen', boolean_gens, ids=idfn)
-def test_or(data_gen, ansi_enabled):
-    data_type = data_gen.data_type
-    ansi_conf = {'spark.sql.ansi.enabled': ansi_enabled}
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
+                f.col('a') & f.col('b'),
                 f.col('a') | f.lit(True),
                 f.lit(False) | f.col('b'),
                 f.lit(None).cast(data_type) | f.col('a'),

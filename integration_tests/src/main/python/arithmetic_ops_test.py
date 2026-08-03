@@ -505,9 +505,10 @@ def test_pmod_mixed_decimal(lhs, rhs):
         "Pmod")
 
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_signum(data_gen):
+def test_basic_math_unary_ops(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('signum(a)'))
+            lambda spark : unary_op_df(spark, data_gen).selectExpr(
+                'signum(a)', 'sqrt(a)', 'rint(a)'))
 
 @pytest.mark.parametrize('data_gen', numeric_gens + _arith_decimal_gens_low_precision, ids=idfn)
 @disable_ansi_mode
@@ -578,11 +579,6 @@ def test_abs_ansi_overflow(data_type, value):
         conf=ansi_enabled_conf,
         error_message=_arithmetic_exception_string)
 
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_sqrt(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('sqrt(a)'))
-
 @datagen_overrides(seed=0, reason='https://github.com/NVIDIA/spark-rapids/issues/9744')
 @approximate_float
 @pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
@@ -621,11 +617,6 @@ def test_floor_ceil_overflow(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr('ceil(a)').collect(),
         conf={},
         error_message=exception_type)
-
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_rint(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('rint(a)'))
 
 @pytest.mark.parametrize('data_gen', int_n_long_gens, ids=idfn)
 def test_shift_ops(data_gen):
@@ -817,12 +808,6 @@ def test_bit_count(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: unary_op_df(spark, data_gen).selectExpr('bit_count(a)'))
 
-@approximate_float
-@pytest.mark.parametrize('data_gen', double_gens, ids=idfn)
-def test_radians(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('radians(a)'))
-
 # Spark's degrees will overflow on large values in jdk 8 or below
 @approximate_float
 @pytest.mark.skipif(get_java_major_version() <= 8, reason="requires jdk 9 or higher")
@@ -854,9 +839,9 @@ def test_hex(data_gen):
 # Because spark will overflow on large exponents drop to something well below
 # what it fails at, note this is binary exponent, not base 10
 @pytest.mark.parametrize('data_gen', [DoubleGen(min_exp=-20, max_exp=20)], ids=idfn)
-def test_columnar_acosh_improved(data_gen):
+def test_columnar_inverse_hyperbolic_improved(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('acosh(a)'),
+            lambda spark : unary_op_df(spark, data_gen).selectExpr('acosh(a)', 'asinh(a)'),
             {'spark.rapids.sql.improvedFloatOps.enabled': 'true'})
 
 @approximate_float
@@ -868,22 +853,13 @@ def test_math_unary_ops(data_gen):
                 'sin(a)', 'sinh(a)', 'asin(a)',
                 'tan(a)', 'atan(a)', 'tanh(a)', 'cot(a)',
                 'exp(a)', 'expm1(a)',
-                'log(a)', 'log1p(a)', 'log2(a)', 'log10(a)'))
-
-# The default approximate is 1e-6 or 1 in a million
-# in some cases we need to adjust this because the algorithm is different
-@approximate_float(rel=1e-4, abs=1e-12)
-# Because spark will overflow on large exponents drop to something well below
-# what it fails at, note this is binary exponent, not base 10
-@pytest.mark.parametrize('data_gen', [DoubleGen(min_exp=-20, max_exp=20)], ids=idfn)
-def test_columnar_asinh_improved(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).selectExpr('asinh(a)'),
-            {'spark.rapids.sql.improvedFloatOps.enabled': 'true'})
+                'log(a)', 'log1p(a)', 'log2(a)', 'log10(a)',
+                'radians(a)'))
 
 @approximate_float
-def test_logarithm():
-    # For the 'b' field include a lot more values that we would expect customers to use as a part of a log
+def test_logarithm_and_scalar_pow():
+    # For the 'b' field include a lot more values that we would expect customers to use as
+    # a part of a log or pow.
     data_gen = [('a', DoubleGen()),('b', DoubleGen().with_special_case(lambda rand: float(rand.randint(-16, 16)), weight=100.0))]
     string_type = 'DOUBLE'
     assert_gpu_and_cpu_are_equal_collect(
@@ -892,15 +868,7 @@ def test_logarithm():
                 'log(cast(-12 as {}), b)'.format(string_type),
                 'log(cast(null as {}), b)'.format(string_type),
                 'log(a, cast(null as {}))'.format(string_type),
-                'log(a, b)'))
-
-@approximate_float
-def test_scalar_pow():
-    # For the 'b' field include a lot more values that we would expect customers to use as a part of a pow
-    data_gen = [('a', DoubleGen()),('b', DoubleGen().with_special_case(lambda rand: float(rand.randint(-16, 16)), weight=100.0))]
-    string_type = 'DOUBLE'
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : gen_df(spark, data_gen).selectExpr(
+                'log(a, b)',
                 'pow(a, cast(7 as {}))'.format(string_type),
                 'pow(cast(-12 as {}), b)'.format(string_type),
                 'pow(cast(null as {}), a)'.format(string_type),
@@ -914,7 +882,7 @@ def test_columnar_pow(data_gen):
             lambda spark : binary_op_df(spark, data_gen).selectExpr('pow(a, b)'))
 
 @pytest.mark.parametrize('data_gen', all_basic_gens + _arith_decimal_gens, ids=idfn)
-def test_least(data_gen):
+def test_least_greatest(data_gen):
     num_cols = 20
     s1 = with_cpu_session(
         lambda spark: gen_scalar(data_gen, force_no_nulls=not isinstance(data_gen, NullGen)))
@@ -924,24 +892,9 @@ def test_least(data_gen):
 
     command_args = [f.col('_c' + str(x)) for x in range(0, num_cols)]
     command_args.append(s1)
-    data_type = data_gen.data_type
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : gen_df(spark, gen).select(
-                f.least(*command_args)))
-
-@pytest.mark.parametrize('data_gen', all_basic_gens + _arith_decimal_gens, ids=idfn)
-def test_greatest(data_gen):
-    num_cols = 20
-    s1 = with_cpu_session(
-        lambda spark: gen_scalar(data_gen, force_no_nulls=not isinstance(data_gen, NullGen)))
-    # we want lots of nulls
-    gen = StructGen([('_c' + str(x), data_gen.copy_special_case(None, weight=100.0))
-        for x in range(0, num_cols)], nullable=False)
-    command_args = [f.col('_c' + str(x)) for x in range(0, num_cols)]
-    command_args.append(s1)
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : gen_df(spark, gen).select(
+                f.least(*command_args),
                 f.greatest(*command_args)))
 
 
@@ -1098,10 +1051,10 @@ def test_subtraction_overflow_with_ansi_enabled(data, tp, expr):
 
 
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
-def test_unary_minus_day_time_interval(ansi_enabled):
+def test_unary_ops_day_time_interval(ansi_enabled):
     DAY_TIME_GEN_NO_OVER_FLOW = DayTimeIntervalGen(min_value=timedelta(days=-2000*365), max_value=timedelta(days=3000*365))
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, DAY_TIME_GEN_NO_OVER_FLOW).selectExpr('-a'),
+        lambda spark: unary_op_df(spark, DAY_TIME_GEN_NO_OVER_FLOW).selectExpr('-a', 'abs(a)'),
         conf={'spark.sql.ansi.enabled': ansi_enabled})
 
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
@@ -1115,13 +1068,6 @@ def test_unary_minus_ansi_overflow_day_time_interval(ansi_enabled):
         df_fun=lambda spark: _get_overflow_df(spark, [timedelta(microseconds=LONG_MIN)], DayTimeIntervalType(), '-a').collect(),
         conf={'spark.sql.ansi.enabled': ansi_enabled},
         error_message='SparkArithmeticException' if is_before_spark_400() else "ArithmeticException")
-
-@pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
-def test_abs_ansi_no_overflow_day_time_interval(ansi_enabled):
-    DAY_TIME_GEN_NO_OVER_FLOW = DayTimeIntervalGen(min_value=timedelta(days=-2000*365), max_value=timedelta(days=3000*365))
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, DAY_TIME_GEN_NO_OVER_FLOW).selectExpr('abs(a)'),
-        conf={'spark.sql.ansi.enabled': ansi_enabled})
 
 @pytest.mark.parametrize('ansi_enabled', ['false', 'true'])
 def test_abs_ansi_overflow_day_time_interval(ansi_enabled):
