@@ -58,43 +58,32 @@ not_supported_get_map_value_keys_map_gens = \
 
 @pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_map_keys(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, data_gen).selectExpr(
+def test_map_keys_values_and_access(data_gen):
+    key_gen = data_gen._key_gen
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+            lambda spark: gen_df(spark, [('a', data_gen), ('ix', key_gen)]).selectExpr(
                 # Technically the order of the keys could change, and be different and still correct
                 # but it works this way for now so lets see if we can maintain it.
                 # Good thing too, because we cannot support sorting all of the types that could be
                 # in here yet, and would need some special case code for checking equality
-                'map_keys(a)'))
+                'map_keys(a)',
+                'map_values(a)',
+                # The first access is not guaranteed to hit. The second hits the first key, or null
+                # for an empty generated map.
+                'a[ix]',
+                'a[map_keys(a)[0]]'),
+            exist_classes="GpuGetMapValue,GpuMapKeys")
 
 
 @pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
-@allow_non_gpu(*non_utc_allow)
-def test_map_values(data_gen):
+def test_map_entries_round_trip(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark: unary_op_df(spark, data_gen).selectExpr(
                 # Technically the order of the values could change, and be different and still correct
                 # but it works this way for now so lets see if we can maintain it.
                 # Good thing too, because we cannot support sorting all of the types that could be
                 # in here yet, and would need some special case code for checking equality
-                'map_values(a)'))
-
-
-@pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
-def test_map_entries(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, data_gen).selectExpr(
-                # Technically the order of the values could change, and be different and still correct
-                # but it works this way for now so lets see if we can maintain it.
-                # Good thing too, because we cannot support sorting all of the types that could be
-                # in here yet, and would need some special case code for checking equality
-                'map_entries(a)'))
-
-
-@pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
-def test_map_from_entries(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, data_gen).selectExpr(
+                'map_entries(a)',
                 'map_from_entries(map_entries(a))'),
             conf={'spark.sql.mapKeyDedupPolicy': 'LAST_WIN'})
 
@@ -223,34 +212,43 @@ numeric_key_gens = [
 
 numeric_key_map_gens = [MapGen(key, value(), max_length=6)
                         for key in numeric_key_gens for value in get_map_value_gens()]
+numeric_key_map_gen_groups = [
+    numeric_key_map_gens[index:index + 4]
+    for index in range(0, len(numeric_key_map_gens), 4)]
 
 
 @disable_ansi_mode  # ANSI mode failures are tested separately.
-@pytest.mark.parametrize('data_gen', numeric_key_map_gens, ids=idfn)
-def test_get_map_value_numeric_keys(data_gen):
-    key_gen = data_gen._key_gen
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: gen_df(spark, [("a", data_gen), ("ix", key_gen)]).selectExpr(
-            'a[ix]',
-            'a[0]',
-            'a[1]',
-            'a[null]',
-            'a[-9]',
-            'a[999]'))
-
-
-@disable_ansi_mode  # ANSI mode failures are tested separately.
-@pytest.mark.parametrize('data_gen', supported_key_map_gens, ids=idfn)
+@pytest.mark.parametrize('data_gens', numeric_key_map_gen_groups, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_get_map_value_supported_keys(data_gen):
-    key_gen = data_gen._key_gen
-    # first expression is not guaranteed to hit
-    # the second expression with map_keys will hit on the first key, or null
-    # on an empty dictionary generated in `a`
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: gen_df(spark, [("a", data_gen), ("ix", key_gen)]) \
-            .selectExpr('a[ix]', 'a[map_keys(a)[0]]'),
-        exist_classes="GpuGetMapValue,GpuMapKeys")
+def test_map_access_numeric_keys(data_gens):
+    gen = StructGen([
+        (name, column_gen)
+        for index, data_gen in enumerate(data_gens)
+        for name, column_gen in [
+            ('a{}'.format(index), data_gen),
+            ('ix{}'.format(index), data_gen._key_gen)]], nullable=False)
+    expressions = [
+        expression
+        for index in range(len(data_gens))
+        for expression in [
+            'a{0}[ix{0}]'.format(index),
+            'a{0}[0]'.format(index),
+            'a{0}[1]'.format(index),
+            'a{0}[null]'.format(index),
+            'a{0}[-9]'.format(index),
+            'a{0}[999]'.format(index),
+            'element_at(a{0}, 0)'.format(index),
+            'element_at(a{0}, 1)'.format(index),
+            'element_at(a{0}, null)'.format(index),
+            'element_at(a{0}, -9)'.format(index),
+            'element_at(a{0}, 999)'.format(index),
+            'try_element_at(a{0}, 0)'.format(index),
+            'try_element_at(a{0}, 1)'.format(index),
+            'try_element_at(a{0}, null)'.format(index),
+            'try_element_at(a{0}, -9)'.format(index),
+            'try_element_at(a{0}, 999)'.format(index)]]
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: gen_df(spark, gen).selectExpr(*expressions))
 
 
 @allow_non_gpu("GetMapValue")
@@ -583,19 +581,6 @@ def test_element_at_map_string_keys(data_gen):
             conf={'spark.sql.ansi.enabled': False})
 
 
-@pytest.mark.parametrize('data_gen', numeric_key_map_gens, ids=idfn)
-@allow_non_gpu(*non_utc_allow)
-def test_element_at_map_numeric_keys(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, data_gen).selectExpr(
-            'element_at(a, 0)',
-            'element_at(a, 1)',
-            'element_at(a, null)',
-            'element_at(a, -9)',
-            'element_at(a, 999)'),
-        conf={'spark.sql.ansi.enabled': False})
-
-
 @pytest.mark.parametrize('data_gen',
                          [MapGen(DecimalGen(precision=35, scale=2, nullable=False), value(), max_length=6)
                           for value in get_map_value_gens(precision=37, scale=0)],
@@ -906,26 +891,27 @@ def test_map_zip_with_mismatch_keys(data_gen):
     # Not using @disable_ansi_mode because of https://github.com/NVIDIA/spark-rapids/issues/13214.  Using explicit setting instead.
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.ansi.enabled': False})
 
-@pytest.mark.parametrize('data_gen', map_gens_sample + maps_with_binary_value, ids=idfn)
+map_filter_gen_groups = [
+    (map_gens_sample + maps_with_binary_value)[index:index + 3]
+    for index in range(0, len(map_gens_sample + maps_with_binary_value), 3)]
+
+
+@pytest.mark.parametrize('data_gens', map_filter_gen_groups, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_map_filter(data_gen):
-    columns = ['map_filter(a, (key, value) -> isnotnull(value) )',
-               'map_filter(a, (key, value) -> isnull(value) )',
-               'map_filter(a, (key, value) -> isnull(key) or isnotnull(value) )',
-               'map_filter(a, (key, value) -> isnotnull(key) and isnull(value) )']
+def test_map_filter(data_gens):
+    gen = StructGen([
+        ('a{}'.format(index), data_gen)
+        for index, data_gen in enumerate(data_gens)], nullable=False)
+    columns = [
+        expression.format(index)
+        for index in range(len(data_gens))
+        for expression in [
+            'map_filter(a{0}, (key, value) -> isnotnull(value))',
+            'map_filter(a{0}, (key, value) -> isnull(value))',
+            'map_filter(a{0}, (key, value) -> isnull(key) or isnotnull(value))',
+            'map_filter(a{0}, (key, value) -> isnotnull(key) and isnull(value))']]
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, data_gen).selectExpr(columns))
-
-@pytest.mark.parametrize('data_gen', numeric_key_map_gens, ids=idfn)
-def test_try_element_at_map_numeric_keys(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: unary_op_df(spark, data_gen).selectExpr(
-            'try_element_at(a, 0)',
-            'try_element_at(a, 1)',
-            'try_element_at(a, null)',
-            'try_element_at(a, -9)',
-            'try_element_at(a, 999)'))
-
+        lambda spark: gen_df(spark, gen).selectExpr(*columns))
 
 @pytest.mark.parametrize('data_gen', [simple_string_to_string_map_gen], ids=idfn)
 def test_try_element_at_map_missing_keys(data_gen):
