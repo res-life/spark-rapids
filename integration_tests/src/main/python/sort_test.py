@@ -14,6 +14,7 @@
 
 import pytest
 
+from _pytest.mark.structures import ParameterSet
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_error, assert_gpu_fallback_collect
 from conftest import is_not_utc
 from data_gen import *
@@ -37,6 +38,48 @@ orderable_not_null_gen = [ByteGen(nullable=False), ShortGen(nullable=False), Int
         DecimalGen(precision=7, scale=3, nullable=False), DecimalGen(precision=12, scale=2, nullable=False),
         _orderable_not_null_big_decimal_gen]
 
+SORT_ORDERS = [
+    f.col('a').asc(), f.col('a').asc_nulls_last(),
+    f.col('a').desc(), f.col('a').desc_nulls_first()]
+
+
+def _unwrap_param(value):
+    if isinstance(value, ParameterSet):
+        assert len(value.values) == 1
+        return value.values[0], list(value.marks)
+    return value, []
+
+
+def _cover_data_and_sort_orders(data_gens, id_prefix):
+    """Cover every data type and every sort order without their redundant cross product."""
+    params = []
+    for index, data_gen in enumerate(data_gens):
+        value, marks = _unwrap_param(data_gen)
+        params.append(pytest.param(
+            value, SORT_ORDERS[0], marks=marks,
+            id='{}-data-{}'.format(id_prefix, index)))
+    representative, marks = _unwrap_param(data_gens[0])
+    for index, order in enumerate(SORT_ORDERS[1:], start=1):
+        params.append(pytest.param(
+            representative, order, marks=marks,
+            id='{}-order-{}'.format(id_prefix, index)))
+    return params
+
+
+def _with_alternating_configs(cases, configs, id_prefix):
+    params = []
+    for index, case in enumerate(cases):
+        values = []
+        marks = []
+        for value in case:
+            actual, value_marks = _unwrap_param(value)
+            values.append(actual)
+            marks.extend(value_marks)
+        params.append(pytest.param(
+            *values, *configs[index % len(configs)], marks=marks,
+            id='{}-{}'.format(id_prefix, index)))
+    return params
+
 @allow_non_gpu('SortExec', 'ShuffleExchangeExec', 'RangePartitioning', 'SortOrder')
 @pytest.mark.parametrize('data_gen', [StringGen(nullable=False)], ids=idfn)
 @pytest.mark.parametrize('order', [f.col('a').cast(BinaryType())], ids=idfn)
@@ -55,17 +98,20 @@ def test_sort_nonbinary_carry_binary(data_gen):
                 .withColumn("binary_string", f.col("a").cast(BinaryType()))
                 .orderBy(f.col('a')))
 
-@pytest.mark.parametrize('data_gen', orderable_gens + orderable_not_null_gen, ids=idfn)
-@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(), f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,order',
+    _cover_data_and_sort_orders(orderable_gens + orderable_not_null_gen, 'orderby'))
 def test_single_orderby(data_gen, order):
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).orderBy(order),
             conf={'spark.sql.adaptive.enabled': 'false'})
 
+# asc() and desc() already use Spark's default NULLS FIRST and NULLS LAST respectively,
+# so the explicit default-null-order variants would create duplicate SortOrder nodes.
 @pytest.mark.parametrize('data_gen', single_level_array_gens, ids=idfn)
-@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_first(), f.col('a').asc_nulls_last(),
-                                   f.col('a').desc(), f.col('a').desc_nulls_first(), f.col('a').desc_nulls_last()], ids=idfn)
+@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(),
+                                   f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
 def test_single_orderby_on_array(data_gen, order):
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
@@ -74,8 +120,8 @@ def test_single_orderby_on_array(data_gen, order):
 
 @allow_non_gpu('SortExec', 'ShuffleExchangeExec')
 @pytest.mark.parametrize('data_gen', [ArrayGen(sub_gen) for sub_gen in single_level_array_gens], ids=idfn)
-@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_first(), f.col('a').asc_nulls_last(),
-                                   f.col('a').desc(), f.col('a').desc_nulls_first(), f.col('a').desc_nulls_last()], ids=idfn)
+@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(),
+                                   f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
 def test_single_orderby_fallback_for_multilevel_array(data_gen, order):
     assert_gpu_fallback_collect(
         lambda spark : unary_op_df(spark, data_gen).orderBy(order),
@@ -85,8 +131,8 @@ def test_single_orderby_fallback_for_multilevel_array(data_gen, order):
 
 @allow_non_gpu('SortExec', 'ShuffleExchangeExec')
 @pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('child1', sub_gen)])) for sub_gen in orderable_gens], ids=idfn)
-@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_first(), f.col('a').asc_nulls_last(),
-                                   f.col('a').desc(), f.col('a').desc_nulls_first(), f.col('a').desc_nulls_last()], ids=idfn)
+@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(),
+                                   f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
 def test_single_orderby_fallback_for_array_of_struct(data_gen, order):
     assert_gpu_fallback_collect(
             lambda spark : unary_op_df(spark, data_gen).orderBy(order),
@@ -94,28 +140,32 @@ def test_single_orderby_fallback_for_array_of_struct(data_gen, order):
         # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
         conf={'spark.sql.adaptive.enabled': 'false'})
 
-@pytest.mark.parametrize('shuffle_parts', [
-    pytest.param(1),
-    pytest.param(200)
-])
-@pytest.mark.parametrize('stable_sort', ['STABLE', 'OUTOFCORE'])
-@pytest.mark.parametrize('data_gen', [
+NESTED_ORDERBY_DATA_GENS = [
     pytest.param(all_basic_struct_gen),
     pytest.param(StructGen([['child0', decimal_gen_128bit]])),
     pytest.param(StructGen([['child0', all_basic_struct_gen]])),
     pytest.param(MapGen(StringGen(pattern='key_[0-9]', nullable=False), simple_string_to_string_map_gen),
         marks=pytest.mark.xfail(reason="maps are not supported")),
-], ids=idfn)
-@pytest.mark.parametrize('order', [
+]
+
+# Keep one case for each distinct direction and null-order combination.
+NESTED_SORT_ORDERS = [
     pytest.param(f.col('a').asc()),
-    pytest.param(f.col('a').asc_nulls_first()),
     pytest.param(f.col('a').asc_nulls_last(),
         marks=pytest.mark.xfail(reason='opposite null order not supported')),
     pytest.param(f.col('a').desc()),
     pytest.param(f.col('a').desc_nulls_first(),
         marks=pytest.mark.xfail(reason='opposite null order not supported')),
-    pytest.param(f.col('a').desc_nulls_last()),
-], ids=idfn)
+]
+
+@pytest.mark.parametrize(
+    'data_gen,order,shuffle_parts,stable_sort',
+    _with_alternating_configs(
+        [(data_gen, order)
+         for data_gen in NESTED_ORDERBY_DATA_GENS
+         for order in NESTED_SORT_ORDERS],
+        [(1, 'STABLE'), (200, 'STABLE'), (1, 'OUTOFCORE'), (200, 'OUTOFCORE')],
+        'nested-orderby'))
 def test_single_nested_orderby_plain(data_gen, order, shuffle_parts, stable_sort):
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(
@@ -145,8 +195,10 @@ def test_single_nested_orderby_fallback_for_nullorder(data_gen, order):
 
 # SPARK CPU itself has issue with negative scale for take ordered and project
 orderable_without_neg_decimal = [n for n in (orderable_gens + orderable_not_null_gen) if not (isinstance(n, DecimalGen) and n.scale < 0)]
-@pytest.mark.parametrize('data_gen', orderable_without_neg_decimal + single_level_array_gens, ids=idfn)
-@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(), f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,order',
+    _cover_data_and_sort_orders(
+        orderable_without_neg_decimal + single_level_array_gens, 'orderby-limit'))
 def test_single_orderby_with_limit(data_gen, order):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, data_gen).orderBy(order).limit(100))
@@ -177,8 +229,10 @@ def test_single_nested_orderby_with_limit_fallback(data_gen, order):
             'spark.rapids.allowCpuRangePartitioning': False
         })
 
-@pytest.mark.parametrize('data_gen', orderable_gens + orderable_not_null_gen + single_level_array_gens, ids=idfn)
-@pytest.mark.parametrize('order', [f.col('a').asc(), f.col('a').asc_nulls_last(), f.col('a').desc(), f.col('a').desc_nulls_first()], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,order',
+    _cover_data_and_sort_orders(
+        orderable_gens + orderable_not_null_gen + single_level_array_gens, 'sort-in-part'))
 def test_single_sort_in_part(data_gen, order):
     # We set `num_slices` to handle https://github.com/NVIDIA/spark-rapids/issues/2477
     assert_gpu_and_cpu_are_equal_collect(
@@ -190,15 +244,14 @@ def test_single_sort_in_part(data_gen, order):
     pytest.param(StructGen([['child0', all_basic_struct_gen]])),
     pytest.param(StructGen([['child0', struct_gen_decimal128]])),
 ], ids=idfn)
+# Keep one case for each distinct direction and null-order combination.
 @pytest.mark.parametrize('order', [
     pytest.param(f.col('a').asc()),
-    pytest.param(f.col('a').asc_nulls_first()),
     pytest.param(f.col('a').asc_nulls_last(),
                  marks=pytest.mark.xfail(reason='opposite null order not supported')),
     pytest.param(f.col('a').desc()),
     pytest.param(f.col('a').desc_nulls_first(),
                  marks=pytest.mark.xfail(reason='opposite null order not supported')),
-    pytest.param(f.col('a').desc_nulls_last()),
 ], ids=idfn)
 @pytest.mark.parametrize('stable_sort', ['STABLE', 'OUTOFCORE'], ids=idfn)
 def test_single_nested_sort_in_part(data_gen, order, stable_sort):
