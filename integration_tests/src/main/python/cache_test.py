@@ -27,6 +27,10 @@ import pyspark.ml.linalg as ml
 
 enable_vectorized_confs = [{"spark.sql.inMemoryColumnarStorage.enableVectorizedReader": "true"},
                            {"spark.sql.inMemoryColumnarStorage.enableVectorizedReader": "false"}]
+cache_reader_confs = [
+    copy_and_update(enable_vectorized_conf, batch_size)
+    for enable_vectorized_conf in enable_vectorized_confs
+    for batch_size in [{"spark.rapids.sql.batchSizeBytes": "100"}, {}]]
 
 # Many tests sort the results, so use a sortable decimal generator as many Spark versions
 # fail to sort some large decimals properly.
@@ -111,15 +115,15 @@ def test_cache_expand_exec(data_gen, enable_vectorized_conf):
                                                      ['child1',
                                                       StructGen([['child0', IntegerGen()]])]])),
                                       decimal_struct_gen] + _cache_single_array_gens_no_null + all_gen, ids=idfn)
-@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @allow_non_gpu('CollectLimitExec')
-def test_cache_partial_load(data_gen, enable_vectorized_conf):
+def test_cache_partial_load(data_gen):
     def partial_return(col):
         def partial_return_cache(spark):
             return two_col_df(spark, data_gen, string_gen).select(f.col("a"), f.col("b")).cache().limit(50).select(col)
         return partial_return_cache
-    assert_gpu_and_cpu_are_equal_collect(partial_return(f.col("a")), conf=enable_vectorized_conf)
-    assert_gpu_and_cpu_are_equal_collect(partial_return(f.col("b")), conf=enable_vectorized_conf)
+    for enable_vectorized_conf in enable_vectorized_confs:
+        assert_gpu_and_cpu_are_equal_collect(partial_return(f.col("a")), conf=enable_vectorized_conf)
+        assert_gpu_and_cpu_are_equal_collect(partial_return(f.col("b")), conf=enable_vectorized_conf)
 
 @pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
 @allow_non_gpu('CollectLimitExec')
@@ -170,12 +174,9 @@ non_utc_orc_save_table_allow = ['DataWritingCommandExec', 'WriteFilesExec'] if i
                                      pytest.param(DoubleGen(special_cases=double_special_cases), marks=[incompat]),
                                      BooleanGen(), DateGen(), TimestampGen(), decimal_gen_32bit, decimal_gen_64bit,
                                      orderable_decimal_gen_128bit] + _cache_single_array_gens_no_null, ids=idfn)
-@pytest.mark.parametrize('ts_write', ['TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS'])
-@pytest.mark.parametrize('enable_vectorized', ['true', 'false'], ids=idfn)
 @ignore_order
 @allow_non_gpu("SortExec", "ShuffleExchangeExec", "RangePartitioning", *non_utc_orc_save_table_allow)
-def test_cache_columnar(spark_tmp_path, data_gen, enable_vectorized, ts_write):
-    data_path_gpu = spark_tmp_path + '/PARQUET_DATA'
+def test_cache_columnar(spark_tmp_path, data_gen):
     def read_parquet_cached(data_path):
         def write_read_parquet_cached(spark):
             df = unary_op_df(spark, data_gen)
@@ -184,16 +185,20 @@ def test_cache_columnar(spark_tmp_path, data_gen, enable_vectorized, ts_write):
             cached.count()
             return cached.select(f.col("a"))
         return write_read_parquet_cached
-    # rapids-spark doesn't support LEGACY read for parquet
-    conf={'spark.sql.legacy.parquet.datetimeRebaseModeInWrite': 'CORRECTED',
-          'spark.sql.legacy.parquet.datetimeRebaseModeInRead' : 'CORRECTED',
-          # set the int96 rebase mode values because its LEGACY in databricks which will preclude this op from running on GPU
-          'spark.sql.legacy.parquet.int96RebaseModeInWrite' : 'CORRECTED',
-          'spark.sql.legacy.parquet.int96RebaseModeInRead' : 'CORRECTED',
-          'spark.sql.inMemoryColumnarStorage.enableVectorizedReader' : enable_vectorized,
-          'spark.sql.parquet.outputTimestampType': ts_write}
+    for enable_vectorized in ['true', 'false']:
+        for ts_write in ['TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']:
+            data_path_gpu = '{}/PARQUET_DATA/{}_{}'.format(
+                spark_tmp_path, enable_vectorized, ts_write)
+            # rapids-spark doesn't support LEGACY read for parquet
+            conf={'spark.sql.legacy.parquet.datetimeRebaseModeInWrite': 'CORRECTED',
+                  'spark.sql.legacy.parquet.datetimeRebaseModeInRead' : 'CORRECTED',
+                  # set the int96 rebase mode values because its LEGACY in databricks which will preclude this op from running on GPU
+                  'spark.sql.legacy.parquet.int96RebaseModeInWrite' : 'CORRECTED',
+                  'spark.sql.legacy.parquet.int96RebaseModeInRead' : 'CORRECTED',
+                  'spark.sql.inMemoryColumnarStorage.enableVectorizedReader' : enable_vectorized,
+                  'spark.sql.parquet.outputTimestampType': ts_write}
 
-    assert_gpu_and_cpu_are_equal_collect(read_parquet_cached(data_path_gpu), conf)
+            assert_gpu_and_cpu_are_equal_collect(read_parquet_cached(data_path_gpu), conf)
 
 @pytest.mark.parametrize('data_gen', [all_basic_struct_gen, StructGen([['child0', StructGen([['child1', byte_gen]])]]),
                                       decimal_struct_gen,
@@ -201,8 +206,7 @@ def test_cache_columnar(spark_tmp_path, data_gen, enable_vectorized, ts_write):
                                           StructGen([['child0', StringGen()],
                                                      ['child1',
                                                       StructGen([['child0', IntegerGen()]])]]))] + _cache_single_array_gens_no_null + all_gen, ids=idfn)
-@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-def test_cache_cpu_gpu_mixed(data_gen, enable_vectorized_conf):
+def test_cache_cpu_gpu_mixed(data_gen):
     def func(spark):
         df = unary_op_df(spark, data_gen)
         df.cache().count()
@@ -211,7 +215,8 @@ def test_cache_cpu_gpu_mixed(data_gen, enable_vectorized_conf):
 
         return df.selectExpr("a")
 
-    assert_gpu_and_cpu_are_equal_collect(func, conf=enable_vectorized_conf)
+    for enable_vectorized_conf in enable_vectorized_confs:
+        assert_gpu_and_cpu_are_equal_collect(func, conf=enable_vectorized_conf)
 
 @pytest.mark.parametrize('enable_vectorized', ['false', 'true'], ids=idfn)
 @pytest.mark.parametrize('with_x_session', [with_gpu_session, with_cpu_session])
@@ -288,17 +293,14 @@ def function_to_test_on_df(with_x_session, df_gen, func_on_df, test_conf):
 
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('with_x_session', [with_gpu_session, with_cpu_session])
-@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-@pytest.mark.parametrize('batch_size', [{"spark.rapids.sql.batchSizeBytes": "100"}, {}], ids=idfn)
 @ignore_order
-def test_cache_count(data_gen, with_x_session, enable_vectorized_conf, batch_size):
-    test_conf = copy_and_update(enable_vectorized_conf, batch_size)
-    generate_data_and_test_func_on_cached_df(with_x_session, lambda df: df.count(), data_gen, test_conf)
+def test_cache_count(data_gen, with_x_session):
+    for test_conf in cache_reader_confs:
+        generate_data_and_test_func_on_cached_df(
+            with_x_session, lambda df: df.count(), data_gen, test_conf)
 
 @pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
 @pytest.mark.parametrize('with_x_session', [with_cpu_session, with_gpu_session])
-@pytest.mark.parametrize('enable_vectorized_conf', enable_vectorized_confs, ids=idfn)
-@pytest.mark.parametrize('batch_size', [{"spark.rapids.sql.batchSizeBytes": "100"}, {}], ids=idfn)
 @ignore_order
 # This tests the cached and uncached values returned by collect on the CPU and GPU.
 # When running on the GPU with the DefaultCachedBatchSerializer, to project the results Spark adds a ColumnarToRowExec
@@ -306,13 +308,13 @@ def test_cache_count(data_gen, with_x_session, enable_vectorized_conf, batch_siz
 # add that case to the `allowed` list. As of now there is no way for us to limit the scope of allow_non_gpu based on a
 # condition therefore we must allow it in all cases
 @allow_non_gpu('ColumnarToRowExec')
-def test_cache_multi_batch(data_gen, with_x_session, enable_vectorized_conf, batch_size):
-    test_conf = copy_and_update(enable_vectorized_conf, batch_size)
-    generate_data_and_test_func_on_cached_df(with_x_session, lambda df: df.collect(), data_gen, test_conf)
+def test_cache_multi_batch(data_gen, with_x_session):
+    for test_conf in cache_reader_confs:
+        generate_data_and_test_func_on_cached_df(
+            with_x_session, lambda df: df.collect(), data_gen, test_conf)
 
 @pytest.mark.parametrize('data_gen', all_basic_map_gens + _cache_single_array_gens_no_null, ids=idfn)
-@pytest.mark.parametrize('enable_vectorized', enable_vectorized_confs, ids=idfn)
-def test_cache_map_and_array(data_gen, enable_vectorized):
+def test_cache_map_and_array(data_gen):
     def helper(spark):
         df = gen_df(spark, StructGen([['a', data_gen]], nullable=False))
         df.persist()
