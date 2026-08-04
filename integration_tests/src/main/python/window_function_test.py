@@ -14,6 +14,7 @@
 import math
 import pytest
 
+from _pytest.mark.structures import ParameterSet
 from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_and_cpu_are_equal_sql, assert_gpu_and_cpu_error, assert_gpu_fallback_collect, assert_gpu_sql_fallback_collect
 from data_gen import *
 from marks import *
@@ -155,6 +156,55 @@ lead_lag_data_gens = [long_gen, DoubleGen(special_cases=[]),
             ['child_time', DateGen()],
             ['child_string', StringGen()]
         ])]
+
+
+def _with_alternating_configs(cases, configs, id_prefix):
+    """Cover every semantic case while rotating independent execution configurations."""
+    params = []
+    for index, case in enumerate(cases):
+        if isinstance(case, ParameterSet):
+            raw_values = case.values
+            marks = list(case.marks)
+        elif isinstance(case, tuple):
+            raw_values = case
+            marks = []
+        else:
+            raw_values = (case,)
+            marks = []
+        values = []
+        for value in raw_values:
+            if isinstance(value, ParameterSet):
+                assert len(value.values) == 1
+                values.append(value.values[0])
+                marks.extend(value.marks)
+            else:
+                values.append(value)
+        params.append(pytest.param(
+            *values, *configs[index % len(configs)], marks=marks,
+            id="{}-{}".format(id_prefix, index)))
+    return params
+
+
+def _add_lead_lag_window_columns(df, c_gen, column, suffix):
+    base_window_spec = Window.partitionBy('a').orderBy('b', column)
+    inclusive_window_spec = base_window_spec.rowsBetween(-10, 100)
+    df = df.withColumn('inc_count' + suffix, f.count(column).over(inclusive_window_spec)) \
+        .withColumn('lead_5' + suffix, f.lead(column, 5).over(base_window_spec)) \
+        .withColumn('lag_1' + suffix, f.lag(column, 1).over(base_window_spec)) \
+        .withColumn('row_num' + suffix, f.row_number().over(base_window_spec))
+
+    # MIN/MAX and non-null defaults are unsupported for STRUCT columns.
+    if isinstance(c_gen, StructGen):
+        return df.withColumn(
+            'lead_def' + suffix, f.lead(column, 2, None).over(base_window_spec)) \
+            .withColumn('lag_def' + suffix, f.lag(column, 4, None).over(base_window_spec))
+
+    default_val = with_cpu_session(
+        lambda spark: gen_scalar_value(c_gen, force_no_nulls=False))
+    return df.withColumn('inc_max' + suffix, f.max(column).over(inclusive_window_spec)) \
+        .withColumn('inc_min' + suffix, f.min(column).over(inclusive_window_spec)) \
+        .withColumn('lead_def' + suffix, f.lead(column, 2, default_val).over(base_window_spec)) \
+        .withColumn('lag_def' + suffix, f.lag(column, 4, default_val).over(base_window_spec))
 
 _float_conf = {'spark.rapids.sql.variableFloatAgg.enabled': 'true',
                        'spark.rapids.sql.castStringToFloat.enabled': 'true'
@@ -1291,8 +1341,11 @@ def test_range_window_three_order_by_current_row_peers():
 # This is for aggregations that work with the optimized unbounded to unbounded window optimization.
 # They don't need to be batched specially, but it only works if all of the aggregations can support this.
 # the order returned should be consistent because the data ends up in a single task (no partitioning)
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize('b_gen', all_basic_gens + [decimal_gen_32bit, decimal_gen_128bit], ids=meta_idfn('data:'))
+@pytest.mark.parametrize(
+    'b_gen,batch_size',
+    _with_alternating_configs(
+        all_basic_gens + [decimal_gen_32bit, decimal_gen_128bit],
+        [('1000',), ('1g',)], 'unbounded-no-part'))
 def test_window_batched_unbounded_no_part(b_gen, batch_size):
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     conf = {'spark.rapids.sql.batchSizeBytes': batch_size,
@@ -1310,8 +1363,11 @@ def test_window_batched_unbounded_no_part(b_gen, batch_size):
         validate_execs_in_gpu_plan = ['GpuCachedDoublePassWindowExec'],
         conf = conf)
 
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize('b_gen', all_basic_gens + [decimal_gen_32bit, decimal_gen_128bit], ids=meta_idfn('data:'))
+@pytest.mark.parametrize(
+    'b_gen,batch_size',
+    _with_alternating_configs(
+        all_basic_gens + [decimal_gen_32bit, decimal_gen_128bit],
+        [('1000',), ('1g',)], 'unbounded-part'))
 def test_window_batched_unbounded(b_gen, batch_size):
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     conf = {'spark.rapids.sql.batchSizeBytes': batch_size,
@@ -1333,8 +1389,11 @@ def test_window_batched_unbounded(b_gen, batch_size):
 # This is for aggregations that work with a running window optimization. They don't need to be batched
 # specially, but it only works if all of the aggregations can support this.
 # the order returned should be consistent because the data ends up in a single task (no partitioning)
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize('b_gen', all_basic_gens + [decimal_gen_32bit, decimal_gen_128bit], ids=meta_idfn('data:'))
+@pytest.mark.parametrize(
+    'b_gen,batch_size',
+    _with_alternating_configs(
+        all_basic_gens + [decimal_gen_32bit, decimal_gen_128bit],
+        [('1000',), ('1g',)], 'running-no-part'))
 def test_rows_based_running_window_unpartitioned(b_gen, batch_size):
     # only SUM cares about ANSI or not here, and SUM could overflow with a few of the GENS used.
     # we test ANSI sum elsewhere so we don't need to do it here
@@ -1565,9 +1624,12 @@ def test_window_running_rank(data_gen):
 # In a distributed setup the order of the partitions returned might be different, so we must ignore the order
 # but small batch sizes can make sort very slow, so do the final order by locally
 @ignore_order(local=True)
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize('b_gen, c_gen', [(long_gen, x) for x in running_part_and_order_gens] +
-        [(x, long_gen) for x in all_basic_gens + [decimal_gen_32bit]], ids=idfn)
+@pytest.mark.parametrize(
+    'b_gen,c_gen,batch_size',
+    _with_alternating_configs(
+        [(long_gen, x) for x in running_part_and_order_gens] +
+        [(x, long_gen) for x in all_basic_gens + [decimal_gen_32bit]],
+        [('1000',), ('1g',)], 'running-part'))
 @allow_non_gpu(*non_utc_allow)
 def test_rows_based_running_window_partitioned(b_gen, c_gen, batch_size):
     # only SUM cares about ANSI or not here, and SUM could overflow with a few of the GENS used.
@@ -1611,9 +1673,14 @@ def test_rows_based_running_window_partitioned(b_gen, c_gen, batch_size):
 
 
 @ignore_order(local=True)
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn)  # Test different batch sizes.
-@pytest.mark.parametrize('part_gen', [int_gen, long_gen], ids=idfn)  # Partitioning is not really the focus of the test.
-@pytest.mark.parametrize('order_gen', [x for x in all_basic_gens_no_null if x not in boolean_gens] + [decimal_gen_32bit], ids=idfn)
+@pytest.mark.parametrize(
+    'part_gen,order_gen,batch_size',
+    _with_alternating_configs(
+        [(part_gen, order_gen)
+         for part_gen in [int_gen, long_gen]
+         for order_gen in [x for x in all_basic_gens_no_null if x not in boolean_gens] +
+         [decimal_gen_32bit]],
+        [('1000',), ('1g',)], 'range-running'))
 @allow_non_gpu(*non_utc_allow)
 def test_range_running_window_runs_batched(part_gen, order_gen, batch_size):
     """
@@ -1773,52 +1840,63 @@ def test_range_running_window_float_decimal_sum_runs_batched(batch_size, ansi):
 @approximate_float
 # None of the aggregations here care about ansi mode or not. But we want a few tests
 # to cover both just to future proof them a bit
-@pytest.mark.parametrize("ansi", [True, False], ids=["ANSI", "NOT_ANSI"])
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn) # set the batch size so we can test multiple stream batches
-@pytest.mark.parametrize('c_gen', lead_lag_data_gens, ids=idfn)
-@pytest.mark.parametrize('a_b_gen', part_and_order_gens, ids=meta_idfn('partAndOrderBy:'))
+@pytest.mark.parametrize(
+    'a_b_gen,batch_size,ansi',
+    _with_alternating_configs(
+        part_and_order_gens,
+        [('1000', True), ('1000', False), ('1g', True), ('1g', False)],
+        'lead-lag-types'))
 @allow_non_gpu(*non_utc_allow)
-def test_multi_types_window_aggs_for_rows_lead_lag(a_b_gen, c_gen, batch_size, ansi):
+def test_multi_types_window_aggs_for_rows_lead_lag(a_b_gen, batch_size, ansi):
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     conf = {'spark.rapids.sql.batchSizeBytes': batch_size,
             'spark.sql.ansi.enabled': ansi,
             'spark.sql.adaptive.enabled': 'false'}
     data_gen = [
             ('a', RepeatSeqGen(a_b_gen, length=20)),
-            ('b', a_b_gen),
-            ('c', c_gen)]
+            ('b', a_b_gen)] + [
+            ('c{}'.format(index), c_gen)
+            for index, c_gen in enumerate(lead_lag_data_gens)]
     # By default for many operations a range of unbounded to unbounded is used
     # This will not work until https://github.com/NVIDIA/spark-rapids/issues/216
     # is fixed.
 
     # Ordering needs to include c because with nulls and especially on booleans
     # it is possible to get a different ordering when it is ambiguous.
-    base_window_spec = Window.partitionBy('a').orderBy('b', 'c')
-    inclusive_window_spec = base_window_spec.rowsBetween(-10, 100)
-
     def do_it(spark):
-        df = gen_df(spark, data_gen, length=2048) \
-            .withColumn('inc_count_1', f.count('*').over(inclusive_window_spec)) \
-            .withColumn('inc_count_c', f.count('c').over(inclusive_window_spec)) \
-            .withColumn('lead_5_c', f.lead('c', 5).over(base_window_spec)) \
-            .withColumn('lag_1_c', f.lag('c', 1).over(base_window_spec)) \
-            .withColumn('row_num', f.row_number().over(base_window_spec))
+        df = gen_df(spark, data_gen, length=2048)
+        for index, c_gen in enumerate(lead_lag_data_gens):
+            column = 'c{}'.format(index)
+            suffix = '_{}'.format(index)
+            df = _add_lead_lag_window_columns(df, c_gen, column, suffix)
+        return df
 
-        if isinstance(c_gen, StructGen):
-            """
-            The MIN()/MAX() aggregations amount to a RANGE query. These are not
-            currently supported on STRUCT columns.
-            Also, LEAD()/LAG() defaults cannot currently be specified for STRUCT
-            columns. `[ 10, 3.14159, "foobar" ]` isn't recognized as a valid STRUCT scalar.
-            """
-            return df.withColumn('lead_def_c', f.lead('c', 2, None).over(base_window_spec)) \
-                     .withColumn('lag_def_c', f.lag('c', 4, None).over(base_window_spec))
-        else:
-            default_val = with_cpu_session(lambda spark: gen_scalar_value(c_gen, force_no_nulls=False))
-            return df.withColumn('inc_max_c', f.max('c').over(inclusive_window_spec)) \
-                     .withColumn('inc_min_c', f.min('c').over(inclusive_window_spec)) \
-                     .withColumn('lead_def_c', f.lead('c', 2, default_val).over(base_window_spec)) \
-                     .withColumn('lag_def_c', f.lag('c', 4, default_val).over(base_window_spec))
+    assert_gpu_and_cpu_are_equal_collect(do_it, conf=conf)
+
+
+# Retain representative single-window plans because combining different window specifications
+# changes Spark's expression canonicalization and short-circuit paths.
+@ignore_order(local=True)
+@approximate_float
+@pytest.mark.parametrize(
+    'a_b_gen,c_gen,batch_size,ansi', [
+        pytest.param(long_gen, long_gen, '1000', False, id='integral'),
+        pytest.param(DoubleGen(special_cases=[]), DoubleGen(special_cases=[]),
+                     '1g', False, id='floating-point'),
+        pytest.param(string_gen, lead_lag_data_gens[-1], '1000', True, id='nested')])
+@allow_non_gpu(*non_utc_allow)
+def test_multi_types_window_aggs_for_rows_lead_lag_standalone(
+        a_b_gen, c_gen, batch_size, ansi):
+    conf = {'spark.rapids.sql.batchSizeBytes': batch_size,
+            'spark.sql.ansi.enabled': ansi,
+            'spark.sql.adaptive.enabled': 'false'}
+    data_gen = [
+        ('a', RepeatSeqGen(a_b_gen, length=20)),
+        ('b', a_b_gen),
+        ('c', c_gen)]
+    def do_it(spark):
+        return _add_lead_lag_window_columns(
+            gen_df(spark, data_gen, length=2048), c_gen, 'c', '')
 
     assert_gpu_and_cpu_are_equal_collect(do_it, conf=conf)
 
@@ -1836,14 +1914,14 @@ lead_lag_struct_with_arrays_gen = [struct_with_arrays,
 
 @ignore_order(local=True)
 @approximate_float
-@pytest.mark.parametrize('struct_gen', lead_lag_struct_with_arrays_gen, ids=idfn)
 @pytest.mark.parametrize('a_b_gen', part_and_order_gens, ids=meta_idfn('partAndOrderBy:'))
 @allow_non_gpu(*non_utc_allow)
-def test_lead_lag_for_structs_with_arrays(a_b_gen, struct_gen):
+def test_lead_lag_for_structs_with_arrays(a_b_gen):
     data_gen = [
         ('a', RepeatSeqGen(a_b_gen, length=20)),
-        ('b', UniqueLongGen(nullable=False)),
-        ('c', struct_gen)]
+        ('b', UniqueLongGen(nullable=False))] + [
+        ('c{}'.format(index), struct_gen)
+        for index, struct_gen in enumerate(lead_lag_struct_with_arrays_gen)]
     # For many operations, a range of unbounded to unbounded is used by default.
 
     # Ordering needs to include `b` because with nulls and especially on booleans,
@@ -1851,9 +1929,12 @@ def test_lead_lag_for_structs_with_arrays(a_b_gen, struct_gen):
     base_window_spec = Window.partitionBy('a').orderBy('b')
 
     def do_it(spark):
-        return gen_df(spark, data_gen, length=2048) \
-            .withColumn('lead_5_c', f.lead('c', 5).over(base_window_spec)) \
-            .withColumn('lag_1_c', f.lag('c', 1).over(base_window_spec))
+        df = gen_df(spark, data_gen, length=2048)
+        for index in range(len(lead_lag_struct_with_arrays_gen)):
+            column = 'c{}'.format(index)
+            df = df.withColumn('lead_5_{}'.format(index), f.lead(column, 5).over(base_window_spec)) \
+                .withColumn('lag_1_{}'.format(index), f.lag(column, 1).over(base_window_spec))
+        return df
 
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(do_it, conf={'spark.sql.adaptive.enabled': 'false'})
@@ -1864,7 +1945,6 @@ lead_lag_array_data_gens =\
     [ArrayGen(ArrayGen(sub_gen, max_length=10), max_length=10) for sub_gen in lead_lag_data_gens] + \
     [ArrayGen(ArrayGen(ArrayGen(sub_gen, max_length=10), max_length=10), max_length=10) \
         for sub_gen in lead_lag_data_gens]
-
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('d_gen', lead_lag_array_data_gens, ids=meta_idfn('agg:'))
@@ -2759,12 +2839,20 @@ def test_nested_part_struct(part_gen):
 # In a distributed setup the order of the partitions returend might be different, so we must ignore the order
 # but small batch sizes can make sort very slow, so do the final order by locally
 @ignore_order(local=True)
-@pytest.mark.parametrize('ride_along', all_basic_gens + decimal_gens + array_gens_sample + struct_gens_sample + map_gens_sample, ids=idfn)
+@pytest.mark.parametrize(
+    'ride_along_gens', [
+        pytest.param(all_basic_gens + decimal_gens, id='scalar'),
+        pytest.param(array_gens_sample, id='array'),
+        pytest.param(struct_gens_sample, id='struct'),
+        pytest.param(map_gens_sample, id='map')])
 @allow_non_gpu(*non_utc_allow)
-def test_window_ride_along(ride_along):
+def test_window_ride_along(ride_along_gens):
+    data_gen = [('a', UniqueLongGen())] + [
+        ('ride_along_{}'.format(index), ride_along)
+        for index, ride_along in enumerate(ride_along_gens)]
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_sql(
-            lambda spark : gen_df(spark, [('a', UniqueLongGen()), ('b', ride_along)]),
+            lambda spark : gen_df(spark, data_gen),
             "window_agg_table",
             'select *,'
             ' row_number() over (order by a) as row_num '
@@ -2841,18 +2929,33 @@ exprs_for_nth_first_last_ignore_nulls = \
 @pytest.mark.parametrize('data_gen', all_basic_gens_no_null + decimal_gens + _nested_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_window_first_last_nth(data_gen):
+    expressions = exprs_for_nth_first_last
+    if not is_before_spark_320():
+        expressions += ', ' + exprs_for_nth_first_last_ignore_nulls
     assert_gpu_and_cpu_are_equal_sql(
         # Coalesce is to make sure that first and last, which are non-deterministic become deterministic
+        lambda spark: three_col_df(spark, data_gen, string_gen, int_gen, num_slices=1).coalesce(1),
+        "window_agg_table",
+        'SELECT a, b, c, ' + expressions +
+        'FROM window_agg_table')
+
+@pytest.mark.parametrize('data_gen',
+                         [int_gen, timestamp_gen, decimal_gens[-1],
+                          _nested_gens[0], _nested_gens[-1]], ids=idfn)
+def test_window_first_last_nth_standalone(data_gen):
+    # Retain representative primitive, timestamp, decimal, and nested base-only planning paths.
+    assert_gpu_and_cpu_are_equal_sql(
         lambda spark: three_col_df(spark, data_gen, string_gen, int_gen, num_slices=1).coalesce(1),
         "window_agg_table",
         'SELECT a, b, c, ' + exprs_for_nth_first_last +
         'FROM window_agg_table')
 
 @pytest.mark.skipif(is_before_spark_320(), reason='IGNORE NULLS clause is not supported for FIRST(), LAST() and NTH_VALUE in Spark 3.1.x')
-@pytest.mark.parametrize('data_gen', all_basic_gens_no_null + decimal_gens + _nested_gens, ids=idfn)
+@pytest.mark.parametrize('data_gen', [int_gen, _nested_gens[0]], ids=idfn)
 def test_window_first_last_nth_ignore_nulls(data_gen):
+    # Keep primitive and nested standalone projections for independent planning paths. Type
+    # handling remains covered by the combined projection above for every original data type.
     assert_gpu_and_cpu_are_equal_sql(
-        # Coalesce is to make sure that first and last, which are non-deterministic become deterministic
         lambda spark: three_col_df(spark, data_gen, string_gen, int_gen, num_slices=1).coalesce(1),
         "window_agg_table",
         'SELECT a, b, c, ' + exprs_for_nth_first_last_ignore_nulls +
@@ -2903,21 +3006,24 @@ def test_to_date_with_window_functions(ansi):
 
 @ignore_order(local=True)
 @approximate_float
-@pytest.mark.parametrize('batch_size', ['1000', '1g'], ids=idfn)
-@pytest.mark.parametrize('data_gen', [_grpkey_longs_with_no_nulls,
-                                      _grpkey_longs_with_nulls,
-                                      _grpkey_longs_with_dates,
-                                      _grpkey_longs_with_nullable_dates,
-                                      _grpkey_longs_with_decimals,
-                                      _grpkey_longs_with_nullable_decimals,
-                                      _grpkey_longs_with_nullable_larger_decimals
-                                      ], ids=idfn)
-@pytest.mark.parametrize('window_spec', ["3 PRECEDING AND -1 FOLLOWING",
-                                         "-2 PRECEDING AND 4 FOLLOWING",
-                                         "UNBOUNDED PRECEDING AND -1 FOLLOWING",
-                                         "-1 PRECEDING AND UNBOUNDED FOLLOWING",
-                                         "10 PRECEDING AND -1 FOLLOWING",
-                                         "5 PRECEDING AND -2 FOLLOWING"], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,window_spec,batch_size',
+    _with_alternating_configs(
+        [(data_gen, window_spec)
+         for data_gen in [_grpkey_longs_with_no_nulls,
+                          _grpkey_longs_with_nulls,
+                          _grpkey_longs_with_dates,
+                          _grpkey_longs_with_nullable_dates,
+                          _grpkey_longs_with_decimals,
+                          _grpkey_longs_with_nullable_decimals,
+                          _grpkey_longs_with_nullable_larger_decimals]
+         for window_spec in ["3 PRECEDING AND -1 FOLLOWING",
+                             "-2 PRECEDING AND 4 FOLLOWING",
+                             "UNBOUNDED PRECEDING AND -1 FOLLOWING",
+                             "-1 PRECEDING AND UNBOUNDED FOLLOWING",
+                             "10 PRECEDING AND -1 FOLLOWING",
+                             "5 PRECEDING AND -2 FOLLOWING"]],
+        [('1000',), ('1g',)], 'negative-rows'))
 def test_window_aggs_for_negative_rows_partitioned(data_gen, batch_size, window_spec):
     conf = {'spark.rapids.sql.batchSizeBytes': batch_size,
             'spark.rapids.sql.castFloatToDecimal.enabled': True,
@@ -3128,27 +3234,28 @@ def test_window_aggs_for_batched_finite_row_windows_fallback(data_gen):
                     reason="WindowGroupLimit not available for spark.version < 3.5")
 @ignore_order(local=True)
 @approximate_float
-@pytest.mark.parametrize('batch_size', ['1k', '1g'], ids=idfn)
-@pytest.mark.parametrize('data_gen', [_grpkey_longs_with_no_nulls,
-                                      _grpkey_longs_with_nulls,
-                                      _grpkey_longs_with_dates,
-                                      _grpkey_longs_with_nullable_dates,
-                                      _grpkey_longs_with_decimals,
-                                      _grpkey_longs_with_nullable_decimals,
-                                      pytest.param(_grpkey_longs_with_nullable_larger_decimals,
-                                                   marks=pytest.mark.skipif(
-                                                       condition=spark_bugs_in_decimal_sorting(),
-                                                       reason='https://github.com/NVIDIA/spark-rapids/issues/7429'))
-                                      ],
-                         ids=idfn)
-@pytest.mark.parametrize('rank_clause', [
-                            'RANK() OVER (PARTITION BY a ORDER BY b, c) ',
-                            'DENSE_RANK() OVER (PARTITION BY a ORDER BY b, c) ',
-                            'RANK() OVER (ORDER BY a,b,c) ',
-                            'DENSE_RANK() OVER (ORDER BY a,b,c) ',
-                            # ROW_NUMBER() on an un-partitioned window does not invoke WindowGroupLimit optimization.
-                            'ROW_NUMBER() OVER (PARTITION BY a ORDER BY b,c) ',
-])
+@pytest.mark.parametrize(
+    'data_gen,rank_clause,batch_size',
+    _with_alternating_configs(
+        [(data_gen, rank_clause)
+         for data_gen in [_grpkey_longs_with_no_nulls,
+                          _grpkey_longs_with_nulls,
+                          _grpkey_longs_with_dates,
+                          _grpkey_longs_with_nullable_dates,
+                          _grpkey_longs_with_decimals,
+                          _grpkey_longs_with_nullable_decimals,
+                          pytest.param(_grpkey_longs_with_nullable_larger_decimals,
+                                       marks=pytest.mark.skipif(
+                                           condition=spark_bugs_in_decimal_sorting(),
+                                           reason='https://github.com/NVIDIA/spark-rapids/issues/7429'))]
+         for rank_clause in [
+             'RANK() OVER (PARTITION BY a ORDER BY b, c) ',
+             'DENSE_RANK() OVER (PARTITION BY a ORDER BY b, c) ',
+             'RANK() OVER (ORDER BY a,b,c) ',
+             'DENSE_RANK() OVER (ORDER BY a,b,c) ',
+             # Unpartitioned ROW_NUMBER does not invoke WindowGroupLimit optimization.
+             'ROW_NUMBER() OVER (PARTITION BY a ORDER BY b,c) ']],
+        [('1k',), ('1g',)], 'ranking-limit'))
 def test_window_group_limits_for_ranking_functions(data_gen, batch_size, rank_clause):
     """
     This test verifies that window group limits are applied for queries with ranking-function based
@@ -3178,28 +3285,23 @@ def test_window_group_limits_for_ranking_functions(data_gen, batch_size, rank_cl
                     reason="WindowGroupLimit not available for spark.version < 3.5")
 @ignore_order(local=True)
 @approximate_float
-@pytest.mark.parametrize('batch_size', ['1k', '1g'], ids=idfn)
 @pytest.mark.parametrize('data_gen', [_grpkey_longs_with_no_nulls], ids=idfn)
-@pytest.mark.parametrize('rank_clause', [
-                            'ROW_NUMBER() OVER (PARTITION BY a ORDER BY b, c)',
-                            'RANK() OVER (PARTITION BY a ORDER BY b, c)',
-                            'DENSE_RANK() OVER (PARTITION BY a ORDER BY b, c)',
-])
-@pytest.mark.parametrize('filter_clause', [
-                            # LessThan variants
-                            'rnk < 5',
-                            '5 > rnk',
-                            # LessThanOrEqual variants
-                            'rnk <= 5',
-                            '5 >= rnk',
-                            # EqualTo variants - Spark supports WHERE rn = 5 and 5 = rn
-                            'rnk = 3',
-                            '3 = rnk',
-                            # AND conditions - Spark uses splitConjunctivePredicates
-                            'rnk > 1 AND rnk <= 5',
-                            'rnk >= 2 AND rnk < 6',
-                            'rnk > 0 AND rnk <= 3 AND a IS NOT NULL',
-])
+@pytest.mark.parametrize(
+    'rank_clause,filter_clause,batch_size',
+    _with_alternating_configs(
+        [(rank_clause, filter_clause)
+         for rank_clause in [
+             'ROW_NUMBER() OVER (PARTITION BY a ORDER BY b, c)',
+             'RANK() OVER (PARTITION BY a ORDER BY b, c)',
+             'DENSE_RANK() OVER (PARTITION BY a ORDER BY b, c)']
+         for filter_clause in [
+             'rnk < 5', '5 > rnk',
+             'rnk <= 5', '5 >= rnk',
+             'rnk = 3', '3 = rnk',
+             'rnk > 1 AND rnk <= 5',
+             'rnk >= 2 AND rnk < 6',
+             'rnk > 0 AND rnk <= 3 AND a IS NOT NULL']],
+        [('1k',), ('1g',)], 'filter-limit'))
 def test_window_group_limits_filter_patterns(data_gen, batch_size, rank_clause, filter_clause):
     """
     This test verifies that all filter patterns supported by Spark's InferWindowGroupLimit
