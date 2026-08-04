@@ -90,8 +90,32 @@ parquet_nested_datetime_gen = parquet_datetime_gen_simple + parquet_datetime_in_
 parquet_map_gens = parquet_map_gens_sample + [
     MapGen(StructGen([['child0', StringGen()], ['child1', StringGen()]], nullable=False), FloatGen()),
     MapGen(StructGen([['child0', StringGen(nullable=True)]], nullable=False), StringGen())]
-parquet_write_gens_list = [[binary_gen], parquet_basic_gen, decimal_gens] +  [ [single_gen] for single_gen in parquet_struct_gen + parquet_array_gen + parquet_map_gens]
+
+# A write validates every column in the schema, so keep every complex generator while grouping
+# four independent columns per case instead of launching one Spark application per column.
+parquet_complex_gens = parquet_struct_gen + parquet_array_gen + parquet_map_gens
+parquet_write_gens_list = [[binary_gen], parquet_basic_gen, decimal_gens] + [
+    parquet_complex_gens[start:start + 4] for start in range(0, len(parquet_complex_gens), 4)]
 parquet_ts_write_options = ['INT96', 'TIMESTAMP_MICROS', 'TIMESTAMP_MILLIS']
+parquet_datetime_write_cases = [
+    (data_gen, ts_write)
+    for data_gen in parquet_nested_datetime_gen
+    for ts_write in parquet_ts_write_options]
+parquet_datetime_write_case_ids = [
+    '{}-{}'.format(idfn(data_gen), ts_write)
+    for data_gen, ts_write in parquet_datetime_write_cases]
+parquet_rebase_mode_pairs = [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')]
+parquet_legacy_rebase_cases = [
+    (data_gen, ts_write,
+     parquet_rebase_mode_pairs[index % len(parquet_rebase_mode_pairs)],
+     parquet_rebase_mode_pairs[(index // len(parquet_rebase_mode_pairs)) %
+                               len(parquet_rebase_mode_pairs)])
+    for index, (data_gen, ts_write) in enumerate(parquet_datetime_write_cases)]
+parquet_legacy_rebase_case_ids = [
+    '{}-{}-write_{}_{}-read_{}_{}'.format(
+        idfn(data_gen), ts_write, ts_rebase_write[0], ts_rebase_write[1],
+        ts_rebase_read[0], ts_rebase_read[1])
+    for data_gen, ts_write, ts_rebase_write, ts_rebase_read in parquet_legacy_rebase_cases]
 
 @pytest.mark.order(1) # at the head of xdist worker queue if pytest-order is installed
 @pytest.mark.parametrize('parquet_gens', parquet_write_gens_list, ids=idfn)
@@ -105,18 +129,15 @@ def test_write_round_trip(spark_tmp_path, parquet_gens):
             data_path,
             conf=writer_confs)
 
-@pytest.mark.parametrize('gen', [ByteGen(nullable=False),
-    ShortGen(nullable=False),
-    IntegerGen(nullable=False),
-    LongGen(nullable=False),
-    FloatGen(nullable=False),
-    DoubleGen(nullable=False),
-    BooleanGen(nullable=False),
-    StringGen(nullable=False),
-    StructGen([('b', LongGen(nullable=False))], nullable=False)], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_write_round_trip_nullable_struct(spark_tmp_path, gen):
-    gen_for_struct = StructGen([('c', gen)], nullable=True)
+def test_write_round_trip_nullable_struct(spark_tmp_path):
+    child_gens = [ByteGen(nullable=False), ShortGen(nullable=False),
+                  IntegerGen(nullable=False), LongGen(nullable=False),
+                  FloatGen(nullable=False), DoubleGen(nullable=False),
+                  BooleanGen(nullable=False), StringGen(nullable=False),
+                  StructGen([('b', LongGen(nullable=False))], nullable=False)]
+    gen_for_struct = StructGen(
+        [('c' + str(index), gen) for index, gen in enumerate(child_gens)], nullable=True)
     data_path = spark_tmp_path + '/PARQUET_DATA'
     assert_gpu_and_cpu_writes_are_equal_collect(
             lambda spark, path: unary_op_df(spark, gen_for_struct, num_slices=1).write.parquet(path),
@@ -562,8 +583,8 @@ def test_write_map_nullable(spark_tmp_path):
             lambda spark, path: spark.read.parquet(path),
             data_path)
 
-@pytest.mark.parametrize('data_gen', parquet_nested_datetime_gen, ids=idfn)
-@pytest.mark.parametrize('ts_write', parquet_ts_write_options)
+@pytest.mark.parametrize(
+    ('data_gen', 'ts_write'), parquet_datetime_write_cases, ids=parquet_datetime_write_case_ids)
 @pytest.mark.parametrize('ts_rebase_write', ['EXCEPTION'])
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_write_fails_legacy_datetime(spark_tmp_path, data_gen, ts_write, ts_rebase_write):
@@ -579,10 +600,9 @@ def test_parquet_write_fails_legacy_datetime(spark_tmp_path, data_gen, ts_write,
         lambda spark: writeParquetCatchException(spark, data_gen, data_path),
         conf=all_confs)
 
-@pytest.mark.parametrize('data_gen', parquet_nested_datetime_gen, ids=idfn)
-@pytest.mark.parametrize('ts_write', parquet_ts_write_options)
-@pytest.mark.parametrize('ts_rebase_write', [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')])
-@pytest.mark.parametrize('ts_rebase_read', [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')])
+@pytest.mark.parametrize(
+    ('data_gen', 'ts_write', 'ts_rebase_write', 'ts_rebase_read'),
+    parquet_legacy_rebase_cases, ids=parquet_legacy_rebase_case_ids)
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_write_roundtrip_datetime_with_legacy_rebase(spark_tmp_path, data_gen, ts_write,
                                                              ts_rebase_write, ts_rebase_read):
