@@ -143,18 +143,41 @@ def test_subtraction(data_gen):
                 f.col('b') - f.lit(None).cast(data_type),
                 f.col('a') - f.col('b')))
 
-@pytest.mark.parametrize('lhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 5),
+_mixed_arithmetic_lhs = [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 5),
     DecimalGen(6, 4), DecimalGen(5, 4), DecimalGen(5, 3), DecimalGen(4, 2), DecimalGen(3, -2),
-    DecimalGen(16, 7), DecimalGen(19, 0), DecimalGen(30, 10)], ids=idfn)
-@pytest.mark.parametrize('rhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 3),
+    DecimalGen(16, 7), DecimalGen(19, 0), DecimalGen(30, 10)]
+_mixed_arithmetic_rhs = [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 3),
     DecimalGen(10, -2), DecimalGen(15, 3), DecimalGen(30, 12), DecimalGen(3, -3),
-    DecimalGen(27, 7), DecimalGen(20, -3)], ids=idfn)
-@pytest.mark.parametrize('addOrSub', ['+', '-'])
+    DecimalGen(27, 7), DecimalGen(20, -3)]
+
+
+@pytest.mark.parametrize('lhs', _mixed_arithmetic_lhs, ids=idfn)
+@pytest.mark.parametrize('rhs', _mixed_arithmetic_rhs, ids=idfn)
 @disable_ansi_mode
-def test_addition_subtraction_mixed(lhs, rhs, addOrSub):
+def test_mixed_arithmetic_ops(lhs, rhs):
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : two_col_df(spark, lhs, rhs).selectExpr(f"a {addOrSub} b")
+        lambda spark : two_col_df(spark, lhs, rhs).selectExpr(
+            "a + b", "a - b", "a * b", "a % b")
     )
+
+
+_mixed_multiplication_plan_pairs = [
+    (byte_gen, byte_gen),
+    (byte_gen, DecimalGen(6, 3)),
+    (DecimalGen(6, 5), byte_gen),
+    (DecimalGen(30, 10), DecimalGen(30, 12)),
+    (DecimalGen(3, -2), DecimalGen(3, -3)),
+]
+
+
+@pytest.mark.parametrize('lhs,rhs', _mixed_multiplication_plan_pairs, ids=idfn)
+@disable_ansi_mode
+def test_mixed_decimal_multiplication_plan(lhs, rhs):
+    # Keep standalone plans for the four type-resolution corners whose
+    # GpuDecimalMultiply canonicalization differs from a combined projection.
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: two_col_df(spark, lhs, rhs).selectExpr("a * b"))
+
 
 # If it will not overflow for multiply it is good for subtract too
 @pytest.mark.parametrize('data_gen', _no_overflow_multiply_gens, ids=idfn)
@@ -247,18 +270,6 @@ def test_multiplication_without_overflow_for_numeric_ansi_on_off(data_gen_lit_pa
             f.col('a') * f.lit(lit).cast(data_type),
             f.col('a') * f.col('b')),
         conf={'spark.sql.ansi.enabled': ansi_enabled})
-
-@pytest.mark.parametrize('lhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 5),
-    DecimalGen(6, 4), DecimalGen(5, 4), DecimalGen(5, 3), DecimalGen(4, 2), DecimalGen(3, -2),
-    DecimalGen(16, 7), DecimalGen(19, 0), DecimalGen(30, 10)], ids=idfn)
-@pytest.mark.parametrize('rhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 3),
-    DecimalGen(10, -2), DecimalGen(15, 3), DecimalGen(30, 12), DecimalGen(3, -3),
-    DecimalGen(27, 7), DecimalGen(20, -3)], ids=idfn)
-@disable_ansi_mode
-def test_multiplication_mixed(lhs, rhs):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : two_col_df(spark, lhs, rhs).select(
-                f.col('a') * f.col('b')))
 
 @approximate_float # we should get the perfectly correct answer for floats except when casting a decimal to a float in some corner cases.
 @pytest.mark.parametrize('lhs', [float_gen, double_gen], ids=idfn)
@@ -452,17 +463,6 @@ def test_mod_pmod_by_zero_not_ansi(data_gen):
             'a % (cast(0 as {}))'.format(string_type),
             'cast(-12 as {}) % cast(0 as {})'.format(string_type, string_type)),
         {'spark.sql.ansi.enabled': 'false'})
-
-@pytest.mark.parametrize('lhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 5),
-    DecimalGen(6, 4), DecimalGen(5, 4), DecimalGen(5, 3), DecimalGen(4, 2), DecimalGen(3, -2),
-    DecimalGen(16, 7), DecimalGen(19, 0), DecimalGen(30, 10)], ids=idfn)
-@pytest.mark.parametrize('rhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 3),
-    DecimalGen(10, -2), DecimalGen(15, 3), DecimalGen(30, 12), DecimalGen(3, -3),
-    DecimalGen(27, 7), DecimalGen(20, -3)], ids=idfn)
-@disable_ansi_mode
-def test_mod_mixed(lhs, rhs):
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : two_col_df(spark, lhs, rhs).selectExpr(f"a % b"))
 
 # @pytest.mark.skipif(not is_databricks113_or_later() and not is_spark_340_or_later(), reason="https://github.com/NVIDIA/spark-rapids/issues/8330")
 @pytest.mark.parametrize('lhs', [DecimalGen(38,0), DecimalGen(37,2), DecimalGen(38,5), DecimalGen(38,-10), DecimalGen(38,7)], ids=idfn)
