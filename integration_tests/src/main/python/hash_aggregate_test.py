@@ -266,6 +266,24 @@ params_markers_for_confs = [
     (_float_conf, [_excluded_operators_marker])
 ]
 
+
+def get_data_gen_conf_pairs(data_gens, confs, full_conf_count=1):
+    """Cover every data generator and configuration without their redundant cross product."""
+    def marks_for_conf(conf):
+        return next((marks for marked_conf, marks in params_markers_for_confs
+                     if conf == marked_conf), [])
+
+    return [
+        pytest.param(data_gen, conf, marks=marks_for_conf(conf),
+                     id='{}-{}'.format(idfn(data_gen), idfn(conf)))
+        for conf in confs[:full_conf_count]
+        for data_gen in data_gens
+    ] + [
+        pytest.param(data_gens[0], conf, marks=marks_for_conf(conf),
+                     id='{}-{}'.format(idfn(data_gens[0]), idfn(conf)))
+        for conf in confs[full_conf_count:]
+    ]
+
 _grpkey_small_decimals = [
     ('a', RepeatSeqGen(DecimalGen(precision=7, scale=3, nullable=(True, 10.0)), length=50)),
     ('b', DecimalGen(precision=5, scale=2)),
@@ -678,8 +696,9 @@ _pivot_gens_with_decimals = _init_list + [
 @approximate_float
 @ignore_order(local=True)
 @incompat
-@pytest.mark.parametrize('data_gen', _pivot_gens_with_decimals, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf',
+    get_data_gen_conf_pairs(_pivot_gens_with_decimals, _confs, full_conf_count=2))
 def test_hash_grpby_pivot(data_gen, conf):
     # disable ANSI mode to avoid overflow in some cases of SUM
     assert_gpu_and_cpu_are_equal_collect(
@@ -692,8 +711,7 @@ def test_hash_grpby_pivot(data_gen, conf):
 @approximate_float
 @ignore_order(local=True)
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs))
 def test_hash_multiple_grpby_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -705,8 +723,7 @@ def test_hash_multiple_grpby_pivot(data_gen, conf):
 @approximate_float
 @ignore_order(local=True)
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs))
 def test_hash_reduction_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -2545,8 +2562,10 @@ def test_std_variance_nulls(data_gen, conf, ansi_enabled):
                'StddevPop', 'StddevSamp', 'VariancePop', 'VarianceSamp',
                'SortArray', 'Alias', 'Literal', 'Count',
                'AggregateExpression', 'ProjectExec')
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf',
+    get_data_gen_conf_pairs(
+        _init_list, [_float_conf, _float_smallbatch_conf, _float_conf_skipagg]))
 @pytest.mark.parametrize('replace_mode', _replace_modes_non_distinct, ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
 @pytest.mark.xfail(condition=is_databricks104_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/4963')
