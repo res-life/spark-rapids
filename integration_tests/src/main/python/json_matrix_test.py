@@ -60,6 +60,9 @@ _enable_json_to_structs_conf = {
     'spark.rapids.sql.json.read.decimal.enabled': 'true'
 }
 
+_enable_json_scan_and_to_structs_conf = copy_and_update(
+    _enable_all_types_json_scan_conf, _enable_json_to_structs_conf)
+
 WITH_COMMENTS_FILE = "withComments.json"
 WITH_COMMENTS_SCHEMA = StructType([StructField("str", StringType())])
 WITH_COMMENTS_MAP_SCHEMA = MapType(StringType(), StringType())
@@ -722,6 +725,19 @@ COMMON_TEST_FILES=[
 COMMON_SCAN_TEST_FILES = COMMON_TEST_FILES + [
     "scan_emtpy_lines.json"]
 
+COMMON_PRIMITIVE_SCHEMAS = [
+    StructType([StructField("data", data_type)])
+    for data_type in [ByteType(), ShortType(), IntegerType(), LongType(), BooleanType()]]
+
+
+def _scan_and_from_json(spark, data_path, schema):
+    scan_df = read_json_df(data_path, schema, None)(spark).select(
+        f.lit("scan").alias("source"), f.col("data"))
+    from_json_df = read_json_as_text(spark, data_path, "json") \
+        .select(f.from_json(f.col("json"), schema).alias("parsed")) \
+        .select(f.lit("from_json").alias("source"), f.col("parsed.data").alias("data"))
+    return scan_df.unionByName(from_json_df)
+
 
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
@@ -750,76 +766,24 @@ def test_from_json_map_string_string(std_input_path, input_file):
         lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
         conf =_enable_json_to_structs_conf)
 
-@pytest.mark.parametrize('input_file', COMMON_SCAN_TEST_FILES)
-@pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-def test_scan_json_bytes(std_input_path, read_func, spark_tmp_table_factory, input_file):
+@pytest.mark.parametrize('schema', COMMON_PRIMITIVE_SCHEMAS, ids=idfn)
+@pytest.mark.parametrize('input_file', COMMON_TEST_FILES)
+@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow)
+def test_scan_and_from_json_primitives(std_input_path, input_file, schema):
     assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", ByteType())]),
-        spark_tmp_table_factory),
+        lambda spark: _scan_and_from_json(
+            spark, std_input_path + '/' + input_file, schema),
+        conf=_enable_json_scan_and_to_structs_conf)
+
+
+@pytest.mark.parametrize('schema', COMMON_PRIMITIVE_SCHEMAS, ids=idfn)
+def test_scan_json_primitives_empty_lines(std_input_path, schema):
+    assert_gpu_and_cpu_are_equal_collect(
+        read_json_df(
+            std_input_path + '/scan_emtpy_lines.json', schema, None),
         conf=_enable_all_types_json_scan_conf)
 
-@pytest.mark.parametrize('input_file', COMMON_TEST_FILES)
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_bytes(std_input_path, input_file):
-    schema = StructType([StructField("data", ByteType())])
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
-
-@pytest.mark.parametrize('input_file', COMMON_SCAN_TEST_FILES)
-@pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-def test_scan_json_shorts(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", ShortType())]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
-
-@pytest.mark.parametrize('input_file', COMMON_TEST_FILES)
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_shorts(std_input_path, input_file):
-    schema = StructType([StructField("data", ShortType())])
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
-
-@pytest.mark.parametrize('input_file', COMMON_SCAN_TEST_FILES)
-@pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-def test_scan_json_ints(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", IntegerType())]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
-
-@pytest.mark.parametrize('input_file', COMMON_TEST_FILES)
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_ints(std_input_path, input_file):
-    schema = StructType([StructField("data", IntegerType())])
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
-
-@pytest.mark.parametrize('input_file', COMMON_SCAN_TEST_FILES)
-@pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-def test_scan_json_longs(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", LongType())]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
-
-@pytest.mark.parametrize('input_file', COMMON_TEST_FILES)
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_longs(std_input_path, input_file):
-    schema = StructType([StructField("data", LongType())])
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
-
-@pytest.mark.parametrize('dt', [DecimalType(38,0), DecimalType(38,10), DecimalType(10,2)], ids=idfn)
-@pytest.mark.parametrize('input_file', [
+DECIMAL_TEST_FILES = [
     "int_formatted.json",
     "float_formatted.json",
     "sci_formatted.json",
@@ -840,45 +804,28 @@ def test_from_json_longs(std_input_path, input_file):
     pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json",
-    "scan_emtpy_lines.json"])
-@pytest.mark.parametrize('read_func', [read_json_df]) # we have done so many tests already that we don't need both read func. They are the same
-def test_scan_json_decs(std_input_path, read_func, spark_tmp_table_factory, input_file, dt):
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", dt)]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
+    "timestamp_tz_formatted_strings.json"]
 
-@pytest.mark.parametrize('dt', [DecimalType(38,0), DecimalType(38,10), DecimalType(10,2)], ids=idfn)
-@pytest.mark.parametrize('input_file', [
-    "int_formatted.json",
-    "float_formatted.json",
-    "sci_formatted.json",
-    "int_formatted_strings.json",
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    "decimal_locale_formatted_strings.json",
-    "single_quoted_strings.json",
-    "boolean_formatted.json",
-    "invalid_ridealong_columns.json",
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    "escaped_strings.json",
-    "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_decs(std_input_path, input_file, dt):
-    schema = StructType([StructField("data", dt)])
+DECIMAL_SCHEMAS = [
+    StructType([StructField("data", data_type)])
+    for data_type in [DecimalType(38, 0), DecimalType(38, 10), DecimalType(10, 2)]]
+
+
+@pytest.mark.parametrize('schema', DECIMAL_SCHEMAS, ids=idfn)
+@pytest.mark.parametrize('input_file', DECIMAL_TEST_FILES)
+@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow)
+def test_scan_and_from_json_decimals(std_input_path, input_file, schema):
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
+        lambda spark: _scan_and_from_json(
+            spark, std_input_path + '/' + input_file, schema),
+        conf=_enable_json_scan_and_to_structs_conf)
+
+@pytest.mark.parametrize('schema', DECIMAL_SCHEMAS, ids=idfn)
+def test_scan_json_decimals_empty_lines(std_input_path, schema):
+    assert_gpu_and_cpu_are_equal_collect(
+        read_json_df(
+            std_input_path + '/scan_emtpy_lines.json', schema, None),
+        conf=_enable_all_types_json_scan_conf)
 
 
 @pytest.mark.parametrize('input_file', [
@@ -941,7 +888,7 @@ def test_from_json_strings(std_input_path, input_file):
         lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
         conf =_enable_json_to_structs_conf)
 
-@pytest.mark.parametrize('input_file', [
+JSON_EXPRESSION_TEST_FILES = [
     "int_formatted.json",
     "float_formatted.json",
     "sci_formatted.json",
@@ -958,106 +905,88 @@ def test_from_json_strings(std_input_path, input_file):
     "int_mixed_array_struct_formatted.json",
     "bad_whitespace.json",
     "escaped_strings.json",
-    pytest.param("nested_escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')),
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
     "mixed_objects.json",
     "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
+    "timestamp_tz_formatted_strings.json"]
+
+def _get_json_object_formats(df):
+    return df.selectExpr("*",
+        '''get_json_object(json, "$.data")''',
+        '''get_json_object(json, '$.id')''',
+        '''get_json_object(json, '$.name')''')
+
+def _get_json_object_child_formats(df):
+    return df.selectExpr("*",
+        '''get_json_object(json, "$.data.a")''',
+        '''get_json_object(json, '$.tags[0]')''',
+        '''get_json_object(json, '$.details.address.city')''',
+        '''get_json_object(json, '$.user.profile.username')''',
+        '''get_json_object(json, '$.user.skills[0]')''',
+        '''get_json_object(json, '$.user.projects[1].name')''',
+        '''get_json_object(json, '$.departments[0].employees[1].name')''',
+        '''get_json_object(json, '$.departments[1].employees[0].id')''',
+        '''get_json_object(json, '$.data.numeric')''',
+        '''get_json_object(json, '$.data.details.timestamp')''',
+        '''get_json_object(json, '$.data.details.list[1]')''',
+        '''get_json_object(json, '$.company.departments[1].employees[0].name')''',
+        '''get_json_object(json, '$.company.departments[0].employees[1].role')''')
+
+def _json_tuple_formats(df):
+    return df.selectExpr("*", '''json_tuple(json, "data")''').selectExpr("*",
+        # json_tuple is not the same as get_json_object
+        '''json_tuple(json, 'id', 'name', 'details.address.city') AS (id, name, city)''').selectExpr("*",
+        '''json_tuple(json, 'user.profile.username', 'user.skills[0]', 'user.projects[1].name') AS (username, first_skill, second_project_name)''')
+
+def _read_expression_json(spark, std_input_path, input_file):
+    return read_json_as_text(spark, std_input_path + '/' + input_file, "json")
+
+@pytest.mark.parametrize('input_file', JSON_EXPRESSION_TEST_FILES)
 @allow_non_gpu(TEXT_INPUT_EXEC)
-def test_get_json_object_formats(std_input_path, input_file):
-   assert_gpu_and_cpu_are_equal_collect(
-           lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").selectExpr("*",
-               '''get_json_object(json, "$.data")''',
-               '''get_json_object(json, '$.id')''',
-               '''get_json_object(json, '$.name')'''))
+def test_json_expression_formats(std_input_path, input_file):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _json_tuple_formats(_get_json_object_child_formats(
+            _get_json_object_formats(_read_expression_json(spark, std_input_path, input_file)))))
 
-@pytest.mark.parametrize('input_file', [
-    "int_formatted.json",
-    "float_formatted.json",
-    "sci_formatted.json",
-    "int_formatted_strings.json",
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    "decimal_locale_formatted_strings.json",
-    "single_quoted_strings.json",
-    "boolean_formatted.json",
-    "invalid_ridealong_columns.json",
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    "escaped_strings.json",
-    "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
+@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')
 @allow_non_gpu(TEXT_INPUT_EXEC)
-def test_get_json_object_child_formats(std_input_path, input_file):
-   assert_gpu_and_cpu_are_equal_collect(
-           lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").selectExpr("*", 
-               '''get_json_object(json, "$.data.a")''',
-               '''get_json_object(json, '$.tags[0]')''',
-               '''get_json_object(json, '$.details.address.city')''',
-               '''get_json_object(json, '$.user.profile.username')''',
-               '''get_json_object(json, '$.user.skills[0]')''',
-               '''get_json_object(json, '$.user.projects[1].name')''',
-               '''get_json_object(json, '$.departments[0].employees[1].name')''',
-               '''get_json_object(json, '$.departments[1].employees[0].id')''',
-               '''get_json_object(json, '$.data.numeric')''',
-               '''get_json_object(json, '$.data.details.timestamp')''',
-               '''get_json_object(json, '$.data.details.list[1]')''',
-               '''get_json_object(json, '$.company.departments[1].employees[0].name')''',
-               '''get_json_object(json, '$.company.departments[0].employees[1].role')'''))
+def test_get_json_object_formats_nested_escaped(std_input_path):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _get_json_object_formats(
+            _read_expression_json(spark, std_input_path, "nested_escaped_strings.json")))
 
-@pytest.mark.parametrize('input_file', [
-    "int_formatted.json",
-    "float_formatted.json",
-    "sci_formatted.json",
-    "int_formatted_strings.json",
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    "decimal_locale_formatted_strings.json",
-    "single_quoted_strings.json",
-    "boolean_formatted.json",
-    "invalid_ridealong_columns.json",
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    "escaped_strings.json",
-    pytest.param("nested_escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')),
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
 @allow_non_gpu(TEXT_INPUT_EXEC)
-def test_json_tuple_formats(std_input_path, input_file):
+def test_get_json_object_child_formats_nested_escaped(std_input_path):
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").selectExpr("*",
-            '''json_tuple(json, "data")''').selectExpr("*",
-                # json_tuple is not the same as get_json_object
-            '''json_tuple(json, 'id', 'name', 'details.address.city') AS (id, name, city)''').selectExpr("*",
-            '''json_tuple(json, 'user.profile.username', 'user.skills[0]', 'user.projects[1].name') AS (username, first_skill, second_project_name)'''))
+        lambda spark: _get_json_object_child_formats(
+            _read_expression_json(spark, std_input_path, "nested_escaped_strings.json")))
 
-@pytest.mark.parametrize('input_file', COMMON_SCAN_TEST_FILES)
-@pytest.mark.parametrize('read_func', [read_json_df])
-def test_scan_json_bools(std_input_path, read_func, spark_tmp_table_factory, input_file):
+@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11387')
+@allow_non_gpu(TEXT_INPUT_EXEC)
+def test_json_tuple_formats_nested_escaped(std_input_path):
     assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", BooleanType())]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
+        lambda spark: _json_tuple_formats(
+            _read_expression_json(spark, std_input_path, "nested_escaped_strings.json")))
 
-@pytest.mark.parametrize('input_file', COMMON_TEST_FILES)
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_bools(std_input_path, input_file):
-    schema = StructType([StructField("data", BooleanType())])
+@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')
+@allow_non_gpu(TEXT_INPUT_EXEC)
+def test_get_json_object_formats_repeated_columns(std_input_path):
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
+        lambda spark: _get_json_object_formats(
+            _read_expression_json(spark, std_input_path, "repeated_columns.json")))
+
+@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')
+@allow_non_gpu(TEXT_INPUT_EXEC)
+def test_get_json_object_child_formats_repeated_columns(std_input_path):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _get_json_object_child_formats(
+            _read_expression_json(spark, std_input_path, "repeated_columns.json")))
+
+@pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')
+@allow_non_gpu(TEXT_INPUT_EXEC)
+def test_json_tuple_formats_repeated_columns(std_input_path):
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: _json_tuple_formats(
+            _read_expression_json(spark, std_input_path, "repeated_columns.json")))
 
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
@@ -1083,41 +1012,18 @@ def test_from_json_bools(std_input_path, input_file):
     "timestamp_tz_formatted_strings.json",
     "scan_emtpy_lines.json"])
 @pytest.mark.parametrize('read_func', [read_json_df])
+@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow)
 def test_scan_json_floats(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", FloatType())]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
-
-@approximate_float()
-@pytest.mark.parametrize('input_file', [
-    "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
-    "sci_formatted.json",
-    "int_formatted_strings.json",
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    "decimal_locale_formatted_strings.json",
-    "single_quoted_strings.json",
-    "boolean_formatted.json",
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    "escaped_strings.json",
-    "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_floats(std_input_path, input_file):
     schema = StructType([StructField("data", FloatType())])
+    if input_file == "scan_emtpy_lines.json":
+        test_func = read_func(std_input_path + '/' + input_file, schema, spark_tmp_table_factory)
+        conf = _enable_all_types_json_scan_conf
+    else:
+        test_func = lambda spark: _scan_and_from_json(
+            spark, std_input_path + '/' + input_file, schema)
+        conf = _enable_json_scan_and_to_structs_conf
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
+        test_func, conf=conf)
 
 @approximate_float()
 @pytest.mark.parametrize('input_file', [
@@ -1143,41 +1049,18 @@ def test_from_json_floats(std_input_path, input_file):
     "timestamp_tz_formatted_strings.json",
     "scan_emtpy_lines.json"])
 @pytest.mark.parametrize('read_func', [read_json_df])
+@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow)
 def test_scan_json_doubles(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", DoubleType())]),
-        spark_tmp_table_factory),
-        conf=_enable_all_types_json_scan_conf)
-
-@approximate_float()
-@pytest.mark.parametrize('input_file', [
-    "int_formatted.json",
-    pytest.param("float_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10481')),
-    "sci_formatted.json",
-    "int_formatted_strings.json",
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    "decimal_locale_formatted_strings.json",
-    "single_quoted_strings.json",
-    "boolean_formatted.json",
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    "escaped_strings.json",
-    "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
-@allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_doubles(std_input_path, input_file):
     schema = StructType([StructField("data", DoubleType())])
+    if input_file == "scan_emtpy_lines.json":
+        test_func = read_func(std_input_path + '/' + input_file, schema, spark_tmp_table_factory)
+        conf = _enable_all_types_json_scan_conf
+    else:
+        test_func = lambda spark: _scan_and_from_json(
+            spark, std_input_path + '/' + input_file, schema)
+        conf = _enable_json_scan_and_to_structs_conf
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf =_enable_json_to_structs_conf)
+        test_func, conf=conf)
 
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
@@ -1202,47 +1085,19 @@ def test_from_json_doubles(std_input_path, input_file):
     "timestamp_tz_formatted_strings.json",
     "scan_emtpy_lines.json"])
 @pytest.mark.parametrize('read_func', [read_json_df])
-@allow_non_gpu(*non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_scan_json_corrected_dates(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    conf = copy_and_update(_enable_all_types_json_scan_conf, 
-        {"spark.sql.legacy.timeParserPolicy": "CORRECTED",
-         "spark.rapids.sql.json.read.datetime.enabled": "true"})
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", DateType())]),
-        spark_tmp_table_factory),
-        conf=conf)
-
-@pytest.mark.parametrize('input_file', [
-    "int_formatted.json",
-    "float_formatted.json",
-    "sci_formatted.json",
-    pytest.param("int_formatted_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/9664')),
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    "decimal_locale_formatted_strings.json",
-    "single_quoted_strings.json",
-    "boolean_formatted.json",
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    pytest.param("escaped_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/9664')),
-    "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    "timestamp_tz_formatted_strings.json"])
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow) # https://github.com/NVIDIA/spark-rapids/issues/10453
-def test_from_json_corrected_dates(std_input_path, input_file):
+def test_scan_json_corrected_dates(std_input_path, read_func, spark_tmp_table_factory, input_file):
     schema = StructType([StructField("data", DateType())])
-    conf = copy_and_update(_enable_json_to_structs_conf, 
+    conf = copy_and_update(_enable_json_scan_and_to_structs_conf,
         {"spark.sql.legacy.timeParserPolicy": "CORRECTED",
          "spark.rapids.sql.json.read.datetime.enabled": "true"})
+    if input_file == "scan_emtpy_lines.json":
+        test_func = read_func(std_input_path + '/' + input_file, schema, spark_tmp_table_factory)
+    else:
+        test_func = lambda spark: _scan_and_from_json(
+            spark, std_input_path + '/' + input_file, schema)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf = conf)
+        test_func, conf=conf)
 
 @pytest.mark.parametrize('input_file', [
     pytest.param("int_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535')),
@@ -1267,47 +1122,19 @@ def test_from_json_corrected_dates(std_input_path, input_file):
     pytest.param("timestamp_tz_formatted_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/6846')),
     "scan_emtpy_lines.json"])
 @pytest.mark.parametrize('read_func', [read_json_df])
-@allow_non_gpu(*non_utc_allow)
-def test_scan_json_corrected_timestamps(std_input_path, read_func, spark_tmp_table_factory, input_file):
-    conf = copy_and_update(_enable_all_types_json_scan_conf, 
-        {"spark.sql.legacy.timeParserPolicy": "CORRECTED",
-         "spark.rapids.sql.json.read.datetime.enabled": "true"})
-    assert_gpu_and_cpu_are_equal_collect(
-        read_func(std_input_path + '/' + input_file,
-        StructType([StructField("data", TimestampType())]),
-        spark_tmp_table_factory),
-        conf=conf)
-
-@pytest.mark.parametrize('input_file', [
-    pytest.param("int_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535')),
-    "float_formatted.json",
-    "sci_formatted.json",
-    pytest.param("int_formatted_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535')),
-    "float_formatted_strings.json",
-    "sci_formatted_strings.json",
-    pytest.param("decimal_locale_formatted_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535')),
-    "single_quoted_strings.json",
-    pytest.param("boolean_formatted.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/10535')),
-    "int_array_formatted.json",
-    "int_struct_formatted.json",
-    "int_struct_formatted_problematic_rows.json",
-    "int_mixed_array_struct_formatted.json",
-    "bad_whitespace.json",
-    "escaped_strings.json",
-    "nested_escaped_strings.json",
-    pytest.param("repeated_columns.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/11361')),
-    "mixed_objects.json",
-    "timestamp_formatted_strings.json",
-    pytest.param("timestamp_tz_formatted_strings.json", marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/6846'))])
 @allow_non_gpu(TEXT_INPUT_EXEC, *non_utc_allow)
-def test_from_json_corrected_timestamps(std_input_path, input_file):
+def test_scan_json_corrected_timestamps(std_input_path, read_func, spark_tmp_table_factory, input_file):
     schema = StructType([StructField("data", TimestampType())])
-    conf = copy_and_update(_enable_json_to_structs_conf, 
+    conf = copy_and_update(_enable_json_scan_and_to_structs_conf,
         {"spark.sql.legacy.timeParserPolicy": "CORRECTED",
          "spark.rapids.sql.json.read.datetime.enabled": "true"})
+    if input_file == "scan_emtpy_lines.json":
+        test_func = read_func(std_input_path + '/' + input_file, schema, spark_tmp_table_factory)
+    else:
+        test_func = lambda spark: _scan_and_from_json(
+            spark, std_input_path + '/' + input_file, schema)
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark : read_json_as_text(spark, std_input_path + '/' + input_file, "json").select(f.col('json'), f.from_json(f.col('json'), schema)),
-        conf = conf)
+        test_func, conf=conf)
 
 @pytest.mark.parametrize('input_file', [
     "int_formatted.json",
