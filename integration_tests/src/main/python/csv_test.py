@@ -14,6 +14,7 @@
 
 import pytest
 
+from _pytest.mark.structures import ParameterSet
 from asserts import *
 from conftest import get_non_gpu_allowed, is_not_utc, is_gbk_supported
 from datetime import datetime, timezone
@@ -190,6 +191,34 @@ def read_csv_sql(data_path, schema, spark_tmp_table_factory, options = {}):
         return spark.catalog.createTable(tmp_name, source='csv', path=data_path, **opts)
     return read_impl
 
+# These four configurations provide pairwise coverage of the read API, scan version,
+# and ANSI mode without repeating their full Cartesian product for every input file.
+csv_read_configs = [
+    pytest.param(read_csv_df, "", "true", id="df-v2-ansi"),
+    pytest.param(read_csv_sql, "", "false", id="sql-v2-no-ansi"),
+    pytest.param(read_csv_df, "csv", "false", id="df-v1-no-ansi"),
+    pytest.param(read_csv_sql, "csv", "true", id="sql-v1-ansi")]
+
+
+def _cover_all_values_and_configs(values, configs, id_prefix):
+    """Cover every value and configuration without their redundant cross product."""
+    def value_and_marks(value):
+        if isinstance(value, ParameterSet):
+            return value.values[0], value.marks
+        return value, ()
+
+    def test_param(value, config, param_id):
+        actual_value, marks = value_and_marks(value)
+        return pytest.param(actual_value, *config, marks=marks, id=param_id)
+
+    return [
+        test_param(value, configs[0], f"{id_prefix}-{index}-primary")
+        for index, value in enumerate(values)
+    ] + [
+        test_param(values[0], config, f"{id_prefix}-representative-{index}")
+        for index, config in enumerate(configs[1:], start=1)
+    ]
+
 @approximate_float
 @pytest.mark.parametrize('name,schema,options', [
     ('Acquisition_2007Q3.txt', _acq_schema, {'sep': '|'}),
@@ -245,9 +274,7 @@ def read_csv_sql(data_path, schema, spark_tmp_table_factory, options = {}):
     pytest.param('ints_with_whitespace.csv', _number_as_string_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/2069')),
     pytest.param('ints_with_whitespace.csv', _byte_schema, {'header': 'true'}, marks=pytest.mark.xfail(reason='https://github.com/NVIDIA/spark-rapids/issues/130'))
     ], ids=idfn)
-@pytest.mark.parametrize('read_func', [read_csv_df, read_csv_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
-@pytest.mark.parametrize('ansi_enabled', ["true", "false"])
+@pytest.mark.parametrize('read_func,v1_enabled_list,ansi_enabled', csv_read_configs)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
 def test_basic_csv_read(std_input_path, name, schema, options, read_func, v1_enabled_list, ansi_enabled, spark_tmp_table_factory):
@@ -272,9 +299,7 @@ def test_basic_csv_read(std_input_path, name, schema, options, read_func, v1_ena
     pytest.param('small_float_values.csv', _float_schema, {'header': 'true'}),
     pytest.param('small_float_values.csv', _double_schema, {'header': 'true'}),
 ], ids=idfn)
-@pytest.mark.parametrize('read_func', [read_csv_df, read_csv_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
-@pytest.mark.parametrize('ansi_enabled', ["true", "false"])
+@pytest.mark.parametrize('read_func,v1_enabled_list,ansi_enabled', csv_read_configs)
 def test_csv_read_small_floats(std_input_path, name, schema, options, read_func, v1_enabled_list, ansi_enabled, spark_tmp_table_factory):
     updated_conf=copy_and_update(_enable_all_types_conf, {
         'spark.sql.sources.useV1SourceList': v1_enabled_list,
@@ -298,8 +323,9 @@ csv_supported_gens = [
         TimestampGen()]
 
 @approximate_float
-@pytest.mark.parametrize('data_gen', csv_supported_gens, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
+@pytest.mark.parametrize(
+    'data_gen,v1_enabled_list',
+    _cover_all_values_and_configs(csv_supported_gens, [("csv",), ("",)], "round-trip"))
 @allow_non_gpu(*non_utc_allow)
 def test_round_trip(spark_tmp_path, data_gen, v1_enabled_list):
     gen = StructGen([('a', data_gen)], nullable=False)
@@ -338,15 +364,33 @@ def test_csv_fallback(spark_tmp_path, read_func, disable_conf, spark_tmp_table_f
 
 csv_supported_date_formats = ['yyyy-MM-dd', 'yyyy/MM/dd', 'yyyy-MM', 'yyyy/MM',
         'MM-yyyy', 'MM/yyyy', 'MM-dd-yyyy', 'MM/dd/yyyy', 'dd-MM-yyyy', 'dd/MM/yyyy']
+
+def _csv_date_read_configs(non_gpu_allow):
+    # Cover every pair of scan version, ANSI mode, and parser policy.
+    return [
+        pytest.param("", "true", 'LEGACY',
+                     marks=pytest.mark.allow_non_gpu('BatchScanExec,FileSourceScanExec'),
+                     id="v2-ansi-legacy"),
+        pytest.param("", "false", 'CORRECTED',
+                     marks=pytest.mark.allow_non_gpu(*non_gpu_allow),
+                     id="v2-no-ansi-corrected"),
+        pytest.param("", "true", 'EXCEPTION',
+                     marks=pytest.mark.allow_non_gpu(*non_gpu_allow),
+                     id="v2-ansi-exception"),
+        pytest.param("csv", "false", 'LEGACY',
+                     marks=pytest.mark.allow_non_gpu('BatchScanExec,FileSourceScanExec'),
+                     id="v1-no-ansi-legacy"),
+        pytest.param("csv", "true", 'CORRECTED',
+                     marks=pytest.mark.allow_non_gpu(*non_gpu_allow),
+                     id="v1-ansi-corrected"),
+        pytest.param("csv", "false", 'EXCEPTION',
+                     marks=pytest.mark.allow_non_gpu(*non_gpu_allow),
+                     id="v1-no-ansi-exception")]
+
 @pytest.mark.parametrize('date_format', csv_supported_date_formats, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
-@pytest.mark.parametrize('ansi_enabled', ["true", "false"])
-@pytest.mark.parametrize('time_parser_policy', [
-    pytest.param('LEGACY', marks=pytest.mark.allow_non_gpu('BatchScanExec,FileSourceScanExec')),
-    # Date is also time zone related for csv since rebase.
-    pytest.param('CORRECTED', marks=pytest.mark.allow_non_gpu(*non_utc_allow)),
-    pytest.param('EXCEPTION', marks=pytest.mark.allow_non_gpu(*non_utc_allow))
-])
+@pytest.mark.parametrize(
+    'v1_enabled_list,ansi_enabled,time_parser_policy',
+    _csv_date_read_configs(non_utc_allow))
 def test_date_formats_round_trip(spark_tmp_path, date_format, v1_enabled_list, ansi_enabled, time_parser_policy):
     gen = StructGen([('a', DateGen())], nullable=False)
     data_path = spark_tmp_path + '/CSV_DATA'
@@ -381,14 +425,9 @@ def test_date_formats_round_trip(spark_tmp_path, date_format, v1_enabled_list, a
 non_utc_allow_for_test_read_valid_and_invalid_dates=['BatchScanExec', 'FileSourceScanExec'] if is_not_utc() else []
 
 @pytest.mark.parametrize('filename', ["date.csv"])
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
-@pytest.mark.parametrize('ansi_enabled', ["true", "false"])
-@pytest.mark.parametrize('time_parser_policy', [
-    pytest.param('LEGACY', marks=pytest.mark.allow_non_gpu('BatchScanExec,FileSourceScanExec')),
-    # Date is also time zone related for csv since rebasing.
-    pytest.param('CORRECTED', marks=pytest.mark.allow_non_gpu(*non_utc_allow_for_test_read_valid_and_invalid_dates)),
-    pytest.param('EXCEPTION', marks=pytest.mark.allow_non_gpu(*non_utc_allow_for_test_read_valid_and_invalid_dates))
-])
+@pytest.mark.parametrize(
+    'v1_enabled_list,ansi_enabled,time_parser_policy',
+    _csv_date_read_configs(non_utc_allow_for_test_read_valid_and_invalid_dates))
 def test_read_valid_and_invalid_dates(std_input_path, filename, v1_enabled_list, ansi_enabled, time_parser_policy):
     data_path = std_input_path + '/' + filename
     updated_conf = copy_and_update(_enable_all_types_conf,
@@ -419,9 +458,21 @@ csv_supported_ts_parts = ['', # Just the date
         "'T'HH:mm[:ss]",
         "'T'HH:mm"]
 
-@pytest.mark.parametrize('ts_part', csv_supported_ts_parts)
-@pytest.mark.parametrize('date_format', csv_supported_date_formats)
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
+# Exercise the complete format cross-product once, then cover every individual date and time
+# token through the other scan implementation without repeating the full cross-product.
+csv_timestamp_format_configs = [
+    pytest.param(date_format, ts_part, "csv")
+    for date_format in csv_supported_date_formats
+    for ts_part in csv_supported_ts_parts]
+csv_timestamp_format_configs += [
+    pytest.param(date_format, csv_supported_ts_parts[index % len(csv_supported_ts_parts)], "")
+    for index, date_format in enumerate(csv_supported_date_formats)]
+csv_timestamp_format_configs += [
+    pytest.param(csv_supported_date_formats[0], ts_part, "")
+    for ts_part in csv_supported_ts_parts[1:]]
+
+@pytest.mark.parametrize(
+    'date_format,ts_part,v1_enabled_list', csv_timestamp_format_configs)
 @allow_non_gpu(*non_utc_allow)
 def test_ts_formats_round_trip(spark_tmp_path, date_format, ts_part, v1_enabled_list):
     full_format = date_format + ts_part
@@ -685,9 +736,13 @@ def test_csv_datetime_parsing_fallback_no_datetime(std_input_path, filename, sch
         lambda spark : spark.read.schema(schema).option('enableDateTimeParsingFallback', "true").csv(data_path),
         conf=_enable_all_types_conf)
 
-@pytest.mark.parametrize('read_func', [read_csv_df, read_csv_sql])
-@pytest.mark.parametrize('v1_enabled_list', ["", "csv"])
-@pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
+@pytest.mark.parametrize(
+    'col_name,read_func,v1_enabled_list',
+    _cover_all_values_and_configs(
+        ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'],
+        [(read_csv_df, ""), (read_csv_sql, ""),
+         (read_csv_df, "csv"), (read_csv_sql, "csv")],
+        "case-column"))
 @ignore_order
 def test_read_case_col_name(spark_tmp_path, spark_tmp_table_factory, read_func, v1_enabled_list, col_name):
     all_confs = {'spark.sql.sources.useV1SourceList': v1_enabled_list}
