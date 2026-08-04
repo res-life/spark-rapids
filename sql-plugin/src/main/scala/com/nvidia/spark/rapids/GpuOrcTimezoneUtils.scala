@@ -120,25 +120,28 @@ object GpuOrcTimezoneUtils {
       if (firstTransitionUs == Long.MinValue) {
         orcTimestamp.incRefCount()
       } else {
-        withResource(GpuTimeZoneDB.convertOrcFromUtc(orcTimestamp, tzCtx)) { utilUtc =>
-          withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+        val utilMicros = withResource(
+            GpuTimeZoneDB.convertOrcFromUtc(orcTimestamp, tzCtx)) { utilUtc =>
+          utilUtc.castTo(DType.INT64)
+        }
+        withResource(utilMicros) { _ =>
+          val ruleCorrection = withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
               orcTimestamp, readerZone.normalized())) { zoneUtc =>
-            withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
-              withResource(utilUtc.castTo(DType.INT64)) { utilMicros =>
-                withResource(zoneUtc.castTo(DType.INT64)) { zoneMicros =>
-                  withResource(zoneMicros.sub(utilMicros)) { ruleCorrection =>
-                    withResource(orcMicros.add(ruleCorrection)) { corrected =>
-                      withResource(corrected.castTo(DType.TIMESTAMP_MICROSECONDS)) {
-                        correctedTimestamp =>
-                        withResource(Scalar.timestampFromLong(
-                            DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
-                          withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
-                            needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
-                          }
-                        }
-                      }
-                    }
-                  }
+            withResource(zoneUtc.castTo(DType.INT64)) { zoneMicros =>
+              zoneMicros.sub(utilMicros)
+            }
+          }
+          withResource(ruleCorrection) { _ =>
+            val correctedTimestamp = withResource(orcTimestamp.castTo(DType.INT64)) { orcMicros =>
+              withResource(orcMicros.add(ruleCorrection)) { corrected =>
+                corrected.castTo(DType.TIMESTAMP_MICROSECONDS)
+              }
+            }
+            withResource(correctedTimestamp) { _ =>
+              withResource(Scalar.timestampFromLong(
+                  DType.TIMESTAMP_MICROSECONDS, firstTransitionUs)) { firstTransition =>
+                withResource(orcTimestamp.lessThan(firstTransition)) { needsCorrection =>
+                  needsCorrection.ifElse(correctedTimestamp, orcTimestamp)
                 }
               }
             }

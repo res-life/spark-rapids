@@ -452,22 +452,26 @@ object GpuOrcScan {
    */
   private def convertOrcFloatingPointSeconds(seconds: ColumnView): ColumnVector = {
     withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) { microsPerSecond =>
-      withResource(seconds.mul(microsPerSecond, DType.FLOAT64)) { doubleMicros =>
-        withResource(doubleMicros.castTo(DType.INT64)) { localMicros =>
-          withResource(localMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) { localTimestamp =>
-            withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
-                localTimestamp, ZoneId.systemDefault().normalized())) { utcTimestamp =>
-              withResource(utcTimestamp.castTo(DType.INT64)) { utcMicros =>
-                withResource(utcMicros.sub(localMicros)) { offsetMicros =>
-                  withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
-                    withResource(doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)) {
-                      offsetSeconds =>
-                      seconds.add(offsetSeconds, DType.FLOAT64)
-                    }
-                  }
-                }
-              }
+      val localMicros = withResource(seconds.mul(microsPerSecond, DType.FLOAT64)) {
+        doubleMicros =>
+        doubleMicros.castTo(DType.INT64)
+      }
+      withResource(localMicros) { _ =>
+        val utcMicros = withResource(localMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) {
+          localTimestamp =>
+          withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
+              localTimestamp, ZoneId.systemDefault().normalized())) { utcTimestamp =>
+            utcTimestamp.castTo(DType.INT64)
+          }
+        }
+        withResource(utcMicros) { _ =>
+          val offsetSeconds = withResource(utcMicros.sub(localMicros)) { offsetMicros =>
+            withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
+              doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
             }
+          }
+          withResource(offsetSeconds) { _ =>
+            seconds.add(offsetSeconds, DType.FLOAT64)
           }
         }
       }
