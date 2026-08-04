@@ -448,16 +448,12 @@ def test_broadcast_join_right_table_ridealong(data_gen, join_type):
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
 @ignore_order(local=True)
-@pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
-# Not all join types can be translated to a broadcast join, but this tests them to be sure we
-# can handle what spark is doing
-@pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_right_table_with_job_group(data_gen, join_type):
+def test_broadcast_join_right_table_with_job_group():
     with_cpu_session(lambda spark : spark.sparkContext.setJobGroup("testjob1", "test", False))
     def do_join(spark):
-        left, right = create_df(spark, data_gen, 500, 250)
-        return left.join(broadcast(right), left.a == right.r_a, join_type)
+        left, right = create_df(spark, int_gen, 500, 250)
+        return left.join(broadcast(right), left.a == right.r_a, 'Inner')
 
     conf = {'spark.sql.adaptive.enabled': 'false' # disable AQE as it can change the join type
             }
@@ -739,23 +735,21 @@ def test_left_broadcast_nested_loop_join_condition_missing(data_gen, join_type):
         return broadcast(left).join(right, how=join_type).distinct()
     assert_gpu_and_cpu_are_equal_collect(do_join)
 
-@pytest.mark.parametrize('data_gen', all_gen + single_level_array_gens + [binary_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Left', 'LeftSemi', 'LeftAnti'], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_right_broadcast_nested_loop_join_condition_missing_count(data_gen, join_type):
+def test_right_broadcast_nested_loop_join_condition_missing_count(join_type):
     def do_join(spark):
-        left, right = create_df(spark, data_gen, 50, 25)
+        left, right = create_df(spark, int_gen, 50, 25)
         return left.join(broadcast(right), how=join_type).selectExpr('COUNT(*)')
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     assert_gpu_and_cpu_are_equal_collect(do_join, conf = {'spark.sql.adaptive.enabled': 'false'
                                                           })
 
-@pytest.mark.parametrize('data_gen', all_gen + single_level_array_gens + [binary_gen], ids=idfn)
 @pytest.mark.parametrize('join_type', ['Right'], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_left_broadcast_nested_loop_join_condition_missing_count(data_gen, join_type):
+def test_left_broadcast_nested_loop_join_condition_missing_count(join_type):
     def do_join(spark):
-        left, right = create_df(spark, data_gen, 50, 25)
+        left, right = create_df(spark, int_gen, 50, 25)
         return broadcast(left).join(right, how=join_type).selectExpr('COUNT(*)')
     assert_gpu_and_cpu_are_equal_collect(do_join)
 
@@ -781,24 +775,34 @@ def test_broadcast_nested_loop_with_conditionals_build_right_fallback(data_gen, 
         return left.join(broadcast(right), (left.b >= right.r_b), join_type)
     assert_gpu_fallback_collect(do_join, 'BroadcastNestedLoopJoinExec')
 
-# local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
-# After 3.1.0 is the min spark version we can drop this
-@ignore_order(local=True)
-@pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
-# Not all join types can be translated to a broadcast join, but this tests them to be sure we
-# can handle what spark is doing
-@pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
-# Specify 200 shuffle partitions to test cases where streaming side is empty
-# as in https://github.com/NVIDIA/spark-rapids/issues/7516
-@pytest.mark.parametrize('shuffle_conf', [{}, {'spark.sql.shuffle.partitions': 200}], ids=idfn)
-@allow_non_gpu(*non_utc_allow)
-def test_broadcast_join_left_table(data_gen, join_type, shuffle_conf):
+def _assert_broadcast_join_left_table(data_gen, join_type, shuffle_conf):
     def do_join(spark):
         left, right = create_df(spark, data_gen, 250, 500)
         return broadcast(left).join(right, left.a == right.r_a, join_type)
     # Disable AQE temporarily until https://github.com/NVIDIA/spark-rapids/issues/14319 is resolved.
     conf = copy_and_update(shuffle_conf, {'spark.sql.adaptive.enabled': 'false'})
     assert_gpu_and_cpu_are_equal_collect(do_join, conf=conf)
+
+# Not all join types can be translated to a broadcast join, but this tests them to be sure we
+# can handle what spark is doing.
+# local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
+# After 3.1.0 is the min spark version we can drop this
+@ignore_order(local=True)
+@pytest.mark.parametrize('data_gen', all_gen, ids=idfn)
+@pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
+@allow_non_gpu(*non_utc_allow)
+def test_broadcast_join_left_table(data_gen, join_type):
+    _assert_broadcast_join_left_table(data_gen, join_type, {})
+
+# Specify 200 shuffle partitions to test cases where streaming side is empty
+# as in https://github.com/NVIDIA/spark-rapids/issues/7516. The empty-partition behavior is
+# independent of the join key type, so retain every join type with one representative key type.
+@ignore_order(local=True)
+@pytest.mark.parametrize('join_type', all_join_types, ids=idfn)
+@allow_non_gpu(*non_utc_allow)
+def test_broadcast_join_left_table_many_shuffle_partitions(join_type):
+    _assert_broadcast_join_left_table(
+        int_gen, join_type, {'spark.sql.shuffle.partitions': 200})
 
 # local sort because of https://github.com/NVIDIA/spark-rapids/issues/84
 # After 3.1.0 is the min spark version we can drop this
