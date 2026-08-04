@@ -194,10 +194,12 @@ def test_cast_string_to_timestamp_valid_format_ansi_off(data_gen):
     DecimalGen(precision=36, scale=5), DecimalGen(precision=38, scale=0),
     DecimalGen(precision=38, scale=10), DecimalGen(precision=36, scale=-5),
     DecimalGen(precision=38, scale=-10)], ids=meta_idfn('from:'))
-@pytest.mark.parametrize('to_type', [ByteType(), ShortType(), IntegerType(), LongType(), FloatType(), DoubleType(), StringType()], ids=meta_idfn('to:'))
-def test_with_ansi_disabled_cast_decimal_to(data_gen, to_type):
+def test_with_ansi_disabled_cast_decimal_to(data_gen):
+    to_types = [ByteType(), ShortType(), IntegerType(), LongType(),
+                FloatType(), DoubleType(), StringType()]
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).select(f.col('a').cast(to_type), f.col('a')),
+            lambda spark : unary_op_df(spark, data_gen).select(
+                f.col('a'), *[f.col('a').cast(to_type) for to_type in to_types]),
             conf = {'spark.rapids.sql.castDecimalToFloat.enabled': True})
 
 @approximate_float
@@ -207,10 +209,11 @@ def test_with_ansi_disabled_cast_decimal_to(data_gen, to_type):
     DecimalGen(precision=36, scale=5), DecimalGen(precision=38, scale=0),
     DecimalGen(precision=38, scale=10), DecimalGen(precision=36, scale=-5),
     DecimalGen(precision=38, scale=-10)], ids=meta_idfn('from:'))
-@pytest.mark.parametrize('to_type', [FloatType(), DoubleType(), StringType()], ids=meta_idfn('to:'))
-def test_ansi_cast_decimal_to(data_gen, to_type):
+def test_ansi_cast_decimal_to(data_gen):
+    to_types = [FloatType(), DoubleType(), StringType()]
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).select(f.col('a').cast(to_type), f.col('a')),
+            lambda spark : unary_op_df(spark, data_gen).select(
+                f.col('a'), *[f.col('a').cast(to_type) for to_type in to_types]),
             conf = {'spark.rapids.sql.castDecimalToFloat.enabled': True,
                 'spark.sql.ansi.enabled': True})
 
@@ -224,16 +227,12 @@ def test_ansi_cast_decimal_to(data_gen, to_type):
     DecimalGen(30, 3),
     DecimalGen(5, -3),
     DecimalGen(3, 0)], ids=meta_idfn('from:'))
-@pytest.mark.parametrize('to_type', [
-    DecimalType(9, 0),
-    DecimalType(17, 2),
-    DecimalType(35, 4),
-    DecimalType(30, -4),
-    DecimalType(38, -10),
-    DecimalType(1, -1)], ids=meta_idfn('to:'))
-def test_with_ansi_disabled_cast_decimal_to_decimal(data_gen, to_type):
+def test_with_ansi_disabled_cast_decimal_to_decimal(data_gen):
+    to_types = [DecimalType(9, 0), DecimalType(17, 2), DecimalType(35, 4),
+                DecimalType(30, -4), DecimalType(38, -10), DecimalType(1, -1)]
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).select(f.col('a').cast(to_type), f.col('a')))
+            lambda spark : unary_op_df(spark, data_gen).select(
+                f.col('a'), *[f.col('a').cast(to_type) for to_type in to_types]))
 
 
 @pytest.mark.parametrize('data_gen', [
@@ -248,19 +247,13 @@ def test_ansi_cast_failures_decimal_to_decimal(data_gen, to_type):
 
 
 @pytest.mark.parametrize('data_gen', [byte_gen, short_gen, int_gen, long_gen], ids=idfn)
-@pytest.mark.parametrize('to_type', [
-    DecimalType(2, 0),
-    DecimalType(3, 0),
-    DecimalType(5, 0),
-    DecimalType(7, 2),
-    DecimalType(10, 0),
-    DecimalType(10, 2),
-    DecimalType(18, 0),
-    DecimalType(18, 2)], ids=idfn)
-def test_cast_integral_to_decimal_ansi_off(data_gen, to_type):
+def test_cast_integral_to_decimal_ansi_off(data_gen):
+    to_types = [DecimalType(2, 0), DecimalType(3, 0), DecimalType(5, 0),
+                DecimalType(7, 2), DecimalType(10, 0), DecimalType(10, 2),
+                DecimalType(18, 0), DecimalType(18, 2)]
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, data_gen).select(
-            f.col('a').cast(to_type)),
+            *[f.col('a').cast(to_type) for to_type in to_types]),
         conf=ansi_disabled_conf)
 
 
@@ -298,18 +291,13 @@ _float_special_cases = [(float("inf"), 5.0), (float("-inf"), 5.0), (float("nan")
 @pytest.mark.parametrize('data_gen', [FloatGen(special_cases=_float_special_cases),
                                       DoubleGen(special_cases=_float_special_cases)],
                          ids=idfn)
-@pytest.mark.parametrize('to_type', [
-    DecimalType(7, 1),
-    DecimalType(9, 9),
-    DecimalType(15, 2),
-    DecimalType(15, 15),
-    DecimalType(30, 3),
-    DecimalType(5, -3),
-    DecimalType(3, 0)], ids=idfn)
-def test_cast_floating_point_to_decimal_ansi_off(data_gen, to_type):
+def test_cast_floating_point_to_decimal_ansi_off(data_gen):
+    to_types = [DecimalType(7, 1), DecimalType(9, 9), DecimalType(15, 2),
+                DecimalType(15, 15), DecimalType(30, 3), DecimalType(5, -3),
+                DecimalType(3, 0)]
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : unary_op_df(spark, data_gen).select(
-            f.col('a'), f.col('a').cast(to_type)),
+            f.col('a'), *[f.col('a').cast(to_type) for to_type in to_types]),
         conf=copy_and_update(
                ansi_disabled_conf,
                {'spark.rapids.sql.castFloatToDecimal.enabled': True}))
@@ -380,12 +368,12 @@ def _assert_cast_to_string_equal (data_gen, conf):
 
 
 @pytest.mark.parametrize('data_gen', all_array_gens_for_cast_to_string, ids=idfn)
-@pytest.mark.parametrize('legacy', [True, False])
 @allow_non_gpu(*non_utc_allow)
-def test_cast_array_to_string(data_gen, legacy):
-    _assert_cast_to_string_equal(
-        data_gen,
-        {"spark.sql.legacy.castComplexTypesToString.enabled": legacy})
+def test_cast_array_to_string(data_gen):
+    for legacy in [True, False]:
+        _assert_cast_to_string_equal(
+            data_gen,
+            {"spark.sql.legacy.castComplexTypesToString.enabled": legacy})
 
 def test_cast_float_to_string():
     assert_gpu_and_cpu_are_equal_collect(
@@ -415,12 +403,12 @@ def test_cast_array_with_unmatched_element_to_string(data_gen, legacy):
 
 
 @pytest.mark.parametrize('data_gen', basic_map_gens_for_cast_to_string, ids=idfn)
-@pytest.mark.parametrize('legacy', [True, False])
 @allow_non_gpu(*non_utc_allow)
-def test_cast_map_to_string(data_gen, legacy):
-    _assert_cast_to_string_equal(
-        data_gen,
-        {"spark.sql.legacy.castComplexTypesToString.enabled": legacy})
+def test_cast_map_to_string(data_gen):
+    for legacy in [True, False]:
+        _assert_cast_to_string_equal(
+            data_gen,
+            {"spark.sql.legacy.castComplexTypesToString.enabled": legacy})
 
 
 @pytest.mark.parametrize('data_gen', not_matched_map_gens_for_cast_to_string, ids=idfn)
@@ -435,17 +423,16 @@ def test_cast_map_with_unmatched_element_to_string(data_gen, legacy):
 
 
 @pytest.mark.parametrize('data_gen', [StructGen([[str(i), gen] for i, gen in enumerate(basic_array_struct_gens_for_cast_to_string)] + [["map", MapGen(ByteGen(nullable=False), null_gen)]])], ids=idfn)
-@pytest.mark.parametrize('legacy', [True, False])
 @allow_non_gpu(*non_utc_allow)
-def test_cast_struct_to_string(data_gen, legacy):
-    _assert_cast_to_string_equal(
-        data_gen,
-        {"spark.sql.legacy.castComplexTypesToString.enabled": legacy}
-    )
+def test_cast_struct_to_string(data_gen):
+    for legacy in [True, False]:
+        _assert_cast_to_string_equal(
+            data_gen,
+            {"spark.sql.legacy.castComplexTypesToString.enabled": legacy}
+        )
 
 # https://github.com/NVIDIA/spark-rapids/issues/2309
-@pytest.mark.parametrize('cast_conf', ['LEGACY', 'SPARK311+'])
-def test_one_nested_null_field_legacy_cast(cast_conf):
+def test_one_nested_null_field_legacy_cast():
     def was_broken_for_nested_null(spark):
         data = [
             (('foo',),),
@@ -455,14 +442,14 @@ def test_one_nested_null_field_legacy_cast(cast_conf):
         df = spark.createDataFrame(data)
         return df.select(df._1.cast(StringType()))
 
-    assert_gpu_and_cpu_are_equal_collect(
-        was_broken_for_nested_null,
-        {"spark.sql.legacy.castComplexTypesToString.enabled": True if cast_conf == 'LEGACY' else False}
-    )
+    for legacy in [True, False]:
+        assert_gpu_and_cpu_are_equal_collect(
+            was_broken_for_nested_null,
+            {"spark.sql.legacy.castComplexTypesToString.enabled": legacy}
+        )
 
 # https://github.com/NVIDIA/spark-rapids/issues/2315
-@pytest.mark.parametrize('cast_conf', ['LEGACY', 'SPARK311+'])
-def test_two_col_struct_legacy_cast(cast_conf):
+def test_two_col_struct_legacy_cast():
     def broken_df(spark):
         key_data_gen = StructGen([
             ('a', IntegerGen(min_val=0, max_val=4)),
@@ -472,10 +459,11 @@ def test_two_col_struct_legacy_cast(cast_conf):
         df = two_col_df(spark, key_data_gen, val_data_gen)
         return df.select(df.a.cast(StringType())).filter(df.b > 1)
 
-    assert_gpu_and_cpu_are_equal_collect(
-        broken_df,
-        {"spark.sql.legacy.castComplexTypesToString.enabled": True if cast_conf == 'LEGACY' else False}
-    )
+    for legacy in [True, False]:
+        assert_gpu_and_cpu_are_equal_collect(
+            broken_df,
+            {"spark.sql.legacy.castComplexTypesToString.enabled": legacy}
+        )
 
 @pytest.mark.parametrize('data_gen', [StructGen([["first", element_gen]]) for element_gen in not_matched_struct_array_gens_for_cast_to_string], ids=idfn)
 @pytest.mark.parametrize('legacy', [True, False])
@@ -1071,7 +1059,6 @@ _cast_string_to_timestamp_invalid = [
     ("T00:02:003",),
     ("T123",),
     ("T12345",),
-    ("T00:02:003",),
 
     # invalid TZs
     ("2000-01-01 00:00:00 +",),
@@ -1139,21 +1126,24 @@ def test_cast_string_to_timestamp_invalid_ANSI_OFF():
         lambda spark: _query(spark))
 
 # for each invalid item, will cause an exception.
-@pytest.mark.parametrize('invalid_item', _cast_string_to_timestamp_invalid)
-def test_cast_string_to_timestamp_invalid_ansi_enabled(invalid_item):
-    def _gen_df(spark):
-        return spark.createDataFrame(
-            [invalid_item],
-            'str_col string')
-    def _query(spark):
-        # depends on the timezone info in `GpuTimeZoneDB`, load first
-        spark._jvm.com.nvidia.spark.rapids.jni.GpuTimeZoneDB.cacheDatabase()
-        return _gen_df(spark).selectExpr("cast(str_col as timestamp)")
+@pytest.mark.parametrize('invalid_items', [
+    _cast_string_to_timestamp_invalid[index:index + 4]
+    for index in range(0, len(_cast_string_to_timestamp_invalid), 4)])
+def test_cast_string_to_timestamp_invalid_ansi_enabled(invalid_items):
+    for invalid_item in invalid_items:
+        def _gen_df(spark):
+            return spark.createDataFrame(
+                [invalid_item],
+                'str_col string')
+        def _query(spark):
+            # depends on the timezone info in `GpuTimeZoneDB`, load first
+            spark._jvm.com.nvidia.spark.rapids.jni.GpuTimeZoneDB.cacheDatabase()
+            return _gen_df(spark).selectExpr("cast(str_col as timestamp)")
 
-    assert_gpu_and_cpu_error(
-        lambda spark: _query(spark).collect(),
-        conf=ansi_enabled_conf,
-        error_message="DateTimeException")
+        assert_gpu_and_cpu_error(
+            lambda spark: _query(spark).collect(),
+            conf=ansi_enabled_conf,
+            error_message="DateTimeException")
 
 # Disable ANSI for Spark 4.0
 @disable_ansi_mode
