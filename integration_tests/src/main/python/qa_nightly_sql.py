@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2021, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,12 +61,6 @@ SELECT_SQL = [
 ("SELECT cos(longF) FROM test_table", "cos(longF)"),
 ("SELECT cos(floatF) FROM test_table", "cos(floatF)"),
 ("SELECT cos(doubleF) FROM test_table", "cos(doubleF)"),
-("SELECT cot(byteF) FROM test_table", "cot(byteF)"),
-("SELECT cot(shortF) FROM test_table", "cot(shortF)"),
-("SELECT cot(intF) FROM test_table", "cot(intF)"),
-("SELECT cot(longF) FROM test_table", "cot(longF)"),
-("SELECT cot(floatF) FROM test_table", "cot(floatF)"),
-("SELECT cot(doubleF) FROM test_table", "cot(doubleF)"),
 ("SELECT cot(byteF) FROM test_table", "cot(byteF)"),
 ("SELECT cot(shortF) FROM test_table", "cot(shortF)"),
 ("SELECT cot(intF) FROM test_table", "cot(intF)"),
@@ -426,7 +420,6 @@ SELECT_SQL = [
 ("SELECT NULLIF(intF, 0) as null_if FROM test_table", "NULLIF(intF, 0)"),
 ("SELECT NULLIF(byteF, 0) as null_if FROM test_table", "NULLIF(byteF, 0)"),
 ("SELECT NULLIF(shortF,0) as null_if FROM test_table", "NULLIF(shortF,0)"),
-("SELECT NULLIF(intF, 0) as null_if FROM test_table", "NULLIF(intF, 0)"),
 ("SELECT NULLIF(longF, 0) as null_if FROM test_table", "NULLIF(longF, 0)"),
 ("SELECT NULLIF(floatF,0) as null_if FROM test_table", "NULLIF(floatF,0)"),
 ("SELECT NULLIF(doubleF, 0) as null_if FROM test_table", "NULLIF(doubleF, 0)"),
@@ -511,7 +504,6 @@ SELECT_SQL = [
 ("SELECT * FROM test_table WHERE intF > 1000 AND intF = 2000", "* WHERE intF > 1000 AND intF = 2000"),
 ("SELECT strF, intF, longF, intF+longF FROM test_table", "strF, intF, longF, intF+longF"),
 ("SELECT intF+2000 FROM test_table", "intF+2000"),
-("SELECT CAST(intF as long) FROM test_table", "CAST(intF as long)"),
 ("SELECT strF AS user_name FROM test_table", "strF AS user_name"),
 ("SELECT COALESCE(strF,'N/A') strF FROM test_table", "COALESCE(strF,'N/A') strF"),
 ("SELECT SUM(shortF) FROM test_table", "SUM(shortF)"),
@@ -549,7 +541,6 @@ SELECT_SQL = [
 
 SELECT_NEEDS_SORT_SQL = [
 # (" AGG functions", "AGG functions"),
-("SELECT AVG(intF) FROM test_table", "AVG(intF)"),
 ("SELECT AVG(byteF) FROM test_table", "AVG(byteF)"),
 ("SELECT AVG(shortF) FROM test_table", "AVG(shortF)"),
 ("SELECT AVG(longF) FROM test_table", "AVG(longF)"),
@@ -564,7 +555,6 @@ SELECT_NEEDS_SORT_SQL = [
 ("SELECT AVG(intF) FROM test_table GROUP BY byteF, doubleF", "AVG(intF) GROUP BY byteF, doubleF"),
 ("SELECT AVG(floatF) FROM test_table GROUP BY byteF, shortF, intF ", "AVG(floatF) GROUP BY byteF, shortF, intF"),
 ("SELECT SUM(byteF) FROM test_table", "SUM(byteF)"),
-("SELECT SUM(shortF) FROM test_table", "SUM(shortF)"),
 ("SELECT SUM(intF) FROM test_table", "SUM(intF)"),
 ("SELECT SUM(longF) FROM test_table", "SUM(longF)"),
 ("SELECT SUM(floatF) FROM test_table", "SUM(floatF)"),
@@ -584,7 +574,6 @@ SELECT_NEEDS_SORT_SQL = [
 ("SELECT COUNT(floatF) FROM test_table", "COUNT(floatF)"),
 ("SELECT COUNT(doubleF) FROM test_table", "COUNT(doubleF)"),
 ("SELECT COUNT(booleanF) FROM test_table", "COUNT(booleanF)"),
-("SELECT COUNT(strF) FROM test_table", "COUNT(strF)"),
 ("SELECT COUNT(dateF) FROM test_table", "COUNT(dateF)"),
 ("SELECT COUNT(timestampF) FROM test_table", "COUNT(timestampF)"),
 ("SELECT COUNT(byteF)  FROM test_table GROUP BY intF", "COUNT(byteF) GROUP BY intF"),
@@ -598,7 +587,6 @@ SELECT_NEEDS_SORT_SQL = [
 ("SELECT COUNT(intF)  FROM test_table GROUP BY byteF, shortF", "COUNT(intF) GROUP BY byteF, shortF"),
 ("SELECT MIN(byteF) FROM test_table", "MIN(byteF)"),
 ("SELECT MIN(shortF) FROM test_table", "MIN(shortF)"),
-("SELECT MIN(intF) FROM test_table", "MIN(intF)"),
 ("SELECT MIN(longF) FROM test_table", "MIN(longF)"),
 ("SELECT MIN(floatF) FROM test_table", "MIN(floatF)"),
 ("SELECT MIN(doubleF) FROM test_table", "MIN(doubleF)"),
@@ -616,7 +604,6 @@ SELECT_NEEDS_SORT_SQL = [
 ("SELECT MIN(timestampF)  FROM test_table GROUP BY intF", "MIN(timestampF) GROUP BY intF"),
 ("SELECT MIN(byteF)  FROM test_table GROUP BY intF, shortF", "MIN(byteF) GROUP BY intF, shortF"),
 ("SELECT MIN(shortF)  FROM test_table GROUP BY intF, byteF", "MIN(shortF) GROUP BY intF, byteF"),
-("SELECT MAX(intF) FROM test_table", "MAX(intF)"),
 ("SELECT MAX(byteF) FROM test_table", "MAX(byteF)"),
 ("SELECT MAX(shortF) FROM test_table", "MAX(shortF)"),
 ("SELECT MAX(longF) FROM test_table", "MAX(longF)"),
@@ -686,7 +673,6 @@ pytest.param(("SELECT ROW_NUMBER() OVER (PARTITION BY timestampF ORDER BY timest
 #("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY floatF RANGE BETWEEN 20 PRECEDING AND 5 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY floatF RANGE BETWEEN 20 PRECEDING AND 5 FOLLOWING ) as sum_total"),
 ("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY doubleF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY doubleF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total"),
 #("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY doubleF RANGE BETWEEN 20 PRECEDING AND 50 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY doubleF RANGE BETWEEN 20 PRECEDING AND 50 FOLLOWING ) as sum_total"),
-("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY booleanF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY booleanF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total"),
 ("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY booleanF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY booleanF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total"),
 ("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY dateF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY dateF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total"),
 ("SELECT  SUM(byteF) OVER (PARTITION BY byteF ORDER BY timestampF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total FROM test_table", "SUM(byteF) OVER (PARTITION BY byteF ORDER BY timestampF ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING ) as sum_total"),

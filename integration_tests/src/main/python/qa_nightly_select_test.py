@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# Copyright (c) 2020-2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -140,8 +140,35 @@ def num_stringDf_first_last(spark, field_name):
             .sortWithinPartitions(f.col(field_name).desc_nulls_last())
     df.createOrReplaceTempView("test_table")
 
-def idfn(val):
-    return val[1]
+def _batch_queries(queries, batch_size=2):
+    batches = []
+    pending = []
+    for query in queries:
+        if hasattr(query, 'values'):
+            if pending:
+                batches.extend(
+                    pending[index:index + batch_size]
+                    for index in range(0, len(pending), batch_size))
+                pending = []
+            batches.append(pytest.param([query.values[0]], marks=query.marks, id=query.id))
+        else:
+            pending.append(query)
+    batches.extend(
+        pending[index:index + batch_size]
+        for index in range(0, len(pending), batch_size))
+    return batches
+
+
+def _batch_queries_by_key(queries, key):
+    grouped = {}
+    for query in queries:
+        grouped.setdefault(key(query), []).append(query)
+    return [batch for queries in grouped.values() for batch in _batch_queries(queries)]
+
+
+def idfn(query_lines):
+    suffix = " (+{})".format(len(query_lines) - 1) if len(query_lines) > 1 else ""
+    return query_lines[0][1] + suffix
 
 _qa_conf = {
         'spark.rapids.sql.variableFloatAgg.enabled': 'true',
@@ -159,13 +186,12 @@ _first_last_qa_conf = copy_and_update(_qa_conf, {
 @approximate_float
 @incompat
 @qarun
-@pytest.mark.parametrize('sql_query_line', SELECT_SQL, ids=idfn)
+@pytest.mark.parametrize('sql_query_lines', _batch_queries(SELECT_SQL), ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_select(sql_query_line, pytestconfig):
-    sql_query = sql_query_line[0]
-    if sql_query:
+def test_select(sql_query_lines, pytestconfig):
+    with_cpu_session(num_stringDf)
+    for sql_query, *_ in sql_query_lines:
         print(sql_query)
-        with_cpu_session(num_stringDf)
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(sql_query), conf=_qa_conf)
 
 @disable_ansi_mode
@@ -173,54 +199,51 @@ def test_select(sql_query_line, pytestconfig):
 @approximate_float
 @incompat
 @qarun
-@pytest.mark.parametrize('sql_query_line', SELECT_NEEDS_SORT_SQL, ids=idfn)
+@pytest.mark.parametrize('sql_query_lines', _batch_queries(SELECT_NEEDS_SORT_SQL), ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_needs_sort_select(sql_query_line, pytestconfig):
-    sql_query = sql_query_line[0]
-    if sql_query:
+def test_needs_sort_select(sql_query_lines, pytestconfig):
+    with_cpu_session(num_stringDf)
+    for sql_query, *_ in sql_query_lines:
         print(sql_query)
-        with_cpu_session(num_stringDf)
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(sql_query), conf=_qa_conf)
 
 @approximate_float
 @incompat
 @ignore_order(local=True)
 @qarun
-@pytest.mark.parametrize('sql_query_line', SELECT_JOIN_SQL, ids=idfn)
-def test_select_join(sql_query_line, pytestconfig):
-    sql_query = sql_query_line[0]
-    if sql_query:
+@pytest.mark.parametrize('sql_query_lines', _batch_queries(SELECT_JOIN_SQL), ids=idfn)
+def test_select_join(sql_query_lines, pytestconfig):
+    def init_tables(spark):
+        num_stringDf(spark)
+        if any(("UNION" in query[0]) or ("JOIN" in query[0]) for query in sql_query_lines):
+            num_stringDf_two(spark)
+    with_cpu_session(init_tables)
+    for sql_query, *_ in sql_query_lines:
         print(sql_query)
-        def init_tables(spark):
-            num_stringDf(spark)
-            if ("UNION" in sql_query) or ("JOIN" in sql_query):
-                num_stringDf_two(spark)
-        with_cpu_session(init_tables)
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(sql_query), conf=_qa_conf)
 
 @approximate_float
 @incompat
 @ignore_order(local=True)
 @qarun
-@pytest.mark.parametrize('sql_query_line', SELECT_PRE_ORDER_SQL, ids=idfn)
+@pytest.mark.parametrize(
+    'sql_query_lines', _batch_queries_by_key(SELECT_PRE_ORDER_SQL, lambda query: query[2]), ids=idfn)
 @disable_ansi_mode
-def test_select_first_last(sql_query_line, pytestconfig):
-    sql_query = sql_query_line[0]
-    if sql_query:
+def test_select_first_last(sql_query_lines, pytestconfig):
+    with_cpu_session(lambda spark: num_stringDf_first_last(spark, sql_query_lines[0][2]))
+    for sql_query, *_ in sql_query_lines:
         print(sql_query)
-        with_cpu_session(lambda spark: num_stringDf_first_last(spark, sql_query_line[2]))
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(sql_query), conf=_first_last_qa_conf)
 
 @approximate_float(abs=1e-6)
 @incompat
 @ignore_order(local=True)
 @qarun
-@pytest.mark.parametrize('sql_query_line', SELECT_FLOAT_SQL, ids=idfn)
-def test_select_float_order_local(sql_query_line, pytestconfig):
-    sql_query = sql_query_line[0]
-    if sql_query:
+@pytest.mark.parametrize('sql_query_lines', _batch_queries(SELECT_FLOAT_SQL), ids=idfn)
+def test_select_float_order_local(sql_query_lines, pytestconfig):
+    with_cpu_session(num_stringDf)
+    for sql_query, *_ in sql_query_lines:
         print(sql_query)
-        with_cpu_session(num_stringDf)
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(sql_query), conf=_qa_conf)
 
 
@@ -228,11 +251,10 @@ def test_select_float_order_local(sql_query_line, pytestconfig):
 @incompat
 @ignore_order(local=True)
 @qarun
-@pytest.mark.parametrize('sql_query_line', SELECT_REGEXP_SQL, ids=idfn)
+@pytest.mark.parametrize('sql_query_lines', _batch_queries(SELECT_REGEXP_SQL), ids=idfn)
 @pytest.mark.skipif(not is_jvm_charset_utf8(), reason="Regular expressions require UTF-8")
-def test_select_regexp(sql_query_line, pytestconfig):
-    sql_query = sql_query_line[0]
-    if sql_query:
+def test_select_regexp(sql_query_lines, pytestconfig):
+    with_cpu_session(num_stringDf)
+    for sql_query, *_ in sql_query_lines:
         print(sql_query)
-        with_cpu_session(num_stringDf)
         assert_gpu_and_cpu_are_equal_collect(lambda spark: spark.sql(sql_query), conf=_qa_conf)
