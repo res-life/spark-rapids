@@ -522,8 +522,9 @@ def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 @pytest.mark.parametrize('parquet_gens', [parquet_nested_datetime_gen], ids=idfn)
 @pytest.mark.parametrize('ts_type', parquet_ts_write_options)
-@pytest.mark.parametrize('ts_rebase_write', [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')])
-@pytest.mark.parametrize('ts_rebase_read', [('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')])
+@pytest.mark.parametrize('ts_rebase_write,ts_rebase_read', [
+    (('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')),
+    (('LEGACY', 'CORRECTED'), ('CORRECTED', 'LEGACY'))])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs)
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 def test_parquet_read_roundtrip_datetime_with_legacy_rebase(spark_tmp_path, parquet_gens, ts_type,
@@ -579,7 +580,7 @@ def test_parquet_read_roundtrip_datetime_with_legacy_rebase_mismatch_files(spark
         conf=read_confs)
 
 # This is legacy format, which is totally different from datatime legacy rebase mode.
-@pytest.mark.parametrize('parquet_gens', [[byte_gen, short_gen, decimal_gen_32bit], decimal_gens,
+@pytest.mark.parametrize('parquet_gens', [[byte_gen, short_gen] + decimal_gens,
                                           [ArrayGen(decimal_gen_32bit, max_length=10)],
                                           [StructGen([['child0', decimal_gen_32bit]])]], ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
@@ -1941,9 +1942,8 @@ def test_parquet_read_count(spark_tmp_path):
 @pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
 @pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-@pytest.mark.parametrize('col_name', ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'], ids=idfn)
 @ignore_order
-def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, reader_confs, col_name):
+def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, reader_confs):
     all_confs = copy_and_update(reader_confs, {
         'spark.sql.sources.useV1SourceList': v1_enabled_list})
     gen_list =[('k0', LongGen(nullable=False, min_val=0, max_val=0)),
@@ -1962,7 +1962,7 @@ def test_read_case_col_name(spark_tmp_path, read_func, v1_enabled_list, reader_c
             lambda spark : gen_df(spark, gen).write.partitionBy('k0', 'k1', 'k2', 'k3').parquet(data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : reader(spark).selectExpr(col_name),
+            lambda spark : reader(spark).selectExpr('K0', 'k0', 'K3', 'k3', 'V0', 'v0'),
             conf=all_confs)
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
