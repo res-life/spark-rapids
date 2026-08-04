@@ -91,22 +91,14 @@ def test_union_struct_missing_children(data_gen):
                                       struct_of_maps], ids=idfn)
 # This tests union of two DFs of two cols each. The types of the left col and right col is the same
 def test_union(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).union(binary_op_df(spark, data_gen)))
+    def union_plan(spark):
+        left = binary_op_df(spark, data_gen)
+        right = binary_op_df(spark, data_gen)
+        return left.union(right).unionAll(left).unionByName(right)
+    assert_gpu_and_cpu_are_equal_collect(union_plan)
 
 @pytest.mark.parametrize('data_gen', all_gen + map_gens + array_gens_sample +
                                      [all_basic_struct_gen,
-                                      StructGen([['child0', DecimalGen(7, 2)]]),
-                                      nested_struct,
-                                      struct_of_maps], ids=idfn)
-# This tests union of two DFs of two cols each. The types of the left col and right col is the same
-def test_unionAll(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).unionAll(binary_op_df(spark, data_gen)))
-
-@pytest.mark.parametrize('data_gen', all_gen + map_gens + array_gens_sample +
-                                     [all_basic_struct_gen,
-                                      pytest.param(all_basic_struct_gen),
                                       pytest.param(StructGen([[ 'child0', DecimalGen(7, 2)]])),
                                       nested_struct,
                                       StructGen([['child0', StructGen([['child0', StructGen([['child0', StructGen([['child0',
@@ -147,17 +139,6 @@ def test_union_by_missing_field_name_in_arrays_structs(gen_pair):
     assert_union_equal(gen_pair[0], gen_pair[1])
     assert_union_equal(gen_pair[1], gen_pair[0])
 
-
-
-@pytest.mark.parametrize('data_gen', all_gen + map_gens + array_gens_sample +
-                                     [all_basic_struct_gen,
-                                      StructGen([['child0', DecimalGen(7, 2)]]),
-                                      nested_struct,
-                                      struct_of_maps], ids=idfn)
-def test_union_by_name(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).unionByName(binary_op_df(spark,
-                                                                                  data_gen)))
 
 
 @pytest.mark.parametrize('data_gen', [
@@ -210,10 +191,10 @@ def test_repartition_df(data_gen, num_parts, length):
 def test_repartition_df_for_round_robin(data_gen, num_parts, length):
     from pyspark.sql.functions import lit
     assert_gpu_and_cpu_are_equal_collect(
-        # Add a computed column to avoid shuffle being optimized back to a CPU shuffle
-        lambda spark : gen_df(spark, data_gen, length=length).withColumn('x', lit(1)).repartition(num_parts),
-        # Enable sort for round robin partition
-        conf = {'spark.sql.execution.sortBeforeRepartition': 'true'}) # default is true
+            # Add a computed column to avoid shuffle being optimized back to a CPU shuffle
+            lambda spark : gen_df(spark, data_gen, length=length).withColumn('x', lit(1)).repartition(num_parts),
+            # Enable sort for round robin partition
+            conf = {'spark.sql.execution.sortBeforeRepartition': 'true'}) # default is true
 
 @allow_non_gpu('ShuffleExchangeExec', 'RoundRobinPartitioning')
 @pytest.mark.parametrize('data_gen', [[('a', simple_string_to_string_map_gen)]], ids=idfn)
@@ -236,13 +217,13 @@ def test_hash_repartition_exact_fallback(gen, num_parts):
     part_on = gen[1]
     # Disable AQE as it can change the shuffle type
     assert_gpu_fallback_collect(
-        lambda spark : gen_df(spark, data_gen, length=1024) \
-            .repartition(num_parts, *part_on) \
-            .withColumn('id', f.spark_partition_id()) \
-            .selectExpr('*'), "ShuffleExchangeExec",
-        # Force to use murmur3
-        conf = {'spark.rapids.sql.partitioning.hashFunction.enabled': False,
-                'spark.sql.adaptive.enabled': 'false'})
+            lambda spark : gen_df(spark, data_gen, length=1024) \
+                .repartition(num_parts, *part_on) \
+                .withColumn('id', f.spark_partition_id()) \
+                .selectExpr('*'), "ShuffleExchangeExec",
+            # Force to use murmur3
+            conf = {'spark.rapids.sql.partitioning.hashFunction.enabled': False,
+                    'spark.sql.adaptive.enabled': 'false'})
 
 @allow_non_gpu("Murmur3Hash")
 @pytest.mark.parametrize('data_gen', [ArrayGen(StructGen([('b1', long_gen)]))], ids=idfn)
@@ -320,11 +301,11 @@ def test_hash_repartition_exact_longs_no_overflow(num_parts, is_ansi_mode):
     conf = {'spark.sql.ansi.enabled': is_ansi_mode, 'spark.sql.adaptive.enabled': 'false'}
 
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: gen_df(spark, data_gen, length=1024)
-                        .repartition(num_parts, *part_on)
-                        .withColumn('id', f.spark_partition_id())
-                        .withColumn('hashed', f.hash(*part_on))
-                        .selectExpr('*', 'pmod(hashed, {})'.format(num_parts)), conf=conf)
+            lambda spark: gen_df(spark, data_gen, length=1024)
+                            .repartition(num_parts, *part_on)
+                            .withColumn('id', f.spark_partition_id())
+                            .withColumn('hashed', f.hash(*part_on))
+                            .selectExpr('*', 'pmod(hashed, {})'.format(num_parts)), conf=conf)
 
 
 @ignore_order(local=True)  # To avoid extra data shuffle by 'sort on Spark' for this repartition test.
