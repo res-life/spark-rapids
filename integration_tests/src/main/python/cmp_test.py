@@ -19,21 +19,73 @@ from conftest import is_not_utc
 from data_gen import *
 from spark_session import with_cpu_session, is_before_spark_313
 from pyspark.sql.types import *
-from marks import datagen_overrides, allow_non_gpu
+from marks import datagen_overrides, allow_non_gpu, inject_oom
 import pyspark.sql.functions as f
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_eq(data_gen):
+@pytest.mark.parametrize(
+    'data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
+def test_comparisons(data_gen):
     (s1, s2) = with_cpu_session(
         lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
     data_type = data_gen.data_type
+    null_lit = f.lit(None).cast(data_type)
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).select(
                 f.col('a') == s1,
                 s2 == f.col('b'),
-                f.lit(None).cast(data_type) == f.col('a'),
-                f.col('b') == f.lit(None).cast(data_type),
-                f.col('a') == f.col('b')))
+                null_lit == f.col('a'),
+                f.col('b') == null_lit,
+                f.col('a') == f.col('b'),
+                f.col('a').eqNullSafe(s1),
+                s2.eqNullSafe(f.col('b')),
+                null_lit.eqNullSafe(f.col('a')),
+                f.col('b').eqNullSafe(null_lit),
+                f.col('a').eqNullSafe(f.col('b')),
+                f.col('a') != s1,
+                s2 != f.col('b'),
+                null_lit != f.col('a'),
+                f.col('b') != null_lit,
+                f.col('a') != f.col('b'),
+                f.col('a') < s1,
+                s2 < f.col('b'),
+                null_lit < f.col('a'),
+                f.col('b') < null_lit,
+                f.col('a') < f.col('b'),
+                f.col('a') <= s1,
+                s2 <= f.col('b'),
+                f.col('b') <= s2,
+                null_lit <= f.col('a'),
+                f.col('b') <= null_lit,
+                f.col('a') <= f.col('b'),
+                f.col('a') >= s1,
+                s2 >= f.col('b'),
+                f.col('b') >= s2,
+                null_lit >= f.col('a'),
+                f.col('b') >= null_lit,
+                f.col('a') >= f.col('b')))
+
+
+def test_equality_for_decimal_128():
+    data_gen = decimal_gen_128bit
+    (s1, s2) = with_cpu_session(lambda spark: gen_scalars(data_gen, 2))
+    null_lit = f.lit(None).cast(data_gen.data_type)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: binary_op_df(spark, data_gen).select(
+            f.col('a') == s1,
+            s2 == f.col('b'),
+            null_lit == f.col('a'),
+            f.col('b') == null_lit,
+            f.col('a') == f.col('b'),
+            f.col('a').eqNullSafe(s1),
+            s2.eqNullSafe(f.col('b')),
+            null_lit.eqNullSafe(f.col('a')),
+            f.col('b').eqNullSafe(null_lit),
+            f.col('a').eqNullSafe(f.col('b')),
+            f.col('a') != s1,
+            s2 != f.col('b'),
+            null_lit != f.col('a'),
+            f.col('b') != null_lit,
+            f.col('a') != f.col('b')))
 
 def test_eq_for_interval():
     def test_func(data_gen):
@@ -54,19 +106,6 @@ def test_eq_for_interval():
     for data_gen in data_gens:
         test_func(data_gen)
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_eq_ns(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a').eqNullSafe(s1),
-                s2.eqNullSafe(f.col('b')),
-                f.lit(None).cast(data_type).eqNullSafe(f.col('a')),
-                f.col('b').eqNullSafe(f.lit(None).cast(data_type)),
-                f.col('a').eqNullSafe(f.col('b'))))
-
 def test_eq_ns_for_interval():
     data_gen = DayTimeIntervalGen()
     (s1, s2) = with_cpu_session(
@@ -79,19 +118,6 @@ def test_eq_ns_for_interval():
             f.lit(None).cast(data_type).eqNullSafe(f.col('a')),
             f.col('b').eqNullSafe(f.lit(None).cast(data_type)),
             f.col('a').eqNullSafe(f.col('b'))))
-
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_ne(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') != s1,
-                s2 != f.col('b'),
-                f.lit(None).cast(data_type) != f.col('a'),
-                f.col('b') != f.lit(None).cast(data_type),
-                f.col('a') != f.col('b')))
 
 def test_ne_for_interval():
     def test_func(data_gen):
@@ -112,19 +138,6 @@ def test_ne_for_interval():
     for data_gen in data_gens:
         test_func(data_gen)
 
-@pytest.mark.parametrize('data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_lt(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') < s1,
-                s2 < f.col('b'),
-                f.lit(None).cast(data_type) < f.col('a'),
-                f.col('b') < f.lit(None).cast(data_type),
-                f.col('a') < f.col('b')))
-
 def test_lt_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -143,20 +156,6 @@ def test_lt_for_interval():
     data_gens = [DayTimeIntervalGen()]
     for data_gen in data_gens:
         test_func(data_gen)
-
-@pytest.mark.parametrize('data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_lte(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') <= s1,
-                s2 <= f.col('b'),
-                f.col('b') <= s2,
-                f.lit(None).cast(data_type) <= f.col('a'),
-                f.col('b') <= f.lit(None).cast(data_type),
-                f.col('a') <= f.col('b')))
 
 def test_lte_for_interval():
     def test_func(data_gen):
@@ -210,20 +209,6 @@ def test_gt_interval():
     for data_gen in data_gens:
         test_func(data_gen)
 
-@pytest.mark.parametrize('data_gen', orderable_gens + struct_gens_sample_with_decimal128_no_list, ids=idfn)
-def test_gte(data_gen):
-    (s1, s2) = with_cpu_session(
-        lambda spark: gen_scalars(data_gen, 2, force_no_nulls=not isinstance(data_gen, NullGen)))
-    data_type = data_gen.data_type
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : binary_op_df(spark, data_gen).select(
-                f.col('a') >= s1,
-                s2 >= f.col('b'),
-                f.col('b') >= s2,
-                f.lit(None).cast(data_type) >= f.col('a'),
-                f.col('b') >= f.lit(None).cast(data_type),
-                f.col('a') >= f.col('b')))
-
 def test_gte_for_interval():
     def test_func(data_gen):
         (s1, s2) = with_cpu_session(
@@ -243,11 +228,22 @@ def test_gte_for_interval():
     for data_gen in data_gens:
         test_func(data_gen)
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + [binary_gen] + array_gens_sample + struct_gens_sample + map_gens_sample, ids=idfn)
-def test_isnull(data_gen):
+isnull_gens = eq_gens_with_decimal_gen + [binary_gen] + array_gens_sample + \
+    struct_gens_sample + map_gens_sample
+isnull_gen_groups = [
+    isnull_gens[index:index + 4]
+    for index in range(0, len(isnull_gens), 4)]
+
+
+@pytest.mark.parametrize('data_gens', isnull_gen_groups, ids=idfn)
+def test_isnull(data_gens):
+    gen = StructGen([
+        ('a{}'.format(index), data_gen)
+        for index, data_gen in enumerate(data_gens)], nullable=False)
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).select(
-                f.isnull(f.col('a'))))
+            lambda spark : gen_df(spark, gen).select(*[
+                f.isnull(f.col('a{}'.format(index)))
+                for index in range(len(data_gens))]))
 
 def test_isnull_for_interval():
     data_gen = DayTimeIntervalGen()
@@ -261,12 +257,13 @@ def test_isnan(data_gen):
             lambda spark : unary_op_df(spark, data_gen).select(
                 f.isnan(f.col('a'))))
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + [binary_gen] + array_gens_sample + struct_gens_sample + map_gens_sample, ids=idfn)
+@pytest.mark.parametrize('data_gen', isnull_gens, ids=idfn)
 def test_dropna_any(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).dropna())
 
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen + [binary_gen] + array_gens_sample + struct_gens_sample + map_gens_sample, ids=idfn)
+
+@pytest.mark.parametrize('data_gen', isnull_gens, ids=idfn)
 def test_dropna_all(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : binary_op_df(spark, data_gen).dropna(how='all'))
@@ -309,6 +306,7 @@ def test_empty_filter(op, spark_tmp_path):
         return spark.sql(f"select * from empty_filter_test2 where test {op} current_date")
     assert_gpu_and_cpu_are_equal_collect(do_it, conf=conf)
 
+@inject_oom
 def test_nondeterministic_filter():
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, LongGen(), 1).filter(f.rand(0) > 0.5))
@@ -318,31 +316,47 @@ def test_filter_with_lit(expr):
     assert_gpu_and_cpu_are_equal_collect(
             lambda spark : unary_op_df(spark, LongGen()).filter(expr))
 
-# Spark supports two different versions of 'IN', and it depends on the spark.sql.optimizer.inSetConversionThreshold conf
-# This is to test entries under that value.
-@pytest.mark.parametrize('data_gen', eq_gens_with_decimal_gen, ids=idfn)
-def test_in(data_gen):
-    # nulls are not supported for in on the GPU yet
-    num_entries = int(with_cpu_session(lambda spark: spark.conf.get('spark.sql.optimizer.inSetConversionThreshold'))) - 1
-    # we have to make the scalars in a session so negative scales in decimals are supported
-    scalars = with_cpu_session(lambda spark: list(gen_scalars(data_gen, num_entries, force_no_nulls=not isinstance(data_gen, NullGen))))
-    assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).select(f.col('a').isin(scalars)))
-
 # We avoid testing inset with NaN in Spark < 3.1.3 since it has issue with NaN comparisons.
 # See https://github.com/NVIDIA/spark-rapids/issues/9687.
 test_inset_data_gen = [gen for gen in eq_gens_with_decimal_gen if gen != float_gen if gen != double_gen] + \
                                    [FloatGen(no_nans=True), DoubleGen(no_nans=True)] \
                       if is_before_spark_313() else eq_gens_with_decimal_gen
+in_common_gens = [
+    gen for gen in eq_gens_with_decimal_gen if gen != float_gen and gen != double_gen]
 
-# Spark supports two different versions of 'IN', and it depends on the spark.sql.optimizer.inSetConversionThreshold conf
-# This is to test entries over that value.
+# Spark supports two different versions of 'IN', and it depends on the
+# spark.sql.optimizer.inSetConversionThreshold conf. Test expressions below and above it.
 @allow_non_gpu(*non_utc_allow)
-@pytest.mark.parametrize('data_gen', test_inset_data_gen, ids=idfn)
-def test_in_set(data_gen):
+@pytest.mark.parametrize('data_gen', in_common_gens, ids=idfn)
+def test_in_and_in_set(data_gen):
     # nulls are not supported for in on the GPU yet
-    num_entries = int(with_cpu_session(lambda spark: spark.conf.get('spark.sql.optimizer.inSetConversionThreshold'))) + 1
+    num_entries = int(with_cpu_session(lambda spark: spark.conf.get('spark.sql.optimizer.inSetConversionThreshold'))) - 1
     # we have to make the scalars in a session so negative scales in decimals are supported
-    scalars = with_cpu_session(lambda spark: list(gen_scalars(data_gen, num_entries, force_no_nulls=not isinstance(data_gen, NullGen))))
+    in_scalars = with_cpu_session(lambda spark: list(gen_scalars(
+        data_gen, num_entries, force_no_nulls=not isinstance(data_gen, NullGen))))
+    inset_entries = int(with_cpu_session(
+        lambda spark: spark.conf.get('spark.sql.optimizer.inSetConversionThreshold'))) + 1
+    inset_scalars = with_cpu_session(lambda spark: list(gen_scalars(
+        data_gen, inset_entries, force_no_nulls=not isinstance(data_gen, NullGen))))
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : unary_op_df(spark, data_gen).select(f.col('a').isin(scalars)))
+            lambda spark : unary_op_df(spark, data_gen).select(
+                f.col('a').isin(in_scalars), f.col('a').isin(inset_scalars)))
+
+
+@pytest.mark.parametrize('data_gen', [float_gen, double_gen], ids=idfn)
+def test_in_floating(data_gen):
+    num_entries = int(with_cpu_session(
+        lambda spark: spark.conf.get('spark.sql.optimizer.inSetConversionThreshold'))) - 1
+    scalars = with_cpu_session(lambda spark: list(gen_scalars(data_gen, num_entries)))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, data_gen).select(f.col('a').isin(scalars)))
+
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('data_gen', test_inset_data_gen[-2:], ids=idfn)
+def test_in_set_floating(data_gen):
+    num_entries = int(with_cpu_session(
+        lambda spark: spark.conf.get('spark.sql.optimizer.inSetConversionThreshold'))) + 1
+    scalars = with_cpu_session(lambda spark: list(gen_scalars(data_gen, num_entries)))
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: unary_op_df(spark, data_gen).select(f.col('a').isin(scalars)))
