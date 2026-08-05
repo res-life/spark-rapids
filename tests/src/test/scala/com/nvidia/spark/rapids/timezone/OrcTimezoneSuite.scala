@@ -285,6 +285,8 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       "NULL",
       "-8589934591.999999",
       "-7953731124.723491",
+      "1710037800.0", // 2024-03-10 02:30:00, inside the America/New_York DST gap
+      "1730597400.0", // 2024-11-03 01:30:00, inside the America/New_York DST overlap
       "-0.0015",
       "-0.0005",
       "0.0",

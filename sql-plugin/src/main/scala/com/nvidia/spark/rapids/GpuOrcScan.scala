@@ -23,6 +23,7 @@ import java.nio.channels.Channels
 import java.nio.charset.StandardCharsets
 import java.time.ZoneId
 import java.util
+import java.util.TimeZone
 import java.util.regex.Pattern
 
 import scala.annotation.tailrec
@@ -446,32 +447,49 @@ object GpuOrcScan {
   }
 
   /**
-   * Apply Spark's java.time timezone rules before ORC's millisecond rounding and overflow check.
-   * Looking up the offset with a microsecond timestamp preserves the original floating-point
-   * value: only the integral timezone delta is taken from the converted timestamp.
+   * Apply ORC's offset lookup ordering before its millisecond rounding and overflow check.
+   * ORC looks up the offset at `(localMillis - rawOffset)`, while Spark materializes the final
+   * timestamp with java.time rules. Apply only that integral timezone delta to the original
+   * floating-point value so both the DST and historical behavior match Spark's CPU ORC path.
    */
   private def convertOrcFloatingPointSeconds(seconds: ColumnView): ColumnVector = {
     withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) { microsPerSecond =>
-      val localMicros = withResource(seconds.mul(microsPerSecond, DType.FLOAT64)) {
-        doubleMicros =>
-        doubleMicros.castTo(DType.INT64)
-      }
-      withResource(localMicros) { _ =>
-        val utcMicros = withResource(localMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) {
-          localTimestamp =>
-          withResource(GpuTimeZoneDB.fromTimestampToUtcTimestamp(
-              localTimestamp, ZoneId.systemDefault().normalized())) { utcTimestamp =>
-            utcTimestamp.castTo(DType.INT64)
-          }
-        }
-        withResource(utcMicros) { _ =>
-          val offsetSeconds = withResource(utcMicros.sub(localMicros)) { offsetMicros =>
-            withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
-              doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
+      val localTimestamp = withResource(
+          Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
+        withResource(seconds.mul(millisPerSecond, DType.FLOAT64)) { doubleMillis =>
+          withResource(doubleMillis.castTo(DType.INT64)) { localMillis =>
+            withResource(localMillis.bitCastTo(DType.TIMESTAMP_MILLISECONDS)) {
+              localMillisTimestamp =>
+              localMillisTimestamp.castTo(DType.TIMESTAMP_MICROSECONDS)
             }
           }
-          withResource(offsetSeconds) { _ =>
-            seconds.add(offsetSeconds, DType.FLOAT64)
+        }
+      }
+      withResource(localTimestamp) { _ =>
+        withResource(localTimestamp.bitCastTo(DType.INT64)) { localMicros =>
+          val rawOffsetMicros = TimeZone.getDefault.getRawOffset.toLong *
+            DateTimeConstants.MICROS_PER_MILLIS
+          withResource(Scalar.fromLong(rawOffsetMicros)) { rawOffset =>
+            withResource(localMicros.sub(rawOffset)) { offsetLookupMicros =>
+              withResource(offsetLookupMicros.castTo(DType.TIMESTAMP_MICROSECONDS)) {
+                offsetLookupTimestamp =>
+                val localAtLookup = GpuTimeZoneDB.fromUtcTimestampToTimestamp(
+                  offsetLookupTimestamp, ZoneId.systemDefault().normalized())
+                withResource(localAtLookup) { _ =>
+                  withResource(localAtLookup.bitCastTo(DType.INT64)) { localAtLookupMicros =>
+                    val offsetSeconds = withResource(
+                        localAtLookupMicros.sub(offsetLookupMicros)) { offsetMicros =>
+                      withResource(offsetMicros.castTo(DType.FLOAT64)) { doubleOffsetMicros =>
+                        doubleOffsetMicros.div(microsPerSecond, DType.FLOAT64)
+                      }
+                    }
+                    withResource(offsetSeconds) { _ =>
+                      seconds.sub(offsetSeconds, DType.FLOAT64)
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
