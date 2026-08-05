@@ -452,7 +452,10 @@ object GpuOrcScan {
    * timestamp with java.time rules. Apply only that integral timezone delta to the original
    * floating-point value so both the DST and historical behavior match Spark's CPU ORC path.
    */
-  private def convertOrcFloatingPointSeconds(seconds: ColumnView): ColumnVector = {
+  private def convertOrcFloatingPointSeconds(seconds: ColumnVector): ColumnVector = {
+    if (GpuOverrides.isUTCTimezone(ZoneId.systemDefault())) {
+      return seconds.incRefCount()
+    }
     withResource(Scalar.fromDouble(DateTimeConstants.MICROS_PER_SECOND)) { microsPerSecond =>
       val localTimestamp = withResource(
           Scalar.fromDouble(DateTimeConstants.MILLIS_PER_SECOND)) { millisPerSecond =>
