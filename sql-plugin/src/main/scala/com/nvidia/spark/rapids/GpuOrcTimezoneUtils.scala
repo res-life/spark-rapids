@@ -117,11 +117,7 @@ object GpuOrcTimezoneUtils {
       readerZone: ZoneId): ai.rapids.cudf.ColumnVector = {
     withResource(GpuTimeZoneDB.convertOrcTimezones(col, tzCtx)) { orcTimestamp =>
       val firstTransitionUs = tzCtx.getReaderFirstTransitionUs
-      val needsHistoricalCorrection = firstTransitionUs != Long.MinValue &&
-        withResource(orcTimestamp.min()) { minTimestamp =>
-          minTimestamp.isValid && minTimestamp.getLong < firstTransitionUs
-        }
-      if (!needsHistoricalCorrection) {
+      if (firstTransitionUs == Long.MinValue) {
         orcTimestamp.incRefCount()
       } else {
         val utilMicros = withResource(

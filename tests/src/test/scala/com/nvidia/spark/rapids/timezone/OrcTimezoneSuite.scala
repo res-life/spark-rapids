@@ -315,6 +315,42 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
     spark.sql(selects.mkString(" UNION ALL "))
   }
 
+  Seq(false, true).foreach { useChunkedReader =>
+    test(s"all-null ORC timestamps stay on the GPU, chunked=$useChunkedReader") {
+      val originalTimeZone = TimeZone.getDefault
+      val conf = baseConf("orc")
+        .set(RapidsConf.CHUNKED_READER.key, useChunkedReader.toString)
+
+      try {
+        withTempPath { fileRoot =>
+          withCpuSparkSession(spark => {
+            setSessionTimeZone(spark, "UTC")
+            spark.range(4).selectExpr("CAST(NULL AS TIMESTAMP) AS ts")
+              .write.orc(fileRoot.getCanonicalPath)
+          }, conf = conf)
+
+          val (fromCpu, fromGpu) = runOnCpuAndGpu(
+            spark => {
+              setSessionTimeZone(spark, "Europe/Paris")
+              spark.read.orc(fileRoot.getCanonicalPath)
+            },
+            identity,
+            conf = conf,
+            repart = 0,
+            skipCanonicalizationCheck = true,
+            existClasses = "GpuFileSourceScanExec")
+          compareResults(
+            sort = false,
+            floatEpsilon = 0.0,
+            fromCpu = fromCpu,
+            fromGpu = fromGpu)
+        }
+      } finally {
+        TimeZone.setDefault(originalTimeZone)
+      }
+    }
+  }
+
   test("skip writer timezone validation without a timestamp projection") {
     val originalTimeZone = TimeZone.getDefault
     val conf = baseConf("orc")
