@@ -42,6 +42,28 @@ def read_parquet_df(data_path):
 def read_parquet_sql(data_path):
     return lambda spark : spark.sql('select * from parquet.`{}`'.format(data_path))
 
+def _joint_param(*values):
+    """Build a joint parameter while preserving marks from nested pytest parameters."""
+    param_values = []
+    marks = []
+    for value in values:
+        if hasattr(value, 'values') and hasattr(value, 'marks'):
+            param_values.append(value.values[0])
+            marks.extend(value.marks)
+        else:
+            param_values.append(value)
+    return pytest.param(*param_values, marks=marks)
+
+def _parquet_param_id(value):
+    """Return stable IDs for callables so xdist workers collect identical test names."""
+    if value is read_parquet_df or value is read_parquet_sql:
+        return value.__name__
+    return idfn(value)
+
+# Large matrices below use representative cross-products: every data/schema value runs with the
+# default configuration, and one representative value runs with the complete configuration matrix.
+# This retains every independent input while avoiding repeated interactions between orthogonal axes.
+
 datetimeRebaseModeInWriteKey = 'spark.sql.parquet.datetimeRebaseModeInWrite'
 int96RebaseModeInWriteKey = 'spark.sql.parquet.int96RebaseModeInWrite'
 datetimeRebaseModeInReadKey = 'spark.sql.parquet.datetimeRebaseModeInRead'
@@ -140,6 +162,18 @@ reader_opt_confs_no_native = [original_parquet_file_reader_conf, multithreaded_p
 
 reader_opt_confs = reader_opt_confs_native + reader_opt_confs_no_native
 
+parquet_round_trip_params = [
+    _joint_param(parquet_gens, read_parquet_df, reader_opt_confs[0], "")
+    for parquet_gens in parquet_gens_list
+] + [
+    _joint_param(parquet_gens_list[0], read_func, reader_confs, v1_enabled_list)
+    for read_func in [read_parquet_df, read_parquet_sql]
+    for reader_confs in reader_opt_confs
+    for v1_enabled_list in ["", "parquet"]
+    if not (read_func is read_parquet_df and reader_confs is reader_opt_confs[0] and
+            v1_enabled_list == "")
+]
+
 @pytest.mark.parametrize('parquet_gens', [[byte_gen, short_gen, int_gen, long_gen]], ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df])
 @pytest.mark.parametrize('reader_confs', [coalesce_parquet_file_reader_multithread_filter_conf,
@@ -183,10 +217,8 @@ def test_parquet_read_avoid_coalesce_incompatible_files(spark_tmp_path, v1_enabl
             .option("recursiveFileLookup", "true").parquet(data_path),
         conf=all_confs)
 
-@pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
-@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('parquet_gens,read_func,reader_confs,v1_enabled_list',
+                         parquet_round_trip_params, ids=_parquet_param_id)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_read_round_trip(spark_tmp_path, parquet_gens, read_func, reader_confs, v1_enabled_list):
@@ -213,8 +245,17 @@ _resource_bounded_pool_conf_matrix = resource_bounded_multithreaded_reader_conf(
         int96RebaseModeInReadKey: 'CORRECTED',
         datetimeRebaseModeInReadKey: 'CORRECTED'
     })
-@pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
-@pytest.mark.parametrize('reader_confs', _resource_bounded_pool_conf_matrix, ids=idfn)
+
+parquet_multithread_flow_ctrl_params = [
+    _joint_param(parquet_gens, _resource_bounded_pool_conf_matrix[0])
+    for parquet_gens in parquet_gens_list
+] + [
+    _joint_param(parquet_gens_list[0], reader_confs)
+    for reader_confs in _resource_bounded_pool_conf_matrix[1:]
+]
+
+@pytest.mark.parametrize('parquet_gens,reader_confs',
+                         parquet_multithread_flow_ctrl_params, ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_read_multithread_flow_ctrl_round_trip(spark_tmp_path, parquet_gens, reader_confs):
@@ -317,9 +358,18 @@ def test_parquet_fallback(spark_tmp_path, read_func, disable_conf):
             conf={disable_conf: 'false',
                 "spark.sql.sources.useV1SourceList": "parquet"})
 
-@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('binary_as_string', [True, False])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
+parquet_binary_read_params = [
+    _joint_param(read_parquet_df, True, reader_confs)
+    for reader_confs in reader_opt_confs
+] + [
+    _joint_param(read_func, binary_as_string, reader_opt_confs[0])
+    for read_func in [read_parquet_df, read_parquet_sql]
+    for binary_as_string in [True, False]
+    if not (read_func is read_parquet_df and binary_as_string)
+]
+
+@pytest.mark.parametrize('read_func,binary_as_string,reader_confs',
+                         parquet_binary_read_params, ids=_parquet_param_id)
 @tz_sensitive_test
 def test_parquet_read_round_trip_binary(std_input_path, read_func, binary_as_string, reader_confs):
     data_path = std_input_path + '/binary_as_string.parquet'
@@ -368,9 +418,18 @@ def test_parquet_read_forced_binary_schema(std_input_path, v1_enabled_list):
     assert_gpu_and_cpu_are_equal_collect(lambda spark : spark.read.schema(schema).parquet(data_path),
             conf=all_confs)
 
-@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+parquet_binary_as_string_params = [
+    _joint_param(read_parquet_df, reader_confs, "")
+    for reader_confs in reader_opt_confs
+] + [
+    _joint_param(read_func, reader_opt_confs[0], v1_enabled_list)
+    for read_func in [read_parquet_df, read_parquet_sql]
+    for v1_enabled_list in ["", "parquet"]
+    if not (read_func is read_parquet_df and v1_enabled_list == "")
+]
+
+@pytest.mark.parametrize('read_func,reader_confs,v1_enabled_list',
+                         parquet_binary_as_string_params, ids=_parquet_param_id)
 @tz_sensitive_test
 def test_parquet_read_round_trip_binary_as_string(std_input_path, read_func, reader_confs, v1_enabled_list):
     data_path = std_input_path + '/binary_as_string.parquet'
@@ -474,10 +533,19 @@ if not is_before_spark_320():
 # The following need extra jars 'lzo', 'lz4', 'brotli', 'zstd'
 # https://github.com/NVIDIA/spark-rapids/issues/143
 
-@pytest.mark.parametrize('compress', parquet_compress_options)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
-@pytest.mark.parametrize('cpu_decompress', [True, False])
+parquet_compress_params = [
+    _joint_param(compress, reader_opt_confs[0], "", True)
+    for compress in parquet_compress_options
+] + [
+    _joint_param(parquet_compress_options[0], reader_confs, v1_enabled_list, cpu_decompress)
+    for reader_confs in reader_opt_confs
+    for v1_enabled_list in ["", "parquet"]
+    for cpu_decompress in [True, False]
+    if not (reader_confs is reader_opt_confs[0] and v1_enabled_list == "" and cpu_decompress)
+]
+
+@pytest.mark.parametrize('compress,reader_confs,v1_enabled_list,cpu_decompress',
+                         parquet_compress_params, ids=idfn)
 def test_parquet_compress_read_round_trip(spark_tmp_path, compress, v1_enabled_list, reader_confs, cpu_decompress):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
@@ -501,10 +569,20 @@ parquet_pred_push_gens = [
         # timestamp_gen
         TimestampGen(start=datetime(1900, 1, 1, tzinfo=timezone.utc))] + decimal_gens
 
-@pytest.mark.parametrize('parquet_gen', parquet_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+parquet_pred_push_params = [
+    _joint_param(parquet_gen, read_parquet_df, reader_opt_confs[0], "")
+    for parquet_gen in parquet_pred_push_gens
+] + [
+    _joint_param(parquet_pred_push_gens[0], read_func, reader_confs, v1_enabled_list)
+    for read_func in [read_parquet_df, read_parquet_sql]
+    for reader_confs in reader_opt_confs
+    for v1_enabled_list in ["", "parquet"]
+    if not (read_func is read_parquet_df and reader_confs is reader_opt_confs[0] and
+            v1_enabled_list == "")
+]
+
+@pytest.mark.parametrize('parquet_gen,read_func,reader_confs,v1_enabled_list',
+                         parquet_pred_push_params, ids=_parquet_param_id)
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1_enabled_list, reader_confs):
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -519,14 +597,27 @@ def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1
             lambda spark: rf(spark).select(f.col('a') >= s0),
             conf=all_confs)
 
-@pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
-@pytest.mark.parametrize('parquet_gens', [parquet_nested_datetime_gen], ids=idfn)
-@pytest.mark.parametrize('ts_type', parquet_ts_write_options)
-@pytest.mark.parametrize('ts_rebase_write,ts_rebase_read', [
+parquet_legacy_rebase_profiles = [
     (('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')),
-    (('LEGACY', 'CORRECTED'), ('CORRECTED', 'LEGACY'))])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+    (('LEGACY', 'CORRECTED'), ('CORRECTED', 'LEGACY'))]
+parquet_legacy_rebase_params = [
+    _joint_param(parquet_nested_datetime_gen, ts_type, ts_rebase_write, ts_rebase_read,
+                 reader_opt_confs[0], "")
+    for ts_type in parquet_ts_write_options
+    for ts_rebase_write, ts_rebase_read in parquet_legacy_rebase_profiles
+] + [
+    _joint_param(parquet_nested_datetime_gen, parquet_ts_write_options[0],
+                 parquet_legacy_rebase_profiles[0][0], parquet_legacy_rebase_profiles[0][1],
+                 reader_confs, v1_enabled_list)
+    for reader_confs in reader_opt_confs
+    for v1_enabled_list in ["", "parquet"]
+    if not (reader_confs is reader_opt_confs[0] and v1_enabled_list == "")
+]
+
+@pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
+@pytest.mark.parametrize(
+    'parquet_gens,ts_type,ts_rebase_write,ts_rebase_read,reader_confs,v1_enabled_list',
+    parquet_legacy_rebase_params, ids=idfn)
 def test_parquet_read_roundtrip_datetime_with_legacy_rebase(spark_tmp_path, parquet_gens, ts_type,
                                                             ts_rebase_write, ts_rebase_read,
                                                             reader_confs, v1_enabled_list):
@@ -580,12 +671,24 @@ def test_parquet_read_roundtrip_datetime_with_legacy_rebase_mismatch_files(spark
         conf=read_confs)
 
 # This is legacy format, which is totally different from datatime legacy rebase mode.
-@pytest.mark.parametrize('parquet_gens', [[byte_gen, short_gen] + decimal_gens,
-                                          [ArrayGen(decimal_gen_32bit, max_length=10)],
-                                          [StructGen([['child0', decimal_gen_32bit]])]], ids=idfn)
-@pytest.mark.parametrize('read_func', [read_parquet_df, read_parquet_sql])
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+parquet_decimal_legacy_gens = [
+    [byte_gen, short_gen] + decimal_gens,
+    [ArrayGen(decimal_gen_32bit, max_length=10)],
+    [StructGen([['child0', decimal_gen_32bit]])]]
+parquet_decimal_legacy_params = [
+    _joint_param(parquet_gens, read_parquet_df, reader_opt_confs[0], "")
+    for parquet_gens in parquet_decimal_legacy_gens
+] + [
+    _joint_param(parquet_decimal_legacy_gens[0], read_func, reader_confs, v1_enabled_list)
+    for read_func in [read_parquet_df, read_parquet_sql]
+    for reader_confs in reader_opt_confs
+    for v1_enabled_list in ["", "parquet"]
+    if not (read_func is read_parquet_df and reader_confs is reader_opt_confs[0] and
+            v1_enabled_list == "")
+]
+
+@pytest.mark.parametrize('parquet_gens,read_func,reader_confs,v1_enabled_list',
+                         parquet_decimal_legacy_params, ids=_parquet_param_id)
 def test_parquet_decimal_read_legacy(spark_tmp_path, parquet_gens, read_func, reader_confs, v1_enabled_list):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
     data_path = spark_tmp_path + '/PARQUET_DATA'
@@ -595,10 +698,19 @@ def test_parquet_decimal_read_legacy(spark_tmp_path, parquet_gens, read_func, re
     all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
     assert_gpu_and_cpu_are_equal_collect(read_func(data_path), conf=all_confs)
 
+parquet_simple_partitioned_params = [
+    _joint_param(reader_confs, "", 100)
+    for reader_confs in reader_opt_confs
+] + [
+    _joint_param(reader_opt_confs[0], v1_enabled_list, batch_size)
+    for v1_enabled_list in ["", "parquet"]
+    for batch_size in [100, INT_MAX]
+    if not (v1_enabled_list == "" and batch_size == 100)
+]
+
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
-@pytest.mark.parametrize('batch_size', [100, INT_MAX])
+@pytest.mark.parametrize('reader_confs,v1_enabled_list,batch_size',
+                         parquet_simple_partitioned_params, ids=idfn)
 def test_parquet_simple_partitioned_read(spark_tmp_path, v1_enabled_list, reader_confs, batch_size):
     # Once https://github.com/NVIDIA/spark-rapids/issues/133 and https://github.com/NVIDIA/spark-rapids/issues/132 are fixed
     # we should go with a more standard set of generators
@@ -856,13 +968,24 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
                         'input_file_block_length()'),
             conf=all_confs)
 
+parquet_input_meta_fallback_params = [
+    _joint_param(reader_confs, 'spark.rapids.sql.format.parquet.enabled', "")
+    for reader_confs in reader_opt_confs
+] + [
+    _joint_param(reader_opt_confs[0], disable_conf, v1_enabled_list)
+    for disable_conf in [
+        'spark.rapids.sql.format.parquet.enabled',
+        'spark.rapids.sql.format.parquet.read.enabled']
+    for v1_enabled_list in ["", "parquet"]
+    if not (disable_conf == 'spark.rapids.sql.format.parquet.enabled' and v1_enabled_list == "")
+]
+
 @allow_non_gpu('ProjectExec', 'Alias', 'InputFileName', 'InputFileBlockStart', 'InputFileBlockLength',
                'FilterExec', 'And', 'IsNotNull', 'GreaterThan', 'Literal',
                'FileSourceScanExec', 'ColumnarToRowExec',
                'BatchScanExec', 'ParquetScan')
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('disable_conf', ['spark.rapids.sql.format.parquet.enabled', 'spark.rapids.sql.format.parquet.read.enabled'])
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
+@pytest.mark.parametrize('reader_confs,disable_conf,v1_enabled_list',
+                         parquet_input_meta_fallback_params, ids=idfn)
 def test_parquet_input_meta_fallback(spark_tmp_path, v1_enabled_list, reader_confs, disable_conf):
     first_data_path = spark_tmp_path + '/PARQUET_DATA/key=0'
     with_cpu_session(
@@ -1069,10 +1192,21 @@ _nested_pruning_schemas = [
             [["stRUct", StructGen([["CASE_INSENSITIVE", LongGen()]])]]),
         ]
 # TODO CHECK FOR DECIMAL??
-@pytest.mark.parametrize('data_gen,read_schema', _nested_pruning_schemas, ids=idfn)
-@pytest.mark.parametrize('reader_confs', reader_opt_confs)
-@pytest.mark.parametrize('v1_enabled_list', ["", "parquet"])
-@pytest.mark.parametrize('nested_enabled', ["true", "false"])
+nested_pruning_params = [
+    _joint_param(data_gen, read_schema, reader_opt_confs[0], "", "true")
+    for data_gen, read_schema in _nested_pruning_schemas
+] + [
+    _joint_param(_nested_pruning_schemas[0][0], _nested_pruning_schemas[0][1], reader_confs,
+                 v1_enabled_list, nested_enabled)
+    for reader_confs in reader_opt_confs
+    for v1_enabled_list in ["", "parquet"]
+    for nested_enabled in ["true", "false"]
+    if not (reader_confs is reader_opt_confs[0] and v1_enabled_list == "" and
+            nested_enabled == "true")
+]
+
+@pytest.mark.parametrize('data_gen,read_schema,reader_confs,v1_enabled_list,nested_enabled',
+                         nested_pruning_params, ids=idfn)
 def test_nested_pruning_and_case_insensitive(spark_tmp_path, data_gen, read_schema, reader_confs, v1_enabled_list, nested_enabled):
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
