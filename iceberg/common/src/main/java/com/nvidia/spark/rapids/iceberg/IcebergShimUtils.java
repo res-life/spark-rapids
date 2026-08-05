@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.NoopMetric$;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import org.apache.hadoop.fs.Path;
+import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
@@ -45,6 +46,15 @@ import java.util.Map;
  * {@link ShimUtils} based on the detected Iceberg version.
  */
 public interface IcebergShimUtils {
+    /** Returns the Iceberg table format version from the table's current metadata. */
+    default int formatVersion(Table table) {
+        if (!(table instanceof BaseTable)) {
+            throw new IllegalArgumentException(
+                    "Unsupported Iceberg table implementation: " + table.getClass().getName());
+        }
+        return ((BaseTable) table).operations().current().formatVersion();
+    }
+
     /**
      * Returns the fully qualified location URI of an Iceberg {@link ContentFile},
      * e.g. {@code "s3://bucket/path/to/file.parquet"} or {@code "file:/path/to/file.parquet"}.
