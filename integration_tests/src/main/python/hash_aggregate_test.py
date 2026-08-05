@@ -284,6 +284,41 @@ def get_data_gen_conf_pairs(data_gens, confs, full_conf_count=1):
         for conf in confs[full_conf_count:]
     ]
 
+
+def get_data_gen_param_pairs(data_gens, param_combinations, full_param_count=4):
+    """Cover every data generator and parameter combination without their cross product."""
+    return [
+        pytest.param(data_gen, *params,
+                     id='{}-{}'.format(idfn(data_gen), '-'.join(params)))
+        for params in param_combinations[:full_param_count]
+        for data_gen in data_gens
+    ] + [
+        pytest.param(data_gens[0], *params,
+                     id='{}-{}'.format(idfn(data_gens[0]), '-'.join(params)))
+        for params in param_combinations[full_param_count:]
+    ]
+
+
+def get_collect_mode_combinations(replace_modes):
+    """Put orthogonal execution-mode corners first for full datatype coverage."""
+    all_combinations = [
+        (replace_mode, aqe_enabled, use_obj_hash_agg)
+        for replace_mode in replace_modes
+        for aqe_enabled in ['false', 'true']
+        for use_obj_hash_agg in ['false', 'true']
+    ]
+    representative_combinations = [
+        (replace_modes[0], 'false', 'false'),
+        (replace_modes[0], 'true', 'true'),
+        (replace_modes[-1], 'false', 'true'),
+        (replace_modes[-1], 'true', 'false'),
+    ]
+    return representative_combinations + [
+        params for params in all_combinations
+        if params not in representative_combinations
+    ]
+
+
 _grpkey_small_decimals = [
     ('a', RepeatSeqGen(DecimalGen(precision=7, scale=3, nullable=(True, 10.0)), length=50)),
     ('b', DecimalGen(precision=5, scale=2)),
@@ -570,8 +605,9 @@ def test_computation_in_grpby_columns(ansi):
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list_with_decimalbig, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(
+        _init_list_with_decimalbig, _confs, full_conf_count=2))
 def test_hash_grpby_sum(data_gen, conf):
     # disable ANSI mode to avoid possible overflow issues in some of the data gens
     new_conf = copy_and_update(conf, {'spark.sql.ansi.enabled': False})
@@ -583,8 +619,9 @@ def test_hash_grpby_sum(data_gen, conf):
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', [_grpkey_short_sum_full_decimals, _grpkey_short_sum_full_neg_scale_decimals], ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    [_grpkey_short_sum_full_decimals, _grpkey_short_sum_full_neg_scale_decimals],
+    _confs, full_conf_count=2))
 def test_hash_grpby_sum_full_decimal(data_gen, conf):
     # disable ANSI mode to avoid possible overflow issues in some of the data gens
     new_conf = copy_and_update(conf, {'spark.sql.ansi.enabled': False})
@@ -596,8 +633,9 @@ def test_hash_grpby_sum_full_decimal(data_gen, conf):
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/9822")
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', numeric_gens + decimal_gens + [DecimalGen(precision=36, scale=5)], ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    numeric_gens + decimal_gens + [DecimalGen(precision=36, scale=5)],
+    _confs, full_conf_count=2))
 def test_hash_reduction_sum(data_gen, conf):
     # disable ANSI mode to avoid possible overflow issues in some of the data gens
     new_conf = copy_and_update(conf, {'spark.sql.ansi.enabled': False})
@@ -608,9 +646,10 @@ def test_hash_reduction_sum(data_gen, conf):
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', numeric_gens + decimal_gens + [
-    DecimalGen(precision=38, scale=0), DecimalGen(precision=38, scale=-10)], ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    numeric_gens + decimal_gens + [
+        DecimalGen(precision=38, scale=0), DecimalGen(precision=38, scale=-10)],
+    _confs, full_conf_count=2))
 @datagen_overrides(seed=0, permanent=True, reason='https://github.com/NVIDIA/spark-rapids/issues/9779')
 def test_hash_reduction_sum_full_decimal(data_gen, conf):
     # disable ANSI mode to avoid possible overflow issues in some of the data gens
@@ -622,9 +661,10 @@ def test_hash_reduction_sum_full_decimal(data_gen, conf):
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list + [_grpkey_short_mid_decimals,
-    _grpkey_short_big_decimals, _grpkey_short_very_big_decimals, _grpkey_short_sum_full_decimals], ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    _init_list + [_grpkey_short_mid_decimals, _grpkey_short_big_decimals,
+                  _grpkey_short_very_big_decimals, _grpkey_short_sum_full_decimals],
+    _confs, full_conf_count=2))
 def test_hash_grpby_avg(data_gen, conf):
     new_conf = copy_and_update(conf, {# Many of these tests can overflow
         'spark.sql.ansi.enabled': False})
@@ -711,7 +751,8 @@ def test_hash_grpby_pivot(data_gen, conf):
 @approximate_float
 @ignore_order(local=True)
 @incompat
-@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs))
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_multiple_grpby_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -723,7 +764,8 @@ def test_hash_multiple_grpby_pivot(data_gen, conf):
 @approximate_float
 @ignore_order(local=True)
 @incompat
-@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs))
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_reduction_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -869,8 +911,10 @@ def test_min_max_group_by(data_gen):
 # and https://github.com/rapidsai/cudf/issues/11222
 @allow_non_gpu("ProjectExec", *non_utc_allow)
 @ignore_order(local=True, arrays=["blist"])
-@pytest.mark.parametrize('data_gen', _gen_data_for_collect_list_op, ids=idfn)
-@pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,use_obj_hash_agg',
+    get_data_gen_param_pairs(
+        _gen_data_for_collect_list_op, [('true',), ('false',)], full_param_count=2))
 def test_hash_groupby_collect_list(data_gen, use_obj_hash_agg):
     def doit(spark):
         return gen_df(spark, data_gen, length=100)\
@@ -878,7 +922,7 @@ def test_hash_groupby_collect_list(data_gen, use_obj_hash_agg):
             .agg(f.collect_list('b').alias("blist"))
     assert_gpu_and_cpu_are_equal_collect(
         doit,
-        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
+        conf={'spark.sql.execution.useObjectHashAggregateExec': use_obj_hash_agg})
 
 
 @pytest.mark.skipif(not is_spark_420_or_later(),
@@ -1140,10 +1184,11 @@ _replace_modes_non_distinct = [
                'ShuffleExchangeExec', 'HashPartitioning', 'SortExec',
                'SortArray', 'Alias', 'Literal', 'Count', 'CollectList', 'CollectSet',
                'AggregateExpression', 'ProjectExec', *non_utc_allow)
-@pytest.mark.parametrize('data_gen', _full_gen_data_for_collect_op, ids=idfn)
-@pytest.mark.parametrize('replace_mode', _replace_modes_non_distinct, ids=idfn)
-@pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
-@pytest.mark.parametrize('use_obj_hash_agg', ['false', 'true'], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,replace_mode,aqe_enabled,use_obj_hash_agg',
+    get_data_gen_param_pairs(
+        _full_gen_data_for_collect_op,
+        get_collect_mode_combinations(_replace_modes_non_distinct)))
 def test_hash_groupby_collect_partial_replace_fallback(data_gen,
                                                        replace_mode,
                                                        aqe_enabled,
@@ -1256,10 +1301,11 @@ _replace_modes_single_distinct = [
                'ShuffleExchangeExec', 'HashPartitioning', 'SortExec',
                'SortArray', 'Alias', 'Literal', 'Count', 'CollectList', 'CollectSet',
                'AggregateExpression', 'ProjectExec', *non_utc_allow)
-@pytest.mark.parametrize('data_gen', _full_gen_data_for_collect_op, ids=idfn)
-@pytest.mark.parametrize('replace_mode', _replace_modes_single_distinct, ids=idfn)
-@pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
-@pytest.mark.parametrize('use_obj_hash_agg', ['false', 'true'], ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,replace_mode,aqe_enabled,use_obj_hash_agg',
+    get_data_gen_param_pairs(
+        _full_gen_data_for_collect_op,
+        get_collect_mode_combinations(_replace_modes_single_distinct)))
 @pytest.mark.xfail(condition=is_databricks104_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/4963')
 def test_hash_groupby_collect_partial_replace_with_distinct_fallback(data_gen,
                                                                      replace_mode,
@@ -1472,8 +1518,8 @@ def test_hash_groupby_typed_imperative_agg_without_gpu_implementation_fallback()
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_multiple_mode_query(data_gen, conf):
     print_params(data_gen)
     assert_gpu_and_cpu_are_equal_collect(
@@ -1496,9 +1542,8 @@ def test_hash_multiple_mode_query(data_gen, conf):
 @ignore_order
 @incompat
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10234")
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs),
-    ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_multiple_mode_query_avg_distincts(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -1510,8 +1555,8 @@ def test_hash_multiple_mode_query_avg_distincts(data_gen, conf):
 @ignore_order
 @incompat
 @datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10388")
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_query_multiple_distincts_with_non_distinct(data_gen, conf):
     local_conf = copy_and_update(conf,
                                  {'spark.sql.legacy.allowParameterlessCount': 'true',
@@ -1536,8 +1581,8 @@ def test_hash_query_multiple_distincts_with_non_distinct(data_gen, conf):
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_query_max_with_multiple_distincts(data_gen, conf):
     local_conf = copy_and_update(conf, {'spark.sql.legacy.allowParameterlessCount': 'true',
                                         'spark.sql.ansi.enabled': False})
@@ -1554,8 +1599,8 @@ def test_hash_query_max_with_multiple_distincts(data_gen, conf):
 
 @ignore_order
 @pytest.mark.parametrize("ansi", [True, False], ids=["ANSI", "NO_ANSI"])
-@pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen,conf', get_data_gen_conf_pairs(_init_list, _confs, full_conf_count=2))
 def test_hash_count_with_filter(data_gen, conf, ansi):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -1566,8 +1611,9 @@ def test_hash_count_with_filter(data_gen, conf, ansi):
 @approximate_float
 @ignore_order
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list + [_grpkey_short_mid_decimals, _grpkey_short_big_decimals], ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    _init_list + [_grpkey_short_mid_decimals, _grpkey_short_big_decimals],
+    _confs, full_conf_count=2))
 def test_hash_multiple_filters(data_gen, conf):
     assert_gpu_and_cpu_are_equal_sql(
         lambda spark : gen_df(spark, data_gen, length=100),
@@ -2499,8 +2545,8 @@ def _assert_std_variance(data_gen, conf, result_canonicalize_func_before_compare
 @ignore_order(local=True)
 @approximate_float
 @incompat
-@pytest.mark.parametrize('data_gen', _init_list_with_decimals_and_common_floats, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    _init_list_with_decimals_and_common_floats, _confs, full_conf_count=2))
 def test_std_variance(data_gen, conf):
     _assert_std_variance(data_gen, conf)
 
@@ -2514,8 +2560,8 @@ def test_std_variance(data_gen, conf):
 @ignore_order(local=True)
 @approximate_float
 @incompat
-@pytest.mark.parametrize('data_gen', _std_variance_extreme_fp_gens, ids=idfn)
-@pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.parametrize('data_gen,conf', get_data_gen_conf_pairs(
+    _std_variance_extreme_fp_gens, _confs, full_conf_count=2))
 def test_std_variance_extreme_floating_point(data_gen, conf):
     _assert_std_variance(
         data_gen,
@@ -2565,7 +2611,8 @@ def test_std_variance_nulls(data_gen, conf, ansi_enabled):
 @pytest.mark.parametrize(
     'data_gen,conf',
     get_data_gen_conf_pairs(
-        _init_list, [_float_conf, _float_smallbatch_conf, _float_conf_skipagg]))
+        _init_list, [_float_conf, _float_smallbatch_conf, _float_conf_skipagg],
+        full_conf_count=2))
 @pytest.mark.parametrize('replace_mode', _replace_modes_non_distinct, ids=idfn)
 @pytest.mark.parametrize('aqe_enabled', ['false', 'true'], ids=idfn)
 @pytest.mark.xfail(condition=is_databricks104_or_later(), reason='https://github.com/NVIDIA/spark-rapids/issues/4963')
