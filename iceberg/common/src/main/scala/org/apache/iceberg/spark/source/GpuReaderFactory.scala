@@ -19,6 +19,7 @@ package org.apache.iceberg.spark.source
 import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{CombineConf, GpuMetric, MultiFileReaderUtils, RapidsConf, ThreadPoolConfBuilder}
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet.{
   MultiFile,
@@ -74,8 +75,10 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     val hasNoDeletes = scans.forall(_.deletes.isEmpty)
     val hasFilePathMetadata =
       partition.expectedSchema.findField(MetadataColumns.FILE_PATH.fieldId()) != null
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
     val hasRowPositionMetadata =
-      partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
+      partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
+        (rowIdFieldId >= 0 && partition.expectedSchema.findField(rowIdFieldId) != null)
 
     val allParquet = scans.forall(_.file.format == FileFormat.PARQUET)
 
@@ -86,12 +89,12 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
       }
 
       val canUseMultiThread = canUseParquetMultiThread
-      // `_pos` must be file-global. The coalescing reader's parent
+      // `_pos` and inherited `_row_id` must be file-global. The coalescing reader's parent
       // (MultiFileCoalescingPartitionReaderBase.populateCurrentBlockChunk) can merge blocks
       // from multiple Iceberg splits of the same physical Parquet file into one chunk and
       // finalize the whole chunk with the first split's per-file post-processor, which
-      // would emit wrong `_pos` for any rows past the first split. Route `_pos`-projecting
-      // scans to the multi-thread/single-file readers instead — those finalize batches per
+      // would emit wrong positions for rows past the first split. Route position-dependent scans
+      // to the multi-thread/single-file readers instead — those finalize batches per
       // `IcebergPartitionedFile`, so each split's own post-processor handles its own rows.
       val canUseCoalescing = canUseParquetCoalescing && hasNoDeletes && !queryUsesInputFile &&
         !hasRowPositionMetadata

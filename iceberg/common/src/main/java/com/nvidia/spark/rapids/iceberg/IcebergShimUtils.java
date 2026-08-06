@@ -49,6 +49,18 @@ public interface IcebergShimUtils {
     int formatVersion(Table table);
 
     /**
+     * Returns the field ID of Iceberg's {@code _row_id} metadata column, or {@code -1}
+     * when the runtime Iceberg version predates row lineage.
+     */
+    int rowIdFieldId();
+
+    /**
+     * Returns the field ID of Iceberg's {@code _last_updated_sequence_number} metadata
+     * column, or {@code -1} when the runtime Iceberg version predates row lineage.
+     */
+    int lastUpdatedSequenceNumberFieldId();
+
+    /**
      * Returns the fully qualified location URI of an Iceberg {@link ContentFile},
      * e.g. {@code "s3://bucket/path/to/file.parquet"} or {@code "file:/path/to/file.parquet"}.
      * The API to obtain this differs across Iceberg versions ({@code path()} in 1.6.x,

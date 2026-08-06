@@ -21,7 +21,7 @@ import java.util.{List => JList, Map => JMap, Objects, Optional}
 import scala.collection.JavaConverters._
 import scala.collection.mutable.Stack
 
-import ai.rapids.cudf.{ColumnVector => CudfColumnVector, ColumnView, DType}
+import ai.rapids.cudf.{BinaryOp, ColumnVector => CudfColumnVector, ColumnView, DType}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.CastOptions
 import com.nvidia.spark.rapids.GpuCast
@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SpillableColumnarBatch
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.parquet.ParquetSchemaUtil
@@ -40,7 +41,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => Shade
 import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.types.{Type, Types}
 
-import org.apache.spark.sql.types.{DataType, StringType}
+import org.apache.spark.sql.types.{DataType, LongType, StringType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -162,50 +163,60 @@ private[iceberg] case object FetchFilePath extends ColumnAction {
 /** Fetch ROW_POSITION metadata column. */
 private[iceberg] case object FetchRowPosition extends ColumnAction {
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
-    val numRows = ctx.numRows
-    val rowPoses = new Array[Long](numRows)
-    val processor = ctx.processor
-
-    // Advance state in locals and commit back to the processor only after fromLongs()
-    // succeeds, so an OOM during column allocation does not leave the processor in a
-    // partially-advanced state. The matching snapshot/restore of these three counters
-    // around the withRetryNoSplit block in process() below covers the full retry scope.
-    var localBlockIndex = processor.curBlockIndex
-    var localProcessedRowCount = processor.processedRowCount
-    var localProcessedBlockRowCounts = processor.processedBlockRowCounts
-
-    var curBlockRowCount = processor.parquetInfo.blocks(localBlockIndex).getRowCount
-    var curBlockRowStart = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
-    var curBlockRowEnd = curBlockRowStart + curBlockRowCount
-    var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
-
-    for (i <- 0 until numRows) {
-      if (curRowPos >= curBlockRowEnd) {
-        // switch to next block
-        localBlockIndex += 1
-        localProcessedBlockRowCounts += curBlockRowCount
-        curRowPos = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
-
-        curBlockRowCount = processor.parquetInfo.blocks(localBlockIndex).getRowCount
-        curBlockRowStart = processor.parquetInfo.blocksFirstRowIndices(localBlockIndex)
-        curBlockRowEnd = curBlockRowStart + curBlockRowCount
-      }
-
-      rowPoses(i) = curRowPos
-      curRowPos += 1
-      localProcessedRowCount += 1
-    }
-
-    val result = CudfColumnVector.fromLongs(rowPoses: _*)
-    processor.curBlockIndex = localBlockIndex
-    processor.processedRowCount = localProcessedRowCount
-    processor.processedBlockRowCounts = localProcessedBlockRowCounts
-    result
+    ctx.processor.getRowPositions(ctx.numRows)
   }
 
   override def display(indent: Int): String = {
     " " * indent + "FetchRowPosition"
   }
+}
+
+/** Materialize or inherit Iceberg's `_row_id` metadata column. */
+private[iceberg] case class InheritRowId(fieldId: Int) extends ColumnAction {
+  override def execute(ctx: ColumnActionContext): CudfColumnVector = {
+    val firstRowId = Option(ctx.processor.idToConstant.get(fieldId)).map {
+      case number: Number => number.longValue()
+      case value => throw new IllegalStateException(
+        s"Expected a Long first_row_id for field $fieldId, but found ${value.getClass.getName}")
+    }
+
+    firstRowId match {
+      case None => ctx.column match {
+        case Some(col) => col.incRefCount()
+        case None => GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
+      }
+      case Some(base) =>
+        withResource(ctx.processor.getRowPositions(ctx.numRows)) { positions =>
+          ctx.processor.checkRowIdRange(base)
+          withResource(GpuScalar.from(base, LongType)) { scalar =>
+            withResource(positions.binaryOp(BinaryOp.ADD, scalar, DType.INT64)) { inherited =>
+              ctx.column match {
+                case Some(col) => col.replaceNulls(inherited)
+                case None => inherited.incRefCount()
+              }
+            }
+          }
+        }
+    }
+  }
+
+  override def display(indent: Int): String = " " * indent + s"InheritRowId(fieldId=$fieldId)"
+}
+
+/** Fill null lineage sequence numbers from the data file's sequence number. */
+private[iceberg] case class InheritLastUpdatedSequenceNumber(fieldId: Int) extends ColumnAction {
+  override def execute(ctx: ColumnActionContext): CudfColumnVector = {
+    val value = ctx.processor.idToConstant.get(fieldId)
+    withResource(GpuScalar.from(value, LongType)) { scalar =>
+      ctx.column match {
+        case Some(col) => col.replaceNulls(scalar)
+        case None => CudfColumnVector.fromScalar(scalar, ctx.numRows)
+      }
+    }
+  }
+
+  override def display(indent: Int): String =
+    " " * indent + s"InheritLastUpdatedSequenceNumber(fieldId=$fieldId)"
 }
 
 /** Process list column, applying action to elements if needed. */
@@ -371,6 +382,14 @@ private[iceberg] object MissingFieldActionBuilder {
       sparkType: DataType,
       isFieldOptional: Boolean,
       idToConstant: JMap[Integer, _]): ColumnAction = {
+    // Row-lineage metadata needs per-row inheritance rather than ordinary constants.
+    if (fieldId == ShimUtils.rowIdFieldId()) {
+      return InheritRowId(fieldId)
+    }
+    if (fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
+      return InheritLastUpdatedSequenceNumber(fieldId)
+    }
+
     // 1. Check constant map
     if (idToConstant.containsKey(fieldId)) {
       return FetchConstant(fieldId, sparkType)
@@ -554,6 +573,16 @@ private class ActionBuildingVisitor(
       primitive: Type.PrimitiveType,
       partner: Type): ColumnAction = {
     val expectedType = SparkSchemaUtil.convert(primitive)
+    val fieldId = currentField.fieldId()
+
+    // Lineage columns may be physically present but contain nulls that must inherit
+    // file-level values, so they can never use the ordinary PassThrough path.
+    if (fieldId == ShimUtils.rowIdFieldId()) {
+      return InheritRowId(fieldId)
+    }
+    if (fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
+      return InheritLastUpdatedSequenceNumber(fieldId)
+    }
 
     if (partner != null) {
       // Partner exists - check for type promotion
@@ -656,6 +685,65 @@ class GpuParquetReaderPostProcessor(
   private[iceberg] var curBlockIndex = 0
   // Top-level batch row count for actions that generate a column without an input column.
   private[iceberg] var currentNumRows = 0
+  // One file-global row-position vector shared by `_pos` and `_row_id` actions in this batch.
+  private var currentRowPositions: CudfColumnVector = _
+  private var currentMaxRowPosition = -1L
+
+  private[iceberg] def getRowPositions(numRows: Int): CudfColumnVector = {
+    if (currentRowPositions == null) {
+      val rowPositions = new Array[Long](numRows)
+
+      // Advance state in locals and commit only after fromLongs succeeds. process() restores
+      // the matching snapshot when withRetryNoSplit retries a later allocation.
+      var localBlockIndex = curBlockIndex
+      var localProcessedRowCount = processedRowCount
+      var localProcessedBlockRowCounts = processedBlockRowCounts
+
+      var curBlockRowCount = parquetInfo.blocks(localBlockIndex).getRowCount
+      var curBlockRowStart = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+      var curBlockRowEnd = curBlockRowStart + curBlockRowCount
+      var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
+
+      var i = 0
+      while (i < numRows) {
+        if (curRowPos >= curBlockRowEnd) {
+          localBlockIndex += 1
+          localProcessedBlockRowCounts += curBlockRowCount
+          curRowPos = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+
+          curBlockRowCount = parquetInfo.blocks(localBlockIndex).getRowCount
+          curBlockRowStart = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+          curBlockRowEnd = curBlockRowStart + curBlockRowCount
+        }
+
+        rowPositions(i) = curRowPos
+        curRowPos += 1
+        localProcessedRowCount += 1
+        i += 1
+      }
+
+      currentRowPositions = CudfColumnVector.fromLongs(rowPositions: _*)
+      currentMaxRowPosition = if (numRows == 0) -1L else rowPositions(numRows - 1)
+      curBlockIndex = localBlockIndex
+      processedRowCount = localProcessedRowCount
+      processedBlockRowCounts = localProcessedBlockRowCounts
+    } else {
+      require(currentRowPositions.getRowCount == numRows,
+        s"Cached row-position count ${currentRowPositions.getRowCount} did not match $numRows")
+    }
+    currentRowPositions.incRefCount()
+  }
+
+  private[iceberg] def checkRowIdRange(firstRowId: Long): Unit = {
+    if (currentMaxRowPosition >= 0) {
+      try {
+        Math.addExact(firstRowId, currentMaxRowPosition)
+      } catch {
+        case _: ArithmeticException => throw new ArithmeticException(
+          s"Iceberg row ID overflow: first_row_id=$firstRowId, _pos=$currentMaxRowPosition")
+      }
+    }
+  }
 
   // Convert shaded parquet schema to Iceberg schema for comparison
   private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
@@ -766,6 +854,7 @@ class GpuParquetReaderPostProcessor(
         curBlockIndex = snapBlockIndex
         processedRowCount = snapProcessedRowCount
         processedBlockRowCounts = snapProcessedBlockRowCounts
+        require(currentRowPositions == null, "Row-position cache leaked across retry attempts")
         // getColumnarBatch() returns a batch with refcounts incremented.
         // We MUST close it to balance the refcounts, even if an exception occurs.
         withResource(scb.getColumnarBatch()) { batch =>
@@ -784,17 +873,25 @@ class GpuParquetReaderPostProcessor(
           // Root-level columns are not wrapped in a single struct column, so we cannot execute
           // ProcessStruct directly here. Instead we run each field action against the matching
           // batch column (or None for generated fields) and assemble the output batch ourselves.
-          val columns: Seq[ColumnVector] = fieldActions.zip(fields).zipWithIndex.safeMap {
-            case ((action, field), idx) =>
-              val batchIdx = fieldIdToBatchIndex.get(field.fieldId())
-              val col = batchIdx.map(i => batch.column(i).asInstanceOf[GpuColumnVector].getBase)
-              val ctx = new ColumnActionContext(this, col, currentNumRows)
-              val result = action.execute(ctx)
-              closeOnExcept(result) { _ =>
-                GpuColumnVector.from(result, expectedSparkTypes(idx)).asInstanceOf[ColumnVector]
-              }
+          try {
+            val columns: Seq[ColumnVector] = fieldActions.zip(fields).zipWithIndex.safeMap {
+              case ((action, field), idx) =>
+                val batchIdx = fieldIdToBatchIndex.get(field.fieldId())
+                val col = batchIdx.map(i => batch.column(i).asInstanceOf[GpuColumnVector].getBase)
+                val ctx = new ColumnActionContext(this, col, currentNumRows)
+                val result = action.execute(ctx)
+                closeOnExcept(result) { _ =>
+                  GpuColumnVector.from(result, expectedSparkTypes(idx)).asInstanceOf[ColumnVector]
+                }
+            }
+            new ColumnarBatch(columns.toArray[ColumnVector], currentNumRows)
+          } finally {
+            if (currentRowPositions != null) {
+              currentRowPositions.close()
+              currentRowPositions = null
+              currentMaxRowPosition = -1L
+            }
           }
-          new ColumnarBatch(columns.toArray[ColumnVector], currentNumRows)
         }
       }
     }
