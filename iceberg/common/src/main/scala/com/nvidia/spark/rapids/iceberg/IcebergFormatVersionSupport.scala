@@ -19,23 +19,25 @@ package com.nvidia.spark.rapids.iceberg
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Table, TableProperties}
 
-/** Common planning gate for Iceberg format v3 scans and writes. */
-object IcebergV3Support {
-  private val FormatVersion3 = 3
+/** Common planning gate for Iceberg table format versions. */
+object IcebergFormatVersionSupport {
+  private val MaxSupportedFormatVersion = 2
 
-  def tagForGpu(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
-    tagForGpu(ShimUtils.formatVersion(table), meta)
+  def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
+    tagForFormatVersion(ShimUtils.formatVersion(table), meta)
   }
 
-  def tagForGpu(properties: Map[String, String], meta: RapidsMeta[_, _, _]): Unit = {
+  def tagForFormatVersion(
+      properties: Map[String, String],
+      meta: RapidsMeta[_, _, _]): Unit = {
     val formatVersion = properties.get(TableProperties.FORMAT_VERSION).map(_.toInt).getOrElse(2)
-    tagForGpu(formatVersion, meta)
+    tagForFormatVersion(formatVersion, meta)
   }
 
-  private def tagForGpu(formatVersion: Int, meta: RapidsMeta[_, _, _]): Unit = {
-    if (formatVersion == FormatVersion3 && !meta.conf.isIcebergV3Enabled) {
-      meta.willNotWorkOnGpu("Iceberg v3 support is disabled. To enable set " +
-        s"${RapidsConf.ENABLE_ICEBERG_V3} to true")
+  private def tagForFormatVersion(formatVersion: Int, meta: RapidsMeta[_, _, _]): Unit = {
+    if (formatVersion > MaxSupportedFormatVersion && !meta.conf.isIcebergV3Enabled) {
+      meta.willNotWorkOnGpu(s"Iceberg table format version $formatVersion is not supported. " +
+        s"To enable set ${RapidsConf.ENABLE_ICEBERG_V3} to true")
     }
   }
 }

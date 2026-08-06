@@ -32,6 +32,12 @@ import java.util.Map;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
+    /** Iceberg 1.6 cannot load tables with a format version greater than 2. */
+    @Override
+    public int formatVersion(Table table) {
+        return 2;
+    }
+
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.path().toString();

@@ -20,7 +20,7 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.iceberg.{IcebergV3Support, ShimUtils}
+import com.nvidia.spark.rapids.iceberg.{IcebergFormatVersionSupport, ShimUtils}
 import org.apache.iceberg.ScanTaskGroup
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
@@ -103,7 +103,8 @@ object GpuSparkScan {
     }
 
     Try {
-      IcebergV3Support.tagForGpu(GpuSparkScanAccess.table(meta.wrapped), meta)
+      IcebergFormatVersionSupport.tagForFormatVersion(
+        GpuSparkScanAccess.table(meta.wrapped), meta)
     } match {
       case Failure(e) => meta.willNotWorkOnGpu(s"error examining Iceberg table version: $e")
       case _ =>

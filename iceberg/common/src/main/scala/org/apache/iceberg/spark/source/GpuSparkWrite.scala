@@ -26,7 +26,7 @@ import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergV3Support}
+import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldIdShims
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -275,7 +275,7 @@ object GpuSparkWrite {
     val table: Table = GpuSparkWriteAccess.table(cpuWrite)
     val partitionSpec = table.spec()
 
-    IcebergV3Support.tagForGpu(table, meta)
+    IcebergFormatVersionSupport.tagForFormatVersion(table, meta)
 
     val dsSchema = GpuSparkWriteAccess.dsSchema(cpuWrite)
     val writeSchema = GpuSparkWriteAccess.writeSchema(cpuWrite)
@@ -301,7 +301,7 @@ object GpuSparkWrite {
     val properties: Map[String, String] = Spark3Util
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
-    IcebergV3Support.tagForGpu(properties, meta)
+    IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
 
@@ -332,7 +332,7 @@ object GpuSparkWrite {
     val properties: Map[String, String] = Spark3Util
       .rebuildCreateProperties(cpuExec.tableSpec.properties.asJava)
       .asScala.toMap
-    IcebergV3Support.tagForGpu(properties, meta)
+    IcebergFormatVersionSupport.tagForFormatVersion(properties, meta)
     val fileFormatStr = properties.getOrElse(TableProperties.DEFAULT_FILE_FORMAT,
       TableProperties.DEFAULT_FILE_FORMAT_DEFAULT)
 

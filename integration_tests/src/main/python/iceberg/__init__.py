@@ -31,6 +31,19 @@ iceberg_unsupported_mark = pytest.mark.skipif(
     not is_iceberg_supported_spark(),
     reason="Iceberg acceleration requires Spark 3.5.x, 4.0.x, or 4.1.x")
 
+
+def _runtime_supports_iceberg_v3():
+    version = os.environ.get("EXPECTED_ICEBERG_VERSION")
+    if version is None:
+        return False
+    major_minor = tuple(int(part) for part in version.split(".")[:2])
+    return major_minor >= (1, 9)
+
+
+iceberg_v3_unsupported_mark = pytest.mark.skipif(
+    not _runtime_supports_iceberg_v3(),
+    reason="Iceberg format v3 requires Iceberg 1.9 or later")
+
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
     '_c0': byte_gen, '_c1': short_gen, '_c2': int_gen,
