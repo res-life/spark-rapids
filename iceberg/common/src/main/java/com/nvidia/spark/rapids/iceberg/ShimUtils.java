@@ -75,6 +75,14 @@ public class ShimUtils {
         return IMPL.readDeletionVector(deleteFile, inputFile, validateCrc);
     }
 
+    public static int rowIdFieldId() {
+        return IMPL.rowIdFieldId();
+    }
+
+    public static int lastUpdatedSequenceNumberFieldId() {
+        return IMPL.lastUpdatedSequenceNumberFieldId();
+    }
+
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,
                                                     Table table) {
         return IMPL.constantsMap(task, readSchema, table);

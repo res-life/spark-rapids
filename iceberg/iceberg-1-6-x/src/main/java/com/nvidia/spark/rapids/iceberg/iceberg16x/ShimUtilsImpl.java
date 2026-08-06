@@ -58,6 +58,16 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
+    public int rowIdFieldId() {
+        return -1;
+    }
+
+    @Override
+    public int lastUpdatedSequenceNumberFieldId() {
+        return -1;
+    }
+
+    @Override
     public String locationOf(ContentFile<?> f) {
         return f.path().toString();
     }

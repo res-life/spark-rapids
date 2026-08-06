@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
@@ -308,6 +310,34 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
         "BatchScanExec")
 
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    os.environ.get("EXPECTED_ICEBERG_VERSION") is None or
+    tuple(int(part) for part in os.environ["EXPECTED_ICEBERG_VERSION"].split(".")[:2]) < (1, 9),
+    reason="Iceberg row lineage requires format v3 support")
+@pytest.mark.parametrize("reader_type", rapids_reader_types)
+def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
+    full_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_iceberg_table(spark):
+        # The first file predates the v3 upgrade and must retain null row lineage. The second
+        # file is committed as v3 and inherits row IDs and sequence numbers from file metadata.
+        spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+                  f"TBLPROPERTIES ('format-version' = '2')")
+        spark.sql(f"INSERT INTO {full_table} VALUES (1), (2)")
+        spark.sql(f"ALTER TABLE {full_table} SET TBLPROPERTIES ('format-version' = '3')")
+        spark.sql(f"INSERT INTO {full_table} VALUES (3), (4)")
+
+    with_cpu_session(setup_iceberg_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table}"),
+        conf={
+            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+            "spark.rapids.sql.format.parquet.reader.type": reader_type
+        })
 
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering
