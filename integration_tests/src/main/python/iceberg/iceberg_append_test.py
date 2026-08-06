@@ -24,7 +24,7 @@ from iceberg import create_iceberg_table, \
     iceberg_full_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
     full_coverage_partition_transforms, assert_iceberg_files_use_codec, \
-    iceberg_v3_unsupported_mark
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -67,7 +67,7 @@ def test_insert_into_unpartitioned_table(spark_tmp_table_factory):
 
 
 @iceberg
-@iceberg_v3_unsupported_mark
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @allow_non_gpu("AppendDataExec")
 def test_insert_into_v3_table_fallback(spark_tmp_table_factory):

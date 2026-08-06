@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.spark.source.GpuBaseReader;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
 import org.apache.iceberg.spark.source.GpuSparkScan;
@@ -32,10 +33,25 @@ import java.util.Map;
 
 /** Iceberg 1.6.x shim: uses {@code ContentFile.path()} and {@code GpuBaseReader::convertConstant}. */
 public class ShimUtilsImpl implements IcebergShimUtils {
-    /** Iceberg 1.6 cannot load tables with a format version greater than 2. */
     @Override
     public int formatVersion(Table table) {
-        return 2;
+        Preconditions.checkArgument(null != table, "Invalid table: null");
+
+        if (table instanceof SerializableTable) {
+            SerializableTable serializableTable = (SerializableTable) table;
+            return serializableTable.operations().current().formatVersion();
+        } else if (table instanceof HasTableOperations) {
+            HasTableOperations ops = (HasTableOperations) table;
+            return ops.operations().current().formatVersion();
+        } else if (table instanceof BaseMetadataTable) {
+            BaseMetadataTable metadataTable = (BaseMetadataTable) table;
+            return metadataTable.table().operations().current().formatVersion();
+        } else {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "%s does not have a format version",
+                            table.getClass().getSimpleName()));
+        }
     }
 
     @Override

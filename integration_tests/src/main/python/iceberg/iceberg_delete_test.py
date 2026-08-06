@@ -21,7 +21,7 @@ from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_en
                      iceberg_base_table_cols, iceberg_gens_list, iceberg_nested_write_gens_list,
                      iceberg_unsupported_mark, delete_partition_transforms_distributed,
                      _build_tblprops, assert_iceberg_files_use_codec,
-                     iceberg_v3_unsupported_mark)
+                     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_400_or_later, with_cpu_session, with_gpu_session
 
@@ -130,7 +130,7 @@ def test_iceberg_delete_unpartitioned_table(spark_tmp_table_factory, delete_mode
     "ReplaceDataExec", "WriteDeltaExec", "BatchScanExec", "ShuffleExchangeExec",
     "SortExec", "ProjectExec", "ColumnarToRowExec")
 @iceberg
-@iceberg_v3_unsupported_mark
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @pytest.mark.parametrize('delete_mode,fallback_exec', [
     pytest.param('copy-on-write', 'ReplaceDataExec', id='cow'),

@@ -23,7 +23,8 @@ from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, \
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
-    overwrite_static_partition_transforms, iceberg_v3_unsupported_mark
+    overwrite_static_partition_transforms, supports_iceberg_v3, \
+    ICEBERG_V3_UNSUPPORTED_REASON
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -92,7 +93,7 @@ def test_insert_overwrite_unpartitioned_table(spark_tmp_table_factory):
 
 
 @iceberg
-@iceberg_v3_unsupported_mark
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @allow_non_gpu("OverwriteByExpressionExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
 def test_insert_overwrite_v3_table_fallback(spark_tmp_table_factory):

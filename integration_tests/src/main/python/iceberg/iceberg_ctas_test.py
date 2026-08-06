@@ -25,7 +25,8 @@ from iceberg import (create_iceberg_table,
                      iceberg_gens_list, iceberg_full_gens_list,
                      get_full_table_name, iceberg_write_enabled_conf,
                      iceberg_unsupported_mark, _build_tblprops,
-                     ctas_partition_transforms, iceberg_v3_unsupported_mark)
+                     ctas_partition_transforms, supports_iceberg_v3,
+                     ICEBERG_V3_UNSUPPORTED_REASON)
 from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
@@ -112,7 +113,7 @@ def test_ctas_unpartitioned_table(spark_tmp_table_factory):
 
 
 @iceberg
-@iceberg_v3_unsupported_mark
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 @allow_non_gpu("AtomicCreateTableAsSelectExec")
 def test_ctas_v3_fallback(spark_tmp_table_factory):
