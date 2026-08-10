@@ -270,6 +270,7 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       "timestamp_micros(0L)")),
     TimestampSchemaEvolutionCase("bigint", Seq(
       "NULL",
+      "-2208988800", // 1900-01-01T00:00:00Z, before Asia/Shanghai's first transition
       "-1",
       "0",
       "1",
@@ -293,18 +294,11 @@ class OrcTimezoneSuite extends SparkQueryCompareTestSuite {
       "0.0005",
       "0.0015")))
 
-  // Covers same-zone, same-rules aliases, and both directions between UTC and a DST zone.
-  private val timestampSchemaEvolutionZonePairs = Seq(
-    "UTC" -> "UTC",
-    "America/New_York" -> "America/New_York",
-    "Asia/Shanghai" -> "Asia/Shanghai",
-    "Europe/Paris" -> "Europe/Paris",
-    "America/Los_Angeles" -> "US/Pacific",
-    "US/Pacific" -> "PST",
-    "UTC" -> "America/New_York",
-    "America/New_York" -> "UTC",
-    "UTC" -> "Europe/Paris",
-    "Europe/Paris" -> "UTC")
+  // Cover every writer/reader timezone combination, including same-rule aliases.
+  private val timestampSchemaEvolutionZonePairs = for {
+    writerTimeZone <- timezones
+    readerTimeZone <- timezones
+  } yield writerTimeZone -> readerTimeZone
 
   private def timestampSchemaEvolutionDataFrame(
       spark: SparkSession,
