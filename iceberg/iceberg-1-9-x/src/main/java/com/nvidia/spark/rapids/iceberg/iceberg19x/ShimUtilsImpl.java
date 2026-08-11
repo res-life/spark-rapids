@@ -42,12 +42,14 @@ public class ShimUtilsImpl implements IcebergShimUtils {
 
     @Override
     public int rowIdFieldId() {
-        return MetadataColumns.ROW_ID.fieldId();
+        // Iceberg 1.9 exposes the v3 lineage columns but materializes them as file constants.
+        // Per-row inheritance was added to the reader in Iceberg 1.10.
+        return -1;
     }
 
     @Override
     public int lastUpdatedSequenceNumberFieldId() {
-        return MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.fieldId();
+        return -1;
     }
 
     @Override
