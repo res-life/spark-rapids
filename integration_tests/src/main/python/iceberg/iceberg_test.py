@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import pytest
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
@@ -313,10 +311,7 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(
-    os.environ.get("EXPECTED_ICEBERG_VERSION") is None or
-    tuple(int(part) for part in os.environ["EXPECTED_ICEBERG_VERSION"].split(".")[:2]) < (1, 9),
-    reason="Iceberg row lineage requires format v3 support")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize("reader_type", rapids_reader_types)
 def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
     full_table = get_full_table_name(spark_tmp_table_factory)
