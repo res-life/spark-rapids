@@ -30,6 +30,7 @@ import org.apache.iceberg.parquet.GpuParquetIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.connector.read.Scan;
 import scala.Option;
 
@@ -47,6 +48,26 @@ import java.util.Map;
 public interface IcebergShimUtils {
     /** Returns the Iceberg table format version from the table's current metadata. */
     int formatVersion(Table table);
+
+    /** Returns whether this field has an Iceberg v3 initial default. */
+    default boolean hasInitialDefault(Types.NestedField field) {
+        return false;
+    }
+
+    /** Converts an Iceberg v3 initial default to Spark's internal value representation. */
+    default Object initialDefaultToSpark(Types.NestedField field) {
+        throw new UnsupportedOperationException("Iceberg initial defaults are not supported");
+    }
+
+    /** Returns whether this field has an Iceberg v3 write default. */
+    default boolean hasWriteDefault(Types.NestedField field) {
+        return false;
+    }
+
+    /** Converts an Iceberg v3 write default to Spark's internal value representation. */
+    default Object writeDefaultToSpark(Types.NestedField field) {
+        throw new UnsupportedOperationException("Iceberg write defaults are not supported");
+    }
 
     /**
      * Returns the fully qualified location URI of an Iceberg {@link ContentFile},

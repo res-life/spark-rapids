@@ -16,17 +16,30 @@
 
 package com.nvidia.spark.rapids.iceberg
 
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
-import org.apache.iceberg.{Table, TableProperties}
+import org.apache.iceberg.{Schema, Table, TableProperties}
+import org.apache.iceberg.types.Types
 
 import org.apache.spark.sql.execution.SparkPlan
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
   private val MaxSupportedFormatVersion = 2
+  private val SupportedDefaultTypeIds = Set(
+    "BOOLEAN", "INTEGER", "LONG", "FLOAT", "DOUBLE", "DATE", "TIMESTAMP",
+    "STRING", "UUID", "FIXED", "BINARY", "DECIMAL")
 
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
-    tagForFormatVersion(ShimUtils.formatVersion(table), meta)
+    val formatVersion = ShimUtils.formatVersion(table)
+    tagForFormatVersion(formatVersion, meta)
+    if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
+      unsupportedDefault(table.schema()).foreach { case (path, typeName) =>
+        meta.willNotWorkOnGpu(
+          s"Iceberg default for field '$path' with type $typeName is not supported on GPU")
+      }
+    }
   }
 
   def tagForFormatVersion(
@@ -48,6 +61,30 @@ object IcebergFormatVersionSupport {
       // separate passes.
       tagMergeRowsAncestor(meta.parent, reason)
     }
+  }
+
+  private def unsupportedDefault(schema: Schema): Option[(String, String)] = {
+    def find(fields: Seq[Types.NestedField], parent: String): Option[(String, String)] = {
+      fields.iterator.map { field =>
+        val path = if (parent.isEmpty) field.name() else s"$parent.${field.name()}"
+        val hasDefault =
+          ShimUtils.hasInitialDefault(field) || ShimUtils.hasWriteDefault(field)
+        val fieldType = field.`type`()
+
+        if (hasDefault && fieldType.isPrimitiveType &&
+            !SupportedDefaultTypeIds.contains(fieldType.typeId().name())) {
+          Some(path -> fieldType.toString)
+        } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
+          Some(path -> fieldType.toString)
+        } else if (fieldType.isStructType) {
+          find(fieldType.asStructType().fields().asScala.toSeq, path)
+        } else {
+          None
+        }
+      }.collectFirst { case Some(value) => value }
+    }
+
+    find(schema.columns().asScala.toSeq, "")
   }
 
   private def tagMergeRowsAncestor(

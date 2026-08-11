@@ -38,6 +38,29 @@ import org.apache.spark.sql.types.{ArrayType, IntegerType, MapType, Metadata, St
 
 class GpuTypeToSparkTypeSuite extends AnyFunSuite {
 
+  private def fieldWithDefaults(
+      id: Int,
+      name: String,
+      icebergType: org.apache.iceberg.types.Type,
+      initialDefault: AnyRef,
+      writeDefault: AnyRef): Option[Types.NestedField] = {
+    try {
+      val builder = classOf[Types.NestedField].getMethod("optional", classOf[String])
+        .invoke(null, name)
+      val builderClass = builder.getClass
+      builderClass.getMethod("withId", java.lang.Integer.TYPE).invoke(builder, Int.box(id))
+      builderClass.getMethod("ofType", classOf[org.apache.iceberg.types.Type])
+        .invoke(builder, icebergType)
+      builderClass.getMethod("withInitialDefault", classOf[Object])
+        .invoke(builder, initialDefault)
+      builderClass.getMethod("withWriteDefault", classOf[Object])
+        .invoke(builder, writeDefault)
+      Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
+    } catch {
+      case _: NoSuchMethodException => None
+    }
+  }
+
   private def fieldOf(field: Types.NestedField): Metadata = {
     val schema = new Schema(field)
     GpuTypeToSparkType.toSparkType(schema)(field.name()).metadata
@@ -48,6 +71,22 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     assert(md.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(!md.contains(LIST_ELEMENT_FIELD_ID_METADATA_KEY))
     assert(!md.contains(LIST_ELEMENT_NESTED_IDS_METADATA_KEY))
+  }
+
+  test("toSparkType preserves Iceberg defaults alongside field-id metadata") {
+    val field = fieldWithDefaults(
+      1,
+      "value",
+      Types.IntegerType.get(),
+      initialDefault = Int.box(7),
+      writeDefault = Int.box(9)).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val metadata = fieldOf(field)
+    assert(metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
+    assert(metadata.getString(GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY) == "7")
+    assert(metadata.getString(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY) == "9")
   }
 
   test("toSparkType: flat list records only the element id") {

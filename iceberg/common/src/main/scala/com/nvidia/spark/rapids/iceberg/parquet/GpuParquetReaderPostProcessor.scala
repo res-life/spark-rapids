@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SpillableColumnarBatch
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.parquet.ParquetSchemaUtil
@@ -132,6 +133,23 @@ private[iceberg] case class FetchConstant(
 
   override def display(indent: Int): String = {
     " " * indent + s"FetchConstant(fieldId=$fieldId, ${sparkType.simpleString})"
+  }
+}
+
+/** Fill a field missing from an old data file with its Iceberg initial default. */
+private[iceberg] case class FillDefault(
+    fieldId: Int,
+    value: Any,
+    sparkType: DataType
+) extends ColumnAction {
+  override def execute(ctx: ColumnActionContext): CudfColumnVector = {
+    withResource(GpuScalar.from(value, sparkType)) { scalar =>
+      CudfColumnVector.fromScalar(scalar, ctx.numRows)
+    }
+  }
+
+  override def display(indent: Int): String = {
+    " " * indent + s"FillDefault(fieldId=$fieldId, ${sparkType.simpleString})"
   }
 }
 
@@ -356,7 +374,6 @@ private[iceberg] case class ProcessStruct(
   }
 }
 
-
 /**
  * Helper object for building column actions when field is missing from file schema.
  * Shared between ActionBuildingVisitor and GpuParquetReaderPostProcessor.
@@ -367,10 +384,10 @@ private[iceberg] object MissingFieldActionBuilder {
    * Checks constants, metadata columns, and optionality.
    */
   def buildAction(
-      fieldId: Int,
+      field: Types.NestedField,
       sparkType: DataType,
-      isFieldOptional: Boolean,
       idToConstant: JMap[Integer, _]): ColumnAction = {
+    val fieldId = field.fieldId()
     // 1. Check constant map
     if (idToConstant.containsKey(fieldId)) {
       return FetchConstant(fieldId, sparkType)
@@ -387,11 +404,16 @@ private[iceberg] object MissingFieldActionBuilder {
       throw new UnsupportedOperationException("IS_DELETED meta column is not supported yet")
     }
 
-    // 3. Check if optional - fill null
-    if (isFieldOptional) {
+    // 3. Materialize Iceberg's initial default for data written before this field was added.
+    if (ShimUtils.hasInitialDefault(field)) {
+      return FillDefault(fieldId, ShimUtils.initialDefaultToSpark(field), sparkType)
+    }
+
+    // 4. Check if optional - fill null
+    if (field.isOptional) {
       FillNull(sparkType)
     } else {
-      // 4. Required field missing - throw error
+      // 5. Required field without an initial default is invalid.
       throw new IllegalArgumentException(s"Missing required field: $fieldId")
     }
   }
@@ -453,9 +475,8 @@ private class ActionBuildingVisitor(
         return FillNull(sparkType)
       }
       return MissingFieldActionBuilder.buildAction(
-        currentField.fieldId(),
+        currentField,
         sparkType,
-        currentField.isOptional,
         idToConstant)
     }
 
@@ -490,8 +511,7 @@ private class ActionBuildingVisitor(
   override def beforeField(field: Types.NestedField, partner: Type): Unit = {
     fieldStack.push((field, partner,
       isInsideConstantStruct ||
-        (field.`type`().isStructType &&
-          idToConstant.containsKey(field.fieldId()))))
+        (field.`type`().isStructType && idToConstant.containsKey(field.fieldId()))))
   }
 
   override def afterField(field: Types.NestedField, partner: Type): Unit = {
@@ -513,9 +533,8 @@ private class ActionBuildingVisitor(
         return FillNull(sparkType)
       }
       return MissingFieldActionBuilder.buildAction(
-        currentField.fieldId(),
+        currentField,
         sparkType,
-        currentField.isOptional,
         idToConstant)
     }
 
@@ -537,9 +556,8 @@ private class ActionBuildingVisitor(
         return FillNull(sparkType)
       }
       return MissingFieldActionBuilder.buildAction(
-        currentField.fieldId(),
+        currentField,
         sparkType,
-        currentField.isOptional,
         idToConstant)
     }
 
@@ -568,9 +586,8 @@ private class ActionBuildingVisitor(
       FillNull(expectedType)
     } else {
       MissingFieldActionBuilder.buildAction(
-        currentField.fieldId(),
+        currentField,
         expectedType,
-        currentField.isOptional,
         idToConstant)
     }
   }

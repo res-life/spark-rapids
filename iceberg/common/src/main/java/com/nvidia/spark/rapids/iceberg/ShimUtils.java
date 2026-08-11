@@ -30,6 +30,7 @@ import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
+import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
@@ -60,6 +61,22 @@ public class ShimUtils {
 
     public static int formatVersion(Table table) {
         return IMPL.formatVersion(table);
+    }
+
+    public static boolean hasInitialDefault(Types.NestedField field) {
+        return IMPL.hasInitialDefault(field);
+    }
+
+    public static Object initialDefaultToSpark(Types.NestedField field) {
+        return IMPL.initialDefaultToSpark(field);
+    }
+
+    public static boolean hasWriteDefault(Types.NestedField field) {
+        return IMPL.hasWriteDefault(field);
+    }
+
+    public static Object writeDefaultToSpark(Types.NestedField field) {
+        return IMPL.writeDefaultToSpark(field);
     }
 
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,

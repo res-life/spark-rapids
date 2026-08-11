@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import pytest
+from pyspark.sql import Row
 
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
     assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
-from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
+from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
@@ -307,6 +308,61 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
         "BatchScanExec")
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+def test_iceberg_v3_initial_defaults_gpu_read(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table_name} "
+            "(id BIGINT, s STRUCT<present: BIGINT>) USING ICEBERG "
+            f"TBLPROPERTIES ({props_sql})")
+        spark.sql(
+            f"INSERT INTO {table_name} VALUES "
+            "(1, named_struct('present', 10L)), "
+            "(2, named_struct('present', 20L)), "
+            "(3, CAST(NULL AS STRUCT<present: BIGINT>))")
+
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        expressions = jvm.org.apache.iceberg.expressions.Expressions
+        types = jvm.org.apache.iceberg.types.Types
+        update = table.updateSchema()
+        update.addRequiredColumn(
+            "required_added", types.IntegerType.get(), None, expressions.lit(7))
+        update.addColumn("optional_added", types.StringType.get(), expressions.lit("legacy"))
+        update.addColumn("s", "nested_added", types.IntegerType.get(), expressions.lit(11))
+        update.commit()
+        spark.sql(f"REFRESH TABLE {table_name}")
+
+    with_cpu_session(setup_table)
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, s.present, s.nested_added, required_added, optional_added "
+            f"FROM {table_name} ORDER BY id"),
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+
+    # Spark 3.5 rejects omitted output columns before the Iceberg write path sees them. On newer
+    # Spark runtimes, exercise write-default handling through unmodified Iceberg/Spark and then
+    # validate the GPU-written row from a CPU session.
+    if not is_spark_35x():
+        with_gpu_session(
+            lambda spark: spark.sql(
+                f"INSERT INTO {table_name} (id, s) VALUES "
+                "(4, named_struct('present', 40L, 'nested_added', 11))").collect(),
+            conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+        written_rows = with_cpu_session(
+            lambda spark: spark.sql(
+                f"SELECT id, s.present, s.nested_added, required_added, optional_added "
+                f"FROM {table_name} WHERE id = 4").collect())
+        assert written_rows == [Row(4, 40, 11, 7, "legacy")]
 
 
 @iceberg
