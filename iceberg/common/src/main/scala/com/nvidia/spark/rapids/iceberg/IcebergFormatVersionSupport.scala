@@ -32,10 +32,17 @@ object IcebergFormatVersionSupport {
     "STRING", "UUID", "FIXED", "BINARY", "DECIMAL")
 
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
+    tagForFormatVersion(table, table.schema(), meta)
+  }
+
+  def tagForFormatVersion(
+      table: Table,
+      schemaToCheck: Schema,
+      meta: RapidsMeta[_, _, _]): Unit = {
     val formatVersion = ShimUtils.formatVersion(table)
     tagForFormatVersion(formatVersion, meta)
     if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
-      unsupportedDefault(table.schema()).foreach { case (path, typeName) =>
+      unsupportedDefault(schemaToCheck).foreach { case (path, typeName) =>
         meta.willNotWorkOnGpu(
           s"Iceberg default for field '$path' with type $typeName is not supported on GPU")
       }
