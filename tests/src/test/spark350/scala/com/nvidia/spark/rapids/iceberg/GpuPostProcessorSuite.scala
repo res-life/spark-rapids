@@ -1154,6 +1154,32 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("Missing lineage sequence remains null when first_row_id is unavailable") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+    assume(sequenceFieldId >= 0, "The selected Iceberg runtime predates row lineage")
+
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(sequenceFieldId, 7L)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 3)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
+
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], 3))) { output =>
+      withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { sequences =>
+        assert((0 until 3).forall(i => sequences.getBase.isNull(i)))
+      }
+    }
+  }
+
   test("Inherited row ID checks 64-bit overflow") {
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 

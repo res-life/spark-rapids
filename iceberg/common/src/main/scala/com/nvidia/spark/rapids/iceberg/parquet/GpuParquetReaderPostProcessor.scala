@@ -206,11 +206,16 @@ private[iceberg] case class InheritRowId(fieldId: Int) extends ColumnAction {
 /** Fill null lineage sequence numbers from the data file's sequence number. */
 private[iceberg] case class InheritLastUpdatedSequenceNumber(fieldId: Int) extends ColumnAction {
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
+    val firstRowId = ctx.processor.idToConstant.get(ShimUtils.rowIdFieldId())
     val value = ctx.processor.idToConstant.get(fieldId)
-    withResource(GpuScalar.from(value, LongType)) { scalar =>
-      ctx.column match {
-        case Some(col) => col.replaceNulls(scalar)
-        case None => CudfColumnVector.fromScalar(scalar, ctx.numRows)
+    if (firstRowId == null || value == null) {
+      GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
+    } else {
+      withResource(GpuScalar.from(value, LongType)) { scalar =>
+        ctx.column match {
+          case Some(col) => col.replaceNulls(scalar)
+          case None => CudfColumnVector.fromScalar(scalar, ctx.numRows)
+        }
       }
     }
   }
