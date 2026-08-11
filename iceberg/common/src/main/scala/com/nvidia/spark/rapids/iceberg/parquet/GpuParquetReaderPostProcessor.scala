@@ -211,10 +211,13 @@ private[iceberg] case class InheritLastUpdatedSequenceNumber(fieldId: Int) exten
     if (firstRowId == null || value == null) {
       GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
     } else {
-      withResource(GpuScalar.from(value, LongType)) { scalar =>
-        ctx.column match {
-          case Some(col) => col.replaceNulls(scalar)
-          case None => CudfColumnVector.fromScalar(scalar, ctx.numRows)
+      ctx.column match {
+        case Some(col) if col.getNullCount == 0 => col.incRefCount()
+        case _ => withResource(GpuScalar.from(value, LongType)) { scalar =>
+          ctx.column match {
+            case Some(col) => col.replaceNulls(scalar)
+            case None => CudfColumnVector.fromScalar(scalar, ctx.numRows)
+          }
         }
       }
     }
