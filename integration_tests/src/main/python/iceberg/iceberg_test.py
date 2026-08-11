@@ -327,8 +327,13 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
         spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
                   f"TBLPROPERTIES ('format-version' = '2')")
         spark.sql(f"INSERT INTO {full_table} VALUES (1), (2)")
-        spark.sql(f"ALTER TABLE {full_table} SET TBLPROPERTIES ('format-version' = '3')")
-        spark.sql(f"INSERT INTO {full_table} VALUES (3), (4)")
+        spark.sql(
+            f"ALTER TABLE {full_table} SET TBLPROPERTIES ("
+            "'format-version' = '3', "
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size' = '4096', "
+            "'read.split.open-file-cost' = '0')")
+        spark.range(3, 1503).coalesce(1).writeTo(full_table).append()
 
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
