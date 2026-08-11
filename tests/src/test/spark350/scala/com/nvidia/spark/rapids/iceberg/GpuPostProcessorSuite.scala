@@ -1030,10 +1030,17 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       createMultiBlockParquetInfo(parquetSchema, Seq(500L), firstFileGlobalRowIndex = 500L)
     val processor = new GpuParquetReaderPostProcessor(
       parquetInfo, constants, expectedSchema, shadedSchema, Map.empty)
-    val emptyBatch = new ColumnarBatch(Array.empty[SparkColumnVector], 4)
 
     assert(processor.displayActionPlan().contains("InheritRowId"))
     assert(processor.displayActionPlan().contains("InheritLastUpdatedSequenceNumber"))
+
+    withResource(processor.process(
+      new ColumnarBatch(Array.empty[SparkColumnVector], 0))) { output =>
+      assert(output.numRows() == 0)
+      assert(output.numCols() == 3)
+    }
+
+    val emptyBatch = new ColumnarBatch(Array.empty[SparkColumnVector], 4)
     withResource(processor.process(emptyBatch)) { output =>
       withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { rowIds =>
         withResource(output.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { positions =>
