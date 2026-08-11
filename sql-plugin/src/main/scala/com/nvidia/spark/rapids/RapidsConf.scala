@@ -1857,6 +1857,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
+  val ENABLE_ICEBERG_V3 = conf("spark.rapids.sql.format.iceberg.v3.enabled")
+    .doc("Internal temporary configuration to allow Iceberg table format versions greater " +
+      "than 2 to use GPU paths while v3 support is under development. This configuration " +
+      "will be removed after most Iceberg v3 features are supported.")
+    .internal()
+    .booleanConf
+    .createWithDefault(false)
+
   val ENABLE_ICEBERG_WRITE = conf("spark.rapids.sql.format.iceberg.write.enabled")
     .doc("When set to false disables Iceberg write acceleration")
     .booleanConf
@@ -3817,6 +3825,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergEnabled: Boolean = get(ENABLE_ICEBERG)
 
   lazy val isIcebergReadEnabled: Boolean = get(ENABLE_ICEBERG_READ)
+
+  lazy val isIcebergV3Enabled: Boolean = get(ENABLE_ICEBERG_V3)
 
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
