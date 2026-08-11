@@ -775,13 +775,15 @@ class GpuParquetReaderPostProcessor(
   // Check if we can pass through the entire batch without any processing.
   private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough
 
-  // Only constants that synthesize projected fields need to participate in combining checks.
-  // If a projected field is still read from the parquet file, differing constant-map values for
-  // that field do not affect the materialized output.
-  private[iceberg] lazy val synthesizedConstantFieldIdsForCombining: Set[Integer] =
+  // Only constants that affect projected output need to participate in combining checks. Most
+  // physical fields ignore constants, but physical lineage fields use file constants to fill
+  // inherited nulls.
+  private[iceberg] lazy val outputConstantFieldIdsForCombining: Set[Integer] =
     idToConstant.keySet().asScala.filter { fieldId =>
       expectedSchema.idToName().containsKey(fieldId) &&
-        !fileIcebergSchema.idToName().containsKey(fieldId)
+        (!fileIcebergSchema.idToName().containsKey(fieldId) ||
+          fieldId == ShimUtils.rowIdFieldId() ||
+          fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId())
     }.toSet
 
   private def hasMatchingConstant(
@@ -798,7 +800,7 @@ class GpuParquetReaderPostProcessor(
     //
     // Only expected fields that are synthesized from constants for either file can affect the
     // combined output, so compatibility checks are limited to that subset.
-    (synthesizedConstantFieldIdsForCombining ++ other.synthesizedConstantFieldIdsForCombining)
+    (outputConstantFieldIdsForCombining ++ other.outputConstantFieldIdsForCombining)
       .forall(hasMatchingConstant(other, _))
   }
 

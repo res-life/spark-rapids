@@ -1102,6 +1102,35 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("Physical lineage constants prevent incompatible file combining") {
+    val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
+    assume(sequenceFieldId >= 0, "The selected Iceberg runtime predates row lineage")
+
+    val sequenceType = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(sequenceFieldId).named("_last_updated_sequence_number")
+    val parquetSchema = new ShadedMessageType(
+      "test", Seq[ShadedType](sequenceType).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(sequenceFieldId, "_last_updated_sequence_number",
+        Types.LongType.get()))
+    val firstConstants = new JHashMap[Integer, Any]()
+    firstConstants.put(sequenceFieldId, 7L)
+    val secondConstants = new JHashMap[Integer, Any]()
+    secondConstants.put(sequenceFieldId, 8L)
+    val (firstParquetInfo, firstShadedSchema) =
+      createParquetInfo(parquetSchema, rowCount = 3)
+    val (secondParquetInfo, secondShadedSchema) =
+      createParquetInfo(parquetSchema, rowCount = 3)
+    val firstProcessor = new GpuParquetReaderPostProcessor(
+      firstParquetInfo, firstConstants, expectedSchema, firstShadedSchema, Map.empty)
+    val secondProcessor = new GpuParquetReaderPostProcessor(
+      secondParquetInfo, secondConstants, expectedSchema, secondShadedSchema, Map.empty)
+
+    assert(!firstProcessor.compatibleForCombining(secondProcessor))
+    assert(!secondProcessor.compatibleForCombining(firstProcessor))
+  }
+
   test("Missing row ID remains null when first_row_id is unavailable") {
     import com.nvidia.spark.rapids.Arm.withResource
     import com.nvidia.spark.rapids.GpuColumnVector
