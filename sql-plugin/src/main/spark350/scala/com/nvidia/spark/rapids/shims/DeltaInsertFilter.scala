@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuColumnVector
 
 import org.apache.spark.sql.catalyst.util.RowDeltaUtils.INSERT_OPERATION
+import org.apache.spark.sql.connector.write.DeltaWriter
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 object DeltaInsertFilter {
@@ -40,4 +41,11 @@ object DeltaInsertFilter {
       batch.column(0).asInstanceOf[GpuColumnVector].getBase.equalTo(s)
     }
   }
+
+  def filterReinsertRows(_batch: ColumnarBatch): Option[CudfColumnVector] = None
+
+  def reinsert(
+      writer: DeltaWriter[ColumnarBatch],
+      _metadata: ColumnarBatch,
+      rows: ColumnarBatch): Unit = writer.insert(rows)
 }

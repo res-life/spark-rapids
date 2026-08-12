@@ -27,14 +27,16 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuWrite
+import com.nvidia.spark.rapids.{GpuColumnVector, GpuWrite}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
 import org.apache.spark.sql.catalyst.util.ReplaceDataProjections
+import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{WRITE_OPERATION, WRITE_WITH_METADATA_OPERATION}
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.datasources.v2.GpuDelteWritingSparkTask.filterByOperation
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 case class GpuReplaceDataExec(
@@ -65,11 +67,47 @@ case class GpuReplaceDataWritingSparkTask(
   extends GpuWritingSparkTask[DataWriter[ColumnarBatch]] {
 
   private lazy val rowProjection = GpuProjectingColumnarBatch(projs.rowProjection)
+  private lazy val rowDataTypes = rowProjection.schema.fields.map(_.dataType)
+  private lazy val metadataProjection = projs.metadataProjection
+    .map(GpuProjectingColumnarBatch(_))
+    .orNull
+  private lazy val metadataDataTypes = projs.metadataProjection
+    .map(_.schema.fields.map(_.dataType))
+    .orNull
+
   override protected def write(
       writer: DataWriter[ColumnarBatch],
       batch: ColumnarBatch): Unit = {
-    withResource(rowProjection.project(batch)) { projected =>
-      writer.write(projected)
+    val writeFilter = filterByOperation(batch, WRITE_OPERATION)
+    withResource(writeFilter) { _ =>
+      withResource(rowProjection.project(batch)) { rows =>
+        val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, writeFilter)
+        if (filteredRows.numRows() > 0) {
+          writer.write(filteredRows)
+        } else {
+          filteredRows.close()
+        }
+      }
+    }
+
+    if (metadataProjection != null) {
+      val writeWithMetadataFilter = filterByOperation(batch, WRITE_WITH_METADATA_OPERATION)
+      withResource(writeWithMetadataFilter) { _ =>
+        val rows = withResource(rowProjection.project(batch)) { rows =>
+          GpuColumnVector.filter(rows, rowDataTypes, writeWithMetadataFilter)
+        }
+
+        closeOnExcept(rows) { _ =>
+          if (rows.numRows() > 0) {
+            val metadata = withResource(metadataProjection.project(batch)) { metadata =>
+              GpuColumnVector.filter(metadata, metadataDataTypes, writeWithMetadataFilter)
+            }
+            writer.write(metadata, rows)
+          } else {
+            rows.close()
+          }
+        }
+      }
     }
   }
 }

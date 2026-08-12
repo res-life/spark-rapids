@@ -489,6 +489,19 @@ case class GpuDeltaWritingSparkTask(
             }
           }
         }
+
+        DeltaInsertFilter.filterReinsertRows(batch).foreach { reinsertFilter =>
+          withResource(reinsertFilter) { _ =>
+            withResource(rowProjection.project(batch)) { rows =>
+              val filteredRows = GpuColumnVector.filter(rows, rowDataTypes, reinsertFilter)
+              if (filteredRows.numRows() > 0) {
+                DeltaInsertFilter.reinsert(writer, null, filteredRows)
+              } else {
+                filteredRows.close()
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -577,6 +590,25 @@ case class GpuDeltaWithMetadataWritingSparkTask(
               writer.insert(filterRows)
             } else {
               filterRows.close()
+            }
+          }
+        }
+
+        DeltaInsertFilter.filterReinsertRows(batch).foreach { reinsertFilter =>
+          withResource(reinsertFilter) { _ =>
+            val rows = withResource(rowProjection.project(batch)) { rows =>
+              GpuColumnVector.filter(rows, rowDataTypes, reinsertFilter)
+            }
+
+            closeOnExcept(rows) { _ =>
+              if (rows.numRows() > 0) {
+                val metadata = withResource(metadataProjection.project(batch)) { metadata =>
+                  GpuColumnVector.filter(metadata, metadataDataTypes, reinsertFilter)
+                }
+                DeltaInsertFilter.reinsert(writer, metadata, rows)
+              } else {
+                rows.close()
+              }
             }
           }
         }
