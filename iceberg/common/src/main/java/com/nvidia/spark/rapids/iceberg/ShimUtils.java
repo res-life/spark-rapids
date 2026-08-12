@@ -62,6 +62,10 @@ public class ShimUtils {
         return IMPL.formatVersion(table);
     }
 
+    public static boolean supportsUnknownType() {
+        return IMPL.supportsUnknownType();
+    }
+
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,
                                                     Table table) {
         return IMPL.constantsMap(task, readSchema, table);

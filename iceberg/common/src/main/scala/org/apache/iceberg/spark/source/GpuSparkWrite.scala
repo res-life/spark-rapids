@@ -225,6 +225,8 @@ object GpuSparkWrite {
       partitionSpec: PartitionSpec,
       meta: SparkPlanMeta[_]): Unit = {
 
+    dataSparkType.foreach(IcebergFormatVersionSupport.tagForUnknownType(_, meta))
+
     // Iceberg requires Parquet field IDs for correct file-level metrics. Without them,
     // StrictMetricsEvaluator fails during overwrite validation.
     val spark = SparkSessionUtils.sessionFromPlan(meta.wrapped.asInstanceOf[SparkPlan])
@@ -312,6 +314,9 @@ object GpuSparkWrite {
 
     // Convert Spark schema to Iceberg schema
     val querySchema = cpuExec.query.schema
+    if (!IcebergFormatVersionSupport.tagForUnknownType(querySchema, meta)) {
+      return
+    }
     val icebergSchema = SparkSchemaUtil.convert(querySchema)
 
     // Convert Spark connector transforms to Iceberg PartitionSpec
@@ -346,6 +351,9 @@ object GpuSparkWrite {
 
     // Convert Spark schema to Iceberg schema
     val querySchema = cpuExec.query.schema
+    if (!IcebergFormatVersionSupport.tagForUnknownType(querySchema, meta)) {
+      return
+    }
     val icebergSchema = SparkSchemaUtil.convert(querySchema)
 
     // Convert Spark connector transforms to Iceberg PartitionSpec

@@ -38,6 +38,10 @@ supports_iceberg_v3 = (
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9))
 ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 only supported after iceberg 1.9.0"
 
+iceberg_v3_enabled_conf = {
+    "spark.rapids.sql.format.iceberg.v3.enabled": "true",
+}
+
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
     '_c0': byte_gen, '_c1': short_gen, '_c2': int_gen,
@@ -189,6 +193,32 @@ iceberg_write_enabled_conf = {
     # for merge-on-read (MOR) DML operations (UPDATE/DELETE/MERGE with write.*.mode='merge-on-read')
     "spark.rapids.sql.exec.WriteDeltaExec": "true",
 }
+iceberg_v3_write_enabled_conf = copy_and_update(
+    iceberg_write_enabled_conf, iceberg_v3_enabled_conf)
+
+
+def create_iceberg_unknown_table(spark, table_name: str):
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+    spark.sql(
+        f"CREATE TABLE {table_name} ("
+        "id BIGINT, unknown_col VOID, "
+        "nested STRUCT<known: INT, unknown_col: VOID>) "
+        f"USING ICEBERG TBLPROPERTIES ({props_sql})")
+
+
+def insert_iceberg_unknown_rows(spark, table_name: str, start: int = 0):
+    spark.sql(
+        f"INSERT INTO {table_name} "
+        "SELECT id, CAST(NULL AS VOID), "
+        "named_struct('known', CAST(id AS INT), 'unknown_col', CAST(NULL AS VOID)) "
+        f"FROM range({start}, {start + 3})")
+
+
+def evolve_iceberg_unknown_columns(spark, table_name: str):
+    # Iceberg does not promote unknown to a concrete type. Rename the field instead to
+    # exercise schema evolution while preserving its field ID, type, and nullability.
+    spark.sql(f"ALTER TABLE {table_name} RENAME COLUMN unknown_col TO renamed_unknown_col")
 
 def can_be_eq_delete_col(data_gen: DataGen) -> bool:
     return (not isinstance(data_gen.data_type, FloatType) and

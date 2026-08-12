@@ -21,7 +21,8 @@ from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog
 from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
-    ICEBERG_V3_UNSUPPORTED_REASON
+    ICEBERG_V3_UNSUPPORTED_REASON, create_iceberg_unknown_table, \
+    evolve_iceberg_unknown_columns, iceberg_v3_enabled_conf, insert_iceberg_unknown_rows
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_40x, is_spark_41x, \
     spark_version, with_cpu_session, with_gpu_session
@@ -307,6 +308,37 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
     assert_gpu_fallback_collect(
         lambda spark: spark.sql(f"SELECT * FROM {table_name}"),
         "BatchScanExec")
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+def test_iceberg_v3_unknown_type_cpu_write_gpu_read_and_evolution(
+        spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        create_iceberg_unknown_table(spark, table_name)
+        insert_iceberg_unknown_rows(spark, table_name)
+
+    with_cpu_session(setup_table)
+
+    def read_and_check_unknown_schema(spark):
+        df = spark.table(table_name)
+        assert df.schema["unknown_col"].dataType.simpleString() == "void"
+        assert df.schema["nested"].dataType["unknown_col"].dataType.simpleString() == "void"
+        return df
+
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        read_and_check_unknown_schema,
+        exist_classes="GpuBatchScanExec",
+        conf=iceberg_v3_enabled_conf)
+
+    with_cpu_session(lambda spark: evolve_iceberg_unknown_columns(spark, table_name))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.table(table_name),
+        exist_classes="GpuBatchScanExec",
+        conf=iceberg_v3_enabled_conf)
 
 
 @iceberg

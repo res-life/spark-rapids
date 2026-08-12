@@ -110,6 +110,8 @@ object GpuSparkScan {
       case _ =>
     }
 
+    IcebergFormatVersionSupport.tagForUnknownType(meta.wrapped.readSchema(), meta)
+
     FileFormatChecks.tag(meta, meta.wrapped.readSchema(), IcebergFormatType, ReadFileOp)
 
     Try {

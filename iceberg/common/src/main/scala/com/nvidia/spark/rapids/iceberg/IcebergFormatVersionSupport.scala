@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Table, TableProperties}
 
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, NullType, StructType}
 
 /** Common planning gate for Iceberg table format versions. */
 object IcebergFormatVersionSupport {
@@ -34,6 +35,30 @@ object IcebergFormatVersionSupport {
       meta: RapidsMeta[_, _, _]): Unit = {
     val formatVersion = properties.get(TableProperties.FORMAT_VERSION).map(_.toInt).getOrElse(2)
     tagForFormatVersion(formatVersion, meta)
+  }
+
+  /**
+   * Tags operations containing Spark NullType when the active Iceberg runtime cannot expose
+   * Iceberg's v3 unknown type. Returns true when planning may continue through v3 type handling.
+   */
+  def tagForUnknownType(
+      schema: StructType,
+      meta: RapidsMeta[_, _, _]): Boolean = {
+    val supported = !containsUnknownType(schema) || ShimUtils.supportsUnknownType()
+    if (!supported) {
+      meta.willNotWorkOnGpu(
+        "Iceberg unknown type is not supported by the active Iceberg runtime")
+    }
+    supported
+  }
+
+  private def containsUnknownType(dataType: DataType): Boolean = dataType match {
+    case NullType => true
+    case StructType(fields) => fields.exists(field => containsUnknownType(field.dataType))
+    case ArrayType(elementType, _) => containsUnknownType(elementType)
+    case MapType(keyType, valueType, _) =>
+      containsUnknownType(keyType) || containsUnknownType(valueType)
+    case _ => false
   }
 
   private def tagForFormatVersion(formatVersion: Int, meta: RapidsMeta[_, _, _]): Unit = {

@@ -211,28 +211,28 @@ trait Spark320PlusShims extends SparkShims with RebaseShims
     val maps: Map[Class[_ <: SparkPlan], ExecRule[_ <: SparkPlan]] = Seq(
       exec[AppendDataExecV1](
         "Append data into a datasource V2 table using the V1 write interface",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (p, conf, parent, r) => new AppendDataExecV1Meta(p, conf, parent, r)),
       exec[AtomicCreateTableAsSelectExec](
         "Create table as select for datasource V2 tables that support staging table creation",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (e, conf, p, r) => new AtomicCreateTableAsSelectExecMeta(e, conf, p, r)),
       exec[AtomicReplaceTableAsSelectExec](
         "Replace table as select for datasource V2 tables that support staging table creation",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 + TypeSig.STRUCT +
           TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (e, conf, p, r) => new AtomicReplaceTableAsSelectExecMeta(e, conf, p, r)),
       exec[OverwriteByExpressionExecV1](
         "Overwrite into a datasource V2 table using the V1 write interface",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),

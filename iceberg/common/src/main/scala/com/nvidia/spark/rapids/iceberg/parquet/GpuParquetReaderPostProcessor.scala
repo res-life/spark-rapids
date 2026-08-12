@@ -40,7 +40,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => Shade
 import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.types.{Type, Types}
 
-import org.apache.spark.sql.types.{DataType, StringType}
+import org.apache.spark.sql.types.{DataType, NullType, StringType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -555,7 +555,11 @@ private class ActionBuildingVisitor(
       partner: Type): ColumnAction = {
     val expectedType = SparkSchemaUtil.convert(primitive)
 
-    if (partner != null) {
+    if (expectedType == NullType) {
+      // Iceberg unknown fields are null-only. They are normally absent from Parquet, but tolerate
+      // a physical placeholder written by another engine without exposing its values.
+      FillNull(NullType)
+    } else if (partner != null) {
       // Partner exists - check for type promotion
       val fileType = SparkSchemaUtil.convert(partner.asPrimitiveType())
       if (DataType.equalsStructurally(expectedType, fileType)) {

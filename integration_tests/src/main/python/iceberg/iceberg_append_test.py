@@ -15,8 +15,8 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
-    assert_gpu_fallback_write_sql
+from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_error, \
+    assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
 from iceberg import create_iceberg_table, \
@@ -24,8 +24,11 @@ from iceberg import create_iceberg_table, \
     iceberg_full_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
     full_coverage_partition_transforms, assert_iceberg_files_use_codec, \
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
-from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, create_iceberg_unknown_table, \
+    evolve_iceberg_unknown_columns, iceberg_v3_write_enabled_conf, \
+    insert_iceberg_unknown_rows
+from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, \
+    validate_execs_in_gpu_plan
 from spark_session import with_gpu_session, with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -92,6 +95,56 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
         base_table_name,
         ["AppendDataExec"],
         conf=iceberg_write_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
+@validate_execs_in_gpu_plan("GpuAppendDataExec")
+def test_insert_into_v3_unknown_type_gpu_write_cpu_read_and_evolution(
+        spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+
+    with_cpu_session(lambda spark: create_iceberg_unknown_table(spark, cpu_table_name))
+    with_cpu_session(lambda spark: create_iceberg_unknown_table(spark, gpu_table_name))
+
+    with_cpu_session(
+        lambda spark: insert_iceberg_unknown_rows(spark, cpu_table_name),
+        conf=iceberg_v3_write_enabled_conf)
+    with_gpu_session(
+        lambda spark: insert_iceberg_unknown_rows(spark, gpu_table_name),
+        conf=iceberg_v3_write_enabled_conf)
+
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
+    with_cpu_session(lambda spark: evolve_iceberg_unknown_columns(spark, cpu_table_name))
+    with_cpu_session(lambda spark: evolve_iceberg_unknown_columns(spark, gpu_table_name))
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).collect())
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_insert_non_null_into_v3_unknown_type_fails(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    with_cpu_session(lambda spark: create_iceberg_unknown_table(spark, table_name))
+
+    def insert_non_null(spark):
+        return spark.sql(
+            f"INSERT INTO {table_name} "
+            "SELECT id, CAST(id AS INT), "
+            "named_struct('known', CAST(id AS INT), 'unknown_col', CAST(NULL AS VOID)) "
+            "FROM range(1)").collect()
+
+    assert_gpu_and_cpu_error(
+        insert_non_null,
+        conf=iceberg_v3_write_enabled_conf,
+        error_message="Cannot safely cast")
 
 
 @iceberg

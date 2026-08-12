@@ -194,35 +194,35 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
         (limit, conf, p, r) => new GpuWindowGroupLimitExecMeta(limit, conf, p, r)),
       exec[AppendDataExec](
         "Append data into a datasource V2 table",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (p, conf, parent, r) => new AppendDataExecMeta(p, conf, parent, r)),
       exec[OverwritePartitionsDynamicExec](
         "Overwrite partitions dynamically in a datasource V2 table",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (p, conf, parent, r) => new OverwritePartitionsDynamicExecMeta(p, conf, parent, r)),
       exec[OverwriteByExpressionExec](
         "Overwrite data in a datasource V2 table",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (p, conf, parent, r) => new OverwriteByExpressionExecMeta(p, conf, parent, r)),
       exec[ReplaceDataExec](
         "Replace data in a datasource V2 table (for copy-on-write DELETE operations)",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
         (p, conf, parent, r) => new ReplaceDataExecMeta(p, conf, parent, r)),
       exec[MergeRowsExec](
         "Process merge rows for copy-on-write MERGE operations",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
@@ -230,7 +230,7 @@ trait Spark350PlusNonDBShims extends Spark340PlusNonDBShims {
       exec[WriteDeltaExec](
         "Write delta (position deletes) in a datasource V2 table " +
           "(for merge-on-read DELETE operations)",
-        ExecChecks((TypeSig.commonCudfTypes + TypeSig.DECIMAL_128 +
+        ExecChecks((TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.DECIMAL_128 +
           TypeSig.STRUCT + TypeSig.MAP + TypeSig.ARRAY + TypeSig.BINARY +
           GpuTypeShims.additionalCommonOperatorSupportedTypes).nested(),
           TypeSig.all),
