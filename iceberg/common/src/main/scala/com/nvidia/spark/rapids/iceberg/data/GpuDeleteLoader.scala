@@ -19,22 +19,29 @@ package com.nvidia.spark.rapids.iceberg.data
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{Table => CudfTable}
-import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch}
-import com.nvidia.spark.rapids.Arm.withResource
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Table => CudfTable}
+import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch, NoopMetric}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.GpuMetric.{ICEBERG_DV_BYTES, ICEBERG_DV_DECODE_TIME,
+  ICEBERG_DV_POSITIONS}
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg.{DeleteFile, MetadataColumns, Schema}
 
-import org.apache.spark.sql.types.DataType
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.types.{DataType, LongType}
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 
 trait GpuDeleteLoader {
   def loadDeletes(deletes: Seq[DeleteFile],
       schema: Schema,
       sparkTypes: Array[DataType]): LazySpillableColumnarBatch
+
+  def loadDeletionVector(delete: DeleteFile,
+      dataFilePath: String): LazySpillableColumnarBatch
 }
 
 class DefaultDeleteLoader(
@@ -42,7 +49,46 @@ class DefaultDeleteLoader(
     private val inputFiles: Map[String, IcebergInputFile],
     private val parquetConf: GpuIcebergParquetReaderConf) extends GpuDeleteLoader {
 
-  def loadDeletes(deletes: Seq[DeleteFile],
+  override def loadDeletionVector(delete: DeleteFile,
+      dataFilePath: String): LazySpillableColumnarBatch = {
+    require(ShimUtils.isDeletionVector(delete),
+      s"Expected a Puffin deletion vector, found ${delete.format()}")
+
+    val referencedDataFile = ShimUtils.referencedDataFile(delete)
+    require(referencedDataFile != null,
+      s"Deletion vector ${locationOf(delete)} has no referenced data file")
+    require(dataFilePath == referencedDataFile,
+      s"Deletion vector ${locationOf(delete)} references $referencedDataFile, not $dataFilePath")
+
+    val contentOffset = ShimUtils.contentOffset(delete)
+    val contentSize = ShimUtils.contentSizeInBytes(delete)
+    require(contentOffset != null && contentOffset >= 0,
+      s"Deletion vector ${locationOf(delete)} has invalid offset $contentOffset")
+    require(contentSize != null && contentSize >= 0 && contentSize <= Int.MaxValue,
+      s"Deletion vector ${locationOf(delete)} has invalid size $contentSize")
+
+    val inputFile = inputFiles.getOrElse(locationOf(delete),
+      throw new IllegalArgumentException(
+        s"No decrypted input file was provided for deletion vector ${locationOf(delete)}"))
+    val decodeTime = parquetConf.metrics.getOrElse(ICEBERG_DV_DECODE_TIME, NoopMetric)
+    val positions = decodeTime.ns {
+      ShimUtils.readDeletionVector(delete, inputFile.getDelegate)
+    }
+
+    parquetConf.metrics.getOrElse(ICEBERG_DV_BYTES, NoopMetric) += contentSize.longValue()
+    parquetConf.metrics.getOrElse(ICEBERG_DV_POSITIONS, NoopMetric) += positions.length.toLong
+
+    withRetryNoSplit {
+      closeOnExcept(CudfColumnVector.fromLongs(positions: _*)) { positionsColumn =>
+        val columns = Array[ColumnVector](GpuColumnVector.from(positionsColumn, LongType))
+        withResource(new ColumnarBatch(columns, positions.length)) { batch =>
+          LazySpillableColumnarBatch(batch, "Iceberg deletion vector")
+        }
+      }
+    }
+  }
+
+  override def loadDeletes(deletes: Seq[DeleteFile],
       schema: Schema,
       sparkTypes: Array[DataType]): LazySpillableColumnarBatch = {
     val files = deletes.map(f => IcebergPartitionedFile(inputFiles(locationOf(f))))

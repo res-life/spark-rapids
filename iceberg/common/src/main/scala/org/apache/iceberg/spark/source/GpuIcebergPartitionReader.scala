@@ -50,7 +50,8 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       case (file, task) =>
         val filter = if (task.deletes().asScala.nonEmpty) {
           Some(new GpuDeleteFilter(rapidsFileIO, table.schema(),
-            inputFiles, conf, task.deletes().asScala.toSeq))
+            inputFiles, conf, task.deletes().asScala.toSeq,
+            dataFile = Some(task.file())))
         } else {
           None
         }

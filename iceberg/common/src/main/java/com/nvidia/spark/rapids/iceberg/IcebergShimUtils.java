@@ -22,10 +22,12 @@ import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.parquet.GpuParquetIO;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
@@ -55,6 +57,27 @@ public interface IcebergShimUtils {
      * {@code location()} in 1.9.x+).
      */
     String locationOf(ContentFile<?> f);
+
+    /** Returns whether a positional delete is an Iceberg Puffin deletion vector. */
+    boolean isDeletionVector(DeleteFile deleteFile);
+
+    /** Returns the data-file location referenced by a deletion vector. */
+    String referencedDataFile(DeleteFile deleteFile);
+
+    /** Returns the byte offset of the deletion-vector blob. */
+    Long contentOffset(DeleteFile deleteFile);
+
+    /** Returns the byte length of the deletion-vector blob. */
+    Long contentSizeInBytes(DeleteFile deleteFile);
+
+    /**
+     * Reads exactly the recorded deletion-vector byte range and returns its 64-bit row positions.
+     *
+     * <p>This is version-dispatched because Iceberg 1.6 does not expose the Puffin file format or
+     * deletion-vector manifest fields, and its {@code PositionDeleteIndex} lacks the decode and
+     * iteration APIs available in later releases.
+     */
+    long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile) throws IOException;
 
     /**
      * Builds the constants map for a file scan task. Constants include partition values,

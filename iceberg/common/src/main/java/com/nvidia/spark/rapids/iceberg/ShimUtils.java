@@ -23,10 +23,12 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.iceberg.spark.source.GpuSparkScan;
@@ -60,6 +62,27 @@ public class ShimUtils {
 
     public static int formatVersion(Table table) {
         return IMPL.formatVersion(table);
+    }
+
+    public static boolean isDeletionVector(DeleteFile deleteFile) {
+        return IMPL.isDeletionVector(deleteFile);
+    }
+
+    public static String referencedDataFile(DeleteFile deleteFile) {
+        return IMPL.referencedDataFile(deleteFile);
+    }
+
+    public static Long contentOffset(DeleteFile deleteFile) {
+        return IMPL.contentOffset(deleteFile);
+    }
+
+    public static Long contentSizeInBytes(DeleteFile deleteFile) {
+        return IMPL.contentSizeInBytes(deleteFile);
+    }
+
+    public static long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+            throws IOException {
+        return IMPL.readDeletionVector(deleteFile, inputFile);
     }
 
     public static Map<Integer, ?> constantsMap(FileScanTask task, Schema readSchema,

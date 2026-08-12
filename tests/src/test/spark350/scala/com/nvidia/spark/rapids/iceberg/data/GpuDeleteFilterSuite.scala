@@ -186,6 +186,146 @@ class GpuDeleteFilterSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("Filter with Puffin deletion vector") {
+    if (!supportsDeletionVectors) {
+      cancel("Iceberg runtime does not expose Puffin deletion vectors")
+    }
+
+    val dataFilePath = PooledTableGen.PooledFilePaths.head
+    val deletedPositions = Seq(1L, 3L, 5L)
+    val deleteFile = deletionVectorFile(dataFilePath, deletedPositions.size)
+    val tableGen = new PooledTableGen(tableGenSchema(TABLE_SCHEMA, Seq(deleteFile)))
+    val deleteLoader = new TestGpuDeleteLoader(tableGen,
+      rows = 57,
+      deletionVectors = Some(Map(dataFilePath -> deletedPositions)))
+    val deleteFilter = gpuDeleteFilterOf(TABLE_SCHEMA, Seq(deleteFile), Some(deleteLoader))
+
+    assert(fieldIndex(deleteFilter.requiredSchema,
+      MetadataColumns.ROW_POSITION.fieldId()) >= 0)
+    assert(!deleteFilter.requiredSchema.columns().asScala
+      .exists(_.fieldId() == MetadataColumns.FILE_PATH.fieldId()))
+
+    val positionColumnIndex = fieldIndex(deleteFilter.requiredSchema,
+      MetadataColumns.ROW_POSITION.fieldId())
+    val isDeletedColumnIndex = deleteFilter.requiredSchema.columns().size()
+    val input = Iterator(tableGen.toColumnarBatch(NUM_ROWS))
+
+    deleteFilter.filter(input).foreach { resultBatch =>
+      withResource(resultBatch) { _ =>
+        val bases = GpuColumnVector.extractBases(resultBatch)
+        withResource(bases.safeMap(_.copyToHost())) { hostColumns =>
+          for (row <- 0 until resultBatch.numRows()) {
+            val position = hostColumns(positionColumnIndex).getLong(row)
+            assert(hostColumns(isDeletedColumnIndex).getBoolean(row) ==
+              deletedPositions.contains(position))
+          }
+        }
+      }
+    }
+  }
+
+  test("Deletion vector supersedes legacy position deletes") {
+    if (!supportsDeletionVectors) {
+      cancel("Iceberg runtime does not expose Puffin deletion vectors")
+    }
+
+    val dataFilePath = PooledTableGen.PooledFilePaths.head
+    val deletionVector = deletionVectorFile(dataFilePath, cardinality = 1)
+    val legacyPositionDelete = posDeleteFile()
+    val deleteFiles = Seq(legacyPositionDelete, deletionVector)
+    val tableGen = new PooledTableGen(tableGenSchema(TABLE_SCHEMA, deleteFiles))
+    val deleteLoader = new TestGpuDeleteLoader(tableGen,
+      rows = 57,
+      posDeletes = Map(dataFilePath -> Seq(2L)),
+      deletionVectors = Some(Map(dataFilePath -> Seq(1L))))
+    val deleteFilter = gpuDeleteFilterOf(TABLE_SCHEMA, deleteFiles, Some(deleteLoader))
+
+    val positionColumnIndex = fieldIndex(deleteFilter.requiredSchema,
+      MetadataColumns.ROW_POSITION.fieldId())
+    val isDeletedColumnIndex = deleteFilter.requiredSchema.columns().size()
+    val input = Iterator(tableGen.toColumnarBatch(4))
+
+    deleteFilter.filter(input).foreach { resultBatch =>
+      withResource(resultBatch) { _ =>
+        val bases = GpuColumnVector.extractBases(resultBatch)
+        withResource(bases.safeMap(_.copyToHost())) { hostColumns =>
+          for (row <- 0 until resultBatch.numRows()) {
+            val position = hostColumns(positionColumnIndex).getLong(row)
+            assert(hostColumns(isDeletedColumnIndex).getBoolean(row) == (position == 1L))
+          }
+        }
+      }
+    }
+  }
+
+  test("Empty deletion vector") {
+    if (!supportsDeletionVectors) {
+      cancel("Iceberg runtime does not expose Puffin deletion vectors")
+    }
+
+    val dataFilePath = PooledTableGen.PooledFilePaths.head
+    val deletionVector = deletionVectorFile(dataFilePath, cardinality = 0)
+    val tableGen = new PooledTableGen(tableGenSchema(TABLE_SCHEMA, Seq(deletionVector)))
+    val deleteLoader = new TestGpuDeleteLoader(tableGen,
+      rows = 57,
+      deletionVectors = Some(Map(dataFilePath -> Seq.empty)))
+    val deleteFilter = gpuDeleteFilterOf(TABLE_SCHEMA, Seq(deletionVector), Some(deleteLoader))
+    val isDeletedColumnIndex = deleteFilter.requiredSchema.columns().size()
+
+    deleteFilter.filter(Iterator(tableGen.toColumnarBatch(4))).foreach { resultBatch =>
+      withResource(resultBatch) { _ =>
+        val bases = GpuColumnVector.extractBases(resultBatch)
+        withResource(bases.safeMap(_.copyToHost())) { hostColumns =>
+          for (row <- 0 until resultBatch.numRows()) {
+            assert(!hostColumns(isDeletedColumnIndex).getBoolean(row))
+          }
+        }
+      }
+    }
+  }
+
+  test("Deletion vector composes with equality deletes and IS_DELETED") {
+    if (!supportsDeletionVectors) {
+      cancel("Iceberg runtime does not expose Puffin deletion vectors")
+    }
+
+    val dataFilePath = PooledTableGen.PooledFilePaths.head
+    val deletedPositions = Seq(1L, 3L, 5L)
+    val equalityFieldIds = Seq(1, 3)
+    val equalityDelete = eqDeleteFile(equalityFieldIds)
+    val deletionVector = deletionVectorFile(dataFilePath, deletedPositions.size)
+    val deleteFiles = Seq(equalityDelete, deletionVector)
+    val tableSchema = tableSchemaWithIsDeletedColumn()
+    val tableGen = new PooledTableGen(tableGenSchema(tableSchema, deleteFiles))
+    val deleteLoader = new TestGpuDeleteLoader(tableGen,
+      rows = 57,
+      deletionVectors = Some(Map(dataFilePath -> deletedPositions)))
+    val deleteFilter = gpuDeleteFilterOf(tableSchema, deleteFiles, Some(deleteLoader))
+    val equalityColumnIndices = equalityFieldIds.map(fieldIndex(deleteFilter.requiredSchema, _))
+    val equalityDeleteValues = deleteLoader.loadEqDeletes(equalityFieldIds)
+    val positionColumnIndex = fieldIndex(deleteFilter.requiredSchema,
+      MetadataColumns.ROW_POSITION.fieldId())
+    val isDeletedColumnIndex = fieldIndex(deleteFilter.requiredSchema,
+      MetadataColumns.IS_DELETED.fieldId())
+
+    deleteFilter.filter(Iterator(tableGen.toColumnarBatch(NUM_ROWS))).foreach { resultBatch =>
+      withResource(resultBatch) { _ =>
+        val bases = GpuColumnVector.extractBases(resultBatch)
+        withResource(bases.safeMap(_.copyToHost())) { hostColumns =>
+          for (row <- 0 until resultBatch.numRows()) {
+            val equalityValues = equalityColumnIndices.map { index =>
+              valueOf(hostColumns(index), Integer.valueOf(row))
+            }
+            val position = hostColumns(positionColumnIndex).getLong(row)
+            val expectedDeleted = deletedPositions.contains(position) ||
+              equalityDeleteValues.exists(_.sameElements(equalityValues))
+            assert(hostColumns(isDeletedColumnIndex).getBoolean(row) == expectedDeleted)
+          }
+        }
+      }
+    }
+  }
+
   test("Filter with eq deletes and position deletes") {
     val eqFieldIdSets = Seq(Seq(1, 3), Seq(2, 6))
     val f = fixture(eqFieldIdSets.map(eqDeleteFile) :+ posDeleteFile())
@@ -335,8 +475,25 @@ class GpuDeleteFilterSuite extends AnyFunSuite with BeforeAndAfterAll {
 
 class TestGpuDeleteLoader(private val tableGen: PooledTableGen,
     private val rows: Int,
-    private val posDeletes: Map[String, Seq[Long]] = Map.empty
+    private val posDeletes: Map[String, Seq[Long]] = Map.empty,
+    private val deletionVectors: Option[Map[String, Seq[Long]]] = None
 ) extends GpuDeleteLoader {
+
+  override def loadDeletionVector(delete: DeleteFile,
+      dataFilePath: String): LazySpillableColumnarBatch = {
+    val rowPositions = deletionVectors.getOrElse(posDeletes).getOrElse(dataFilePath, Seq.empty)
+      .map(java.lang.Long.valueOf)
+    val hostVectors = Seq(HostColumnVector.fromBoxedLongs(rowPositions: _*))
+
+    withResource(hostVectors) { _ =>
+      val columns = hostVectors.safeMap(_.copyToDevice())
+        .safeMap(cv => GpuColumnVector.from(cv, LongType))
+        .toArray[ColumnVector]
+      withResource(new ColumnarBatch(columns, rowPositions.length)) { batch =>
+        LazySpillableColumnarBatch(batch, "DV deletes build")
+      }
+    }
+  }
 
   override def loadDeletes(deletes: Seq[DeleteFile],
       schema: Schema,
@@ -456,6 +613,28 @@ private object TestGpuDeleteLoader {
       .withRecordCount(5)
       .withFileSizeInBytes(1024)
       .build()
+  }
+
+  def supportsDeletionVectors: Boolean = {
+    FileFormat.values().exists(_.name() == "PUFFIN")
+  }
+
+  def deletionVectorFile(referencedDataFile: String, cardinality: Int): DeleteFile = {
+    val builder = FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
+      .ofPositionDeletes()
+      .withPath("/tmp/delete-vectors.puffin")
+      .withFormat(FileFormat.valueOf("PUFFIN"))
+      .withRecordCount(cardinality)
+      .withFileSizeInBytes(1024)
+
+    val builderClass = builder.getClass
+    builderClass.getMethod("withReferencedDataFile", classOf[CharSequence])
+      .invoke(builder, referencedDataFile)
+    builderClass.getMethod("withContentOffset", java.lang.Long.TYPE)
+      .invoke(builder, Long.box(64L))
+    builderClass.getMethod("withContentSizeInBytes", java.lang.Long.TYPE)
+      .invoke(builder, Long.box(128L))
+    builder.build()
   }
 
   def gpuDeleteFilterOf(

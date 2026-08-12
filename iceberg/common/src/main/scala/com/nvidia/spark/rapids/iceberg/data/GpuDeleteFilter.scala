@@ -16,17 +16,20 @@
 
 package com.nvidia.spark.rapids.iceberg.data
 
+import java.util.Objects
+
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.GpuMetric.{JOIN_TIME, OP_TIME_LEGACY}
+import com.nvidia.spark.rapids.GpuMetric.{ICEBERG_DV_FILTER_TIME, JOIN_TIME, OP_TIME_LEGACY}
 import com.nvidia.spark.rapids.fileio.iceberg.{IcebergFileIO, IcebergInputFile}
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter2._
 import com.nvidia.spark.rapids.iceberg.fieldIndex
 import com.nvidia.spark.rapids.iceberg.parquet.GpuIcebergParquetReaderConf
-import org.apache.iceberg.{DeleteFile, FileContent, MetadataColumns, Schema}
+import org.apache.iceberg.{DataFile, DeleteFile, FileContent, MetadataColumns, Schema, StructLike}
 import org.apache.iceberg.spark.GpuTypeToSparkType.toSparkType
 import org.apache.iceberg.types.Types
 import org.apache.iceberg.types.Types.NestedField
@@ -35,7 +38,7 @@ import org.apache.iceberg.types.TypeUtil.getProjectedIds
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
-import org.apache.spark.sql.types.{BooleanType, DataType}
+import org.apache.spark.sql.types.{BooleanType, DataType, LongType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 class GpuDeleteFilter(
@@ -44,19 +47,37 @@ class GpuDeleteFilter(
     val inputFiles: Map[String, IcebergInputFile],
     val parquetConf: GpuIcebergParquetReaderConf,
     private val deletes: Seq[DeleteFile],
-    deleteLoaderProvider: => Option[GpuDeleteLoader] = None) extends Logging with AutoCloseable {
+    deleteLoaderProvider: => Option[GpuDeleteLoader] = None,
+    private val dataFile: Option[DataFile] = None) extends Logging with AutoCloseable {
   private lazy val readSchema = parquetConf.expectedSchema
 
   private lazy val deleteLoader = deleteLoaderProvider.getOrElse(
     new DefaultDeleteLoader(rapidsFileIO, inputFiles, parquetConf))
 
-  private lazy val (eqDeleteFiles, posDeleteFiles) = {
+  private lazy val (eqDeleteFiles, posDeleteFiles, deletionVectorFiles) = {
     deletes.find(d => d.content() != FileContent.EQUALITY_DELETES &&
         d.content() != FileContent.POSITION_DELETES)
       .foreach(d => {
         throw new UnsupportedOperationException(s"Unsupported delete content: ${d.content()}")
       })
-    deletes.partition(_.content() == FileContent.EQUALITY_DELETES)
+    val (equalityDeletes, positionDeletes) =
+      deletes.partition(_.content() == FileContent.EQUALITY_DELETES)
+    val (deletionVectors, legacyPositionDeletes) =
+      positionDeletes.partition(ShimUtils.isDeletionVector)
+
+    // Iceberg v3 planning gives a DV precedence over every matching legacy position-delete file.
+    // Apply the same rule defensively in case a mixed upgraded-table task reaches this filter.
+    val effectiveLegacyPositionDeletes = if (deletionVectors.nonEmpty) {
+      if (legacyPositionDeletes.nonEmpty) {
+        logDebug(s"Ignoring ${legacyPositionDeletes.size} legacy position-delete file(s) because " +
+          "the data file has a deletion vector")
+      }
+      Seq.empty
+    } else {
+      legacyPositionDeletes
+    }
+
+    (equalityDeletes, effectiveLegacyPositionDeletes, deletionVectors)
   }
 
   /**
@@ -66,8 +87,8 @@ class GpuDeleteFilter(
    * 1. Add all the fields in the [[GpuIcebergParquetReaderConf.expectedSchema]].
    * 2. Add all missing fields which are required by the equality delete files, but not in the
    * [[GpuIcebergParquetReaderConf.expectedSchema]], if any.
-   * 3. Add [[MetadataColumns.ROW_POSITION]] and [[MetadataColumns.FILE_PATH]] if there are
-   * position delete files, and they are not in the schema.
+   * 3. Add [[MetadataColumns.ROW_POSITION]] for deletion vectors, or it and
+   * [[MetadataColumns.FILE_PATH]] for legacy position-delete files, if not already projected.
    */
   lazy val requiredSchema: Schema = computeRequiredSchema()
 
@@ -99,6 +120,7 @@ class GpuDeleteFilter(
   }
 
   private lazy val posDeleteContext = loadPosDeletesContext()
+  private lazy val deletionVectorContext = loadDeletionVectorContext()
   private lazy val eqDeleteContexts = loadEqDeleteContexts()
 
 
@@ -162,7 +184,7 @@ class GpuDeleteFilter(
     val mergeFunc = (delCol1: GpuColumnVector, delCol2: GpuColumnVector) => {
       GpuColumnVector.from(delCol1.getBase.or(delCol2.getBase), BooleanType)
     }
-    (eqDeleteContexts ++ posDeleteContext)
+    (eqDeleteContexts ++ posDeleteContext ++ deletionVectorContext)
       .zipWithIndex
       .foldLeft(input) {
         case (inputBatches, (ctx, idx)) =>
@@ -196,6 +218,8 @@ class GpuDeleteFilter(
 
       if (posDeleteFiles.nonEmpty) {
         eqDeleteIds ++ DELETE_EXTRA_METADATA_COLUMN_IDS
+      } else if (deletionVectorFiles.nonEmpty) {
+        eqDeleteIds + MetadataColumns.ROW_POSITION.fieldId()
       } else {
         eqDeleteIds
       }
@@ -264,6 +288,70 @@ class GpuDeleteFilter(
       probeKeys,
       parquetConf.metrics(OP_TIME_LEGACY),
       parquetConf.metrics(JOIN_TIME)))
+  }
+
+  private def loadDeletionVectorContext(): Option[DeleteFilterContext] = {
+    if (deletionVectorFiles.isEmpty) {
+      return None
+    }
+
+    require(deletionVectorFiles.size == 1,
+      s"Expected one deletion vector per data file, found ${deletionVectorFiles.size}")
+    val deletionVector = deletionVectorFiles.head
+    validateDeletionVectorScope(deletionVector)
+
+    val referencedDataFile = ShimUtils.referencedDataFile(deletionVector)
+    require(referencedDataFile != null,
+      s"Deletion vector ${ShimUtils.locationOf(deletionVector)} has no referenced data file")
+    val positions = deleteLoader.loadDeletionVector(deletionVector, referencedDataFile)
+
+    val positionField = toSparkType(DV_DELETE_SCHEMA).fields.head
+    val buildKeys = Seq(GpuBoundReference(0,
+      positionField.dataType,
+      positionField.nullable)(ExprId(0), positionField.name))
+    val positionColumnIndex = fieldIndex(requiredSchema, MetadataColumns.ROW_POSITION.fieldId())
+    val probeKeys = Seq(GpuBoundReference(positionColumnIndex,
+      LongType,
+      nullable = false)(ExprId(0), MetadataColumns.ROW_POSITION.name()))
+
+    Some(DeleteFilterContext(positions,
+      buildKeys,
+      probeKeys,
+      parquetConf.metrics(OP_TIME_LEGACY),
+      parquetConf.metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric)))
+  }
+
+  private def validateDeletionVectorScope(deletionVector: DeleteFile): Unit = {
+    dataFile.foreach { file =>
+      val dataFilePath = ShimUtils.locationOf(file)
+      val referencedDataFile = ShimUtils.referencedDataFile(deletionVector)
+      require(dataFilePath == referencedDataFile,
+        s"Deletion vector ${ShimUtils.locationOf(deletionVector)} references " +
+          s"$referencedDataFile, not $dataFilePath")
+
+      val deleteSequenceNumber = deletionVector.dataSequenceNumber()
+      val dataSequenceNumber = file.dataSequenceNumber()
+      require(deleteSequenceNumber != null && dataSequenceNumber != null &&
+          deleteSequenceNumber >= dataSequenceNumber,
+        s"Deletion vector sequence number $deleteSequenceNumber must be greater than or equal " +
+          s"to data file sequence number $dataSequenceNumber")
+      require(deletionVector.specId() == file.specId(),
+        s"Deletion vector spec ${deletionVector.specId()} does not match data file spec " +
+          s"${file.specId()}")
+      require(samePartition(deletionVector.partition(), file.partition()),
+        s"Deletion vector partition ${deletionVector.partition()} does not match data file " +
+          s"partition ${file.partition()}")
+    }
+  }
+
+  private def samePartition(left: StructLike, right: StructLike): Boolean = {
+    if (left == null || right == null) {
+      return left == right
+    }
+
+    left.size() == right.size() && (0 until left.size()).forall { index =>
+      Objects.equals(left.get(index, classOf[Object]), right.get(index, classOf[Object]))
+    }
   }
 
   private def loadEqDeleteContexts(): Seq[DeleteFilterContext] = {
@@ -337,6 +425,9 @@ object GpuDeleteFilter2 {
 
   private[iceberg] val POS_DELETE_SCHEMA: Schema = new Schema(
     MetadataColumns.DELETE_FILE_PATH,
+    MetadataColumns.DELETE_FILE_POS)
+
+  private[iceberg] val DV_DELETE_SCHEMA: Schema = new Schema(
     MetadataColumns.DELETE_FILE_POS)
 
 
@@ -415,4 +506,3 @@ private case class DeleteFilterContext(
       joinTime)
   }
 }
-

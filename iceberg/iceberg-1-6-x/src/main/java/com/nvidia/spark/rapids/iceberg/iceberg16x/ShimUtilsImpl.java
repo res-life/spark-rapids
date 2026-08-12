@@ -20,6 +20,7 @@ import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.spark.source.GpuBaseReader;
 import org.apache.iceberg.spark.source.GpuSparkCopyOnWriteV1Scan;
@@ -28,6 +29,7 @@ import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
 
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Map;
 
@@ -57,6 +59,33 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     @Override
     public String locationOf(ContentFile<?> f) {
         return f.path().toString();
+    }
+
+    @Override
+    public boolean isDeletionVector(DeleteFile deleteFile) {
+        return false;
+    }
+
+    @Override
+    public String referencedDataFile(DeleteFile deleteFile) {
+        return null;
+    }
+
+    @Override
+    public Long contentOffset(DeleteFile deleteFile) {
+        return null;
+    }
+
+    @Override
+    public Long contentSizeInBytes(DeleteFile deleteFile) {
+        return null;
+    }
+
+    @Override
+    public long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+            throws IOException {
+        throw new UnsupportedOperationException(
+                "Iceberg 1.6 does not support Puffin deletion vectors");
     }
 
     @Override

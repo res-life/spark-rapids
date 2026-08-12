@@ -23,9 +23,10 @@ from iceberg import rapids_reader_types, \
     setup_base_iceberg_table, _add_eq_deletes, _change_table, \
     representative_eq_column_combinations, eq_reader_canary_pairs, \
     iceberg_unsupported_mark, create_iceberg_table, \
-    iceberg_base_table_cols, iceberg_gens_list, get_full_table_name
+    iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from data_gen import gen_df, get_datagen_seed, int_gen, long_gen, string_gen
-from marks import iceberg, ignore_order
+from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
 from spark_session import with_gpu_session, with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
@@ -96,6 +97,44 @@ def test_iceberg_v2_position_delete(spark_tmp_table_factory, reader_type):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(table_name),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    create_iceberg_table(
+        table_name,
+        table_prop={
+            'format-version': '3',
+            'write.delete.mode': 'merge-on-read',
+        },
+        df_gen=lambda spark: spark.range(256).selectExpr(
+            'id', 'CAST(id % 11 AS INT) AS value'))
+
+    def setup_deletion_vector(spark):
+        spark.range(256).selectExpr(
+            'id', 'CAST(id % 11 AS INT) AS value').writeTo(table_name).append()
+        spark.sql(f'DELETE FROM {table_name} WHERE id % 5 = 0')
+        spark.sql(f'REFRESH TABLE {table_name}')
+        delete_formats = {
+            row.file_format for row in
+            spark.sql(f'SELECT file_format FROM {table_name}.delete_files').collect()
+        }
+        assert 'PUFFIN' in delete_formats, \
+            f'Expected a Puffin deletion vector, found delete formats {delete_formats}'
+
+    with_cpu_session(setup_deletion_vector)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f'SELECT id, value FROM {table_name}'),
+        conf={
+            'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+            'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        })
 
 @iceberg
 @ignore_order(local=True)
@@ -272,4 +311,3 @@ def test_iceberg_small_file_combine_with_eq_deletes(
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(table_name),
         conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
-
