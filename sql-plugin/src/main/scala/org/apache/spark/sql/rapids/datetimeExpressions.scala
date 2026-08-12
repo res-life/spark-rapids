@@ -27,12 +27,14 @@ import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.ExprMeta
 import com.nvidia.spark.rapids.GpuOverrides.{extractStringLit, getTimeParserPolicy}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
-import com.nvidia.spark.rapids.jni.{Arithmetic, CastStrings, DateTimeUtils, GpuTimeZoneDB}
+import com.nvidia.spark.rapids.jni.{Arithmetic, CastException, CastStrings, DateTimeUtils,
+  GpuTimeZoneDB}
 import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, ShimExpression,
   TruncTimestampShims}
 
 import org.apache.spark.sql.catalyst.expressions.{BinaryExpression, ExpectsInputTypes, Expression, FromUnixTime, FromUTCTimestamp, ImplicitCastInputTypes, MonthsBetween, TimeZoneAwareExpression, ToUTCTimestamp, TruncDate, TruncTimestamp}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -711,12 +713,25 @@ object GpuToTimestamp {
       sparkFormat: String,
       strfFormat: String,
       dtype: DType,
-      failOnError: Boolean): ColumnVector = {
+      failOnError: Boolean,
+      exceptionPolicy: Boolean): ColumnVector = {
 
     // `tsVector` will be closed in replaceSpecialDates
     val tsVector = if (isSimpleSparkFormat(sparkFormat, isLegacy = false)) {
       // Fused kernel skips the regex+length+cuDF-asTimestamp chain.
-      val parsed = CastStrings.parseTimestampWithFormat(lhs.getBase, sparkFormat, false)
+      val parsed = try {
+        CastStrings.parseTimestampWithFormat(
+          lhs.getBase, sparkFormat, false, exceptionPolicy)
+      } catch {
+        case e: CastException =>
+          val input = e.getStringWithError
+          throw TrampolineUtil.makeSparkUpgradeException(
+            "3.0",
+            s"Fail to parse '$input' in the new parser. You can set " +
+              s"${SQLConf.LEGACY_TIME_PARSER_POLICY.key} to LEGACY to restore the behavior " +
+              "before Spark 3.0, or set to CORRECTED and treat it as an invalid datetime string.",
+            e)
+      }
       closeOnExcept(parsed) { _ =>
         if (failOnError && parsed.getNullCount > lhs.getBase.getNullCount) {
           // ANSI mode + a row that was non-null in input but failed to parse.
@@ -808,7 +823,8 @@ abstract class GpuToTimestamp
             sparkFormat,
             strfFormat,
             DType.TIMESTAMP_MICROSECONDS,
-            failOnError)
+            failOnError,
+            timeParserPolicy == ExceptionTimeParserPolicy)
         }
         if (GpuOverrides.isUTCTimezone(zoneId)) {
           res
