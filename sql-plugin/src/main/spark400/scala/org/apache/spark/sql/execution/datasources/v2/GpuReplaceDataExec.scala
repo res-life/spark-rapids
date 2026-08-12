@@ -27,8 +27,8 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuWrite
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.{GpuDataWriterWithMetadata, GpuWrite}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
@@ -65,11 +65,43 @@ case class GpuReplaceDataWritingSparkTask(
   extends GpuWritingSparkTask[DataWriter[ColumnarBatch]] {
 
   private lazy val rowProjection = GpuProjectingColumnarBatch(projs.rowProjection)
+  private lazy val metadataProjection =
+    projs.metadataProjection.map(GpuProjectingColumnarBatch(_))
+
   override protected def write(
       writer: DataWriter[ColumnarBatch],
       batch: ColumnarBatch): Unit = {
-    withResource(rowProjection.project(batch)) { projected =>
-      writer.write(projected)
+    val metadataWriter = (writer, metadataProjection) match {
+      case (candidate: GpuDataWriterWithMetadata, Some(projection))
+          if candidate.supportsMetadata(projection.schema) =>
+        Some(candidate -> projection)
+      case _ =>
+        None
+    }
+
+    val (projected, metadata) = metadataWriter match {
+      case Some((_, projection)) =>
+        val projections = closeOnExcept(batch) { _ =>
+          val data = rowProjection.project(batch)
+          closeOnExcept(data) { _ =>
+            (data, Some(projection.project(batch)))
+          }
+        }
+        batch.close()
+        projections
+      case None =>
+        (rowProjection.project(batch), None)
+    }
+
+    withResource(projected) { data =>
+      (metadataWriter, metadata) match {
+        case (Some((candidate, projection)), Some(metadataBatch)) =>
+          withResource(metadataBatch) { _ =>
+            candidate.writeWithMetadata(metadataBatch, projection.schema, data)
+          }
+        case _ =>
+          writer.write(data)
+      }
     }
   }
 }

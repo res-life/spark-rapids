@@ -22,7 +22,7 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success}
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
@@ -48,7 +48,7 @@ import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectE
 import org.apache.spark.sql.rapids.GpuWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.util.SerializableConfiguration
 
 
@@ -110,7 +110,7 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // the GPU path uses Spark's Parquet infrastructure which requires field IDs in the
     // StructType metadata. Without them, Iceberg's ParquetMetrics cannot extract file-level
     // statistics, causing StrictMetricsEvaluator to fail during overwrite validation.
-    val dsSchema = GpuTypeToSparkType.toSparkType(writeSchema)
+    val dsSchema = GpuTypeToSparkType.toSparkTypeForWrite(writeSchema)
     val useFanout = GpuSparkWriteAccess.useFanoutWriter(cpu)
     val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
 
@@ -418,7 +418,7 @@ class GpuUnpartitionedDataWriter(
   val io: FileIO,
   val spec: PartitionSpec,
   val targetFileSize: Long)
-  extends DataWriter[ColumnarBatch] {
+  extends DataWriter[ColumnarBatch] with GpuDataWriterWithMetadata {
   private val delegate = new GpuRollingDataWriter(
     fileWriterFactory,
     fileFactory,
@@ -434,6 +434,17 @@ class GpuUnpartitionedDataWriter(
     }
     delegate.write(scb)
   }
+
+  override def writeWithMetadata(
+      metadata: ColumnarBatch,
+      metadataSchema: StructType,
+      record: ColumnarBatch): Unit = {
+    GpuDataWriterWithLineage.write(
+      fileWriterFactory.dataSparkType, metadata, metadataSchema, record)(write)
+  }
+
+  override def supportsMetadata(metadataSchema: StructType): Boolean =
+    GpuDataWriterWithLineage.hasLineageColumns(metadataSchema)
 
   override def commit(): WriterCommitMessage = {
     close()
@@ -463,7 +474,7 @@ class GpuPartitionedDataWriter(
   val dataSparkType: StructType,
   val targetFileSize: Long,
   val fanoutEnabled: Boolean,
-) extends DataWriter[ColumnarBatch] {
+) extends DataWriter[ColumnarBatch] with GpuDataWriterWithMetadata {
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {
@@ -483,6 +494,17 @@ class GpuPartitionedDataWriter(
       }
   }
 
+  override def writeWithMetadata(
+      metadata: ColumnarBatch,
+      metadataSchema: StructType,
+      record: ColumnarBatch): Unit = {
+    GpuDataWriterWithLineage.write(
+      dataSparkType, metadata, metadataSchema, record)(write)
+  }
+
+  override def supportsMetadata(metadataSchema: StructType): Boolean =
+    GpuDataWriterWithLineage.hasLineageColumns(metadataSchema)
+
   override def commit(): WriterCommitMessage = {
     close()
 
@@ -499,5 +521,64 @@ class GpuPartitionedDataWriter(
 
   override def close(): Unit = {
     delegate.close()
+  }
+}
+
+private object GpuDataWriterWithLineage {
+  private val LINEAGE_COLUMN_NAMES =
+    Seq("_row_id", "_last_updated_sequence_number")
+
+  def hasLineageColumns(metadataSchema: StructType): Boolean =
+    LINEAGE_COLUMN_NAMES.forall(metadataSchema.fieldNames.contains)
+
+  def write(
+      writeSchema: StructType,
+      metadata: ColumnarBatch,
+      metadataSchema: StructType,
+      record: ColumnarBatch)(writeBatch: ColumnarBatch => Unit): Unit = {
+    val lineageOrdinals = LINEAGE_COLUMN_NAMES.flatMap { name =>
+      metadataSchema.fields.zipWithIndex.find(_._1.name == name).map(_._2)
+    }
+    if (lineageOrdinals.length != LINEAGE_COLUMN_NAMES.length) {
+      writeBatch(record)
+      return
+    }
+
+    withResource(projectLineage(metadata, lineageOrdinals)) { lineage =>
+      closeOnExcept(decorate(writeSchema, lineage, record))(writeBatch)
+    }
+  }
+
+  private def projectLineage(
+      metadata: ColumnarBatch,
+      ordinals: Seq[Int]): ColumnarBatch = {
+    closeOnExcept(new Array[ColumnVector](ordinals.length)) { columns =>
+      ordinals.zipWithIndex.foreach { case (ordinal, index) =>
+        columns(index) = metadata.column(ordinal).asInstanceOf[GpuColumnVector].incRefCount()
+      }
+      new ColumnarBatch(columns, metadata.numRows())
+    }
+  }
+
+  private def decorate(
+      writeSchema: StructType,
+      lineage: ColumnarBatch,
+      record: ColumnarBatch): ColumnarBatch = {
+    require(writeSchema.length == record.numCols() + lineage.numCols(),
+      s"Invalid row lineage projection: write schema has ${writeSchema.length} columns, " +
+        s"record has ${record.numCols()}, and lineage has ${lineage.numCols()}")
+
+    closeOnExcept(new Array[ColumnVector](writeSchema.length)) { columns =>
+      (0 until record.numCols()).foreach { index =>
+        columns(index) = record.column(index).asInstanceOf[GpuColumnVector].incRefCount()
+      }
+
+      (0 until lineage.numCols()).foreach { index =>
+        columns(record.numCols() + index) =
+          lineage.column(index).asInstanceOf[GpuColumnVector].incRefCount()
+      }
+
+      new ColumnarBatch(columns, record.numRows())
+    }
   }
 }

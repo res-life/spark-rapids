@@ -48,11 +48,25 @@ object GpuTypeToSparkType {
     TypeUtil.visit(icebergStruct, new GpuTypeToSparkType).asInstanceOf[StructType]
   }
 
-  private[iceberg] def fieldMetadataOf(fieldId: Int): Metadata = {
-    val builder = new MetadataBuilder()
-    .putLong(FIELD_ID_METADATA_KEY, fieldId)
+  /**
+   * Converts a physical Iceberg write schema to Spark while preserving Parquet field IDs.
+   *
+   * Row-lineage columns are Iceberg metadata columns when read, but are physical columns in
+   * copy-on-write and rewrite output. Marking them as Spark metadata columns makes the Parquet
+   * writer omit their writer options while the input batch still contains the columns.
+   */
+  def toSparkTypeForWrite(schema: Schema): StructType = {
+    TypeUtil.visit(schema, new GpuTypeToSparkType(markMetadataColumns = false))
+      .asInstanceOf[StructType]
+  }
 
-    if (MetadataColumns.metadataFieldIds().contains(fieldId)) {
+  private[iceberg] def fieldMetadataOf(
+      fieldId: Int,
+      markMetadataColumns: Boolean): Metadata = {
+    val builder = new MetadataBuilder()
+      .putLong(FIELD_ID_METADATA_KEY, fieldId)
+
+    if (markMetadataColumns && MetadataColumns.metadataFieldIds().contains(fieldId)) {
       builder.putBoolean(METADATA_COL_ATTR_KEY, true)
     }
 
@@ -79,7 +93,7 @@ object GpuTypeToSparkType {
  * and naturally handles list/map elements that are themselves structs without a
  * special-case recursion through `Types.StructType`.
  */
-class GpuTypeToSparkType extends TypeToSparkType {
+class GpuTypeToSparkType(markMetadataColumns: Boolean = true) extends TypeToSparkType {
   private val nestedIdsStack = mutable.ArrayBuffer.empty[Option[String]]
 
   private def pushNested(nested: Option[String]): Unit = nestedIdsStack += nested
@@ -133,7 +147,8 @@ class GpuTypeToSparkType extends TypeToSparkType {
       .map {
         case ((field, fieldResult), nestedJson) =>
           val metadataBuilder = new MetadataBuilder()
-            .withMetadata(GpuTypeToSparkType.fieldMetadataOf(field.fieldId()))
+            .withMetadata(GpuTypeToSparkType.fieldMetadataOf(
+              field.fieldId(), markMetadataColumns))
           nestedJson.foreach(json =>
             metadataBuilder.withMetadata(Metadata.fromJson(json)))
           var sparkField =

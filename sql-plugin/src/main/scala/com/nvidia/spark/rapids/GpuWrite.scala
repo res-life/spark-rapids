@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, NVIDIA CORPORATION.
+ * Copyright (c) 2025-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,20 @@
 package com.nvidia.spark.rapids
 
 import org.apache.spark.sql.connector.write.Write
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 trait GpuWrite extends Write {
   var metrics: Map[String, GpuMetric] = Map.empty
+}
+
+trait GpuDataWriterWithMetadata {
+  def supportsMetadata(metadataSchema: StructType): Boolean
+
+  def writeWithMetadata(
+      metadata: ColumnarBatch,
+      metadataSchema: StructType,
+      record: ColumnarBatch): Unit
 }
 
 // Allows use of GpuWrite from Java code

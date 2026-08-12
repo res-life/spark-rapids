@@ -14,7 +14,7 @@
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_write_sql
+from asserts import assert_equal, assert_equal_with_local_sort, assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import *
 from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_enabled_conf,
@@ -156,6 +156,44 @@ def test_iceberg_update_v3_table_fallback(
         base_table_name,
         [fallback_exec],
         conf=iceberg_update_cow_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_update_v3_table_row_lineage(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+
+    def create_table(spark, table_name):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT, data STRING) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', 'write.update.mode' = 'copy-on-write')")
+        spark.range(4).selectExpr("id", "concat('v', id) AS data").coalesce(1).writeTo(
+            table_name).append()
+
+    with_cpu_session(lambda spark: create_table(spark, cpu_table_name))
+    with_cpu_session(lambda spark: create_table(spark, gpu_table_name))
+
+    def update_table(spark, table_name):
+        spark.sql(f"UPDATE {table_name} SET data = 'updated' WHERE id = 1")
+
+    write_conf = copy_and_update(
+        iceberg_update_cow_enabled_conf,
+        {"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+    with_cpu_session(lambda spark: update_table(spark, cpu_table_name))
+    with_gpu_session(lambda spark: update_table(spark, gpu_table_name), conf=write_conf)
+
+    def collect_lineage(spark, table_name):
+        return spark.sql(
+            f"SELECT id, data, _row_id, _last_updated_sequence_number "
+            f"FROM {table_name} ORDER BY id").collect()
+
+    cpu_lineage = with_cpu_session(lambda spark: collect_lineage(spark, cpu_table_name))
+    gpu_lineage = with_cpu_session(lambda spark: collect_lineage(spark, gpu_table_name))
+    assert_equal(cpu_lineage, gpu_lineage)
+    assert [row._row_id for row in gpu_lineage] == [0, 1, 2, 3]
+    assert [row._last_updated_sequence_number for row in gpu_lineage] == [1, 2, 1, 1]
 
 
 @iceberg

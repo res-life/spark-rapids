@@ -15,7 +15,7 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
+from asserts import assert_equal, assert_equal_with_local_sort, assert_gpu_fallback_collect, \
     assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import gen_df, copy_and_update
@@ -92,6 +92,63 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
         base_table_name,
         ["AppendDataExec"],
         conf=iceberg_write_enabled_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_insert_into_v3_table_row_lineage(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+
+    def create_table(spark, table_name):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT, data STRING) USING ICEBERG "
+            f"TBLPROPERTIES ({props_sql})")
+
+    with_cpu_session(lambda spark: create_table(spark, cpu_table_name))
+    with_cpu_session(lambda spark: create_table(spark, gpu_table_name))
+
+    def append_rows(spark, table_name, start, end):
+        (spark.range(start, end)
+         .selectExpr("id", "concat('v', id) AS data")
+         .coalesce(1)
+         .writeTo(table_name)
+         .append())
+
+    write_conf = copy_and_update(
+        iceberg_write_enabled_conf,
+        {"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+    for start, end in [(0, 3), (3, 5)]:
+        with_cpu_session(
+            lambda spark, s=start, e=end: append_rows(spark, cpu_table_name, s, e),
+            conf=write_conf)
+        with_gpu_session(
+            lambda spark, s=start, e=end: append_rows(spark, gpu_table_name, s, e),
+            conf=write_conf)
+
+    def collect_lineage(spark, table_name):
+        return spark.sql(
+            f"SELECT id, data, _row_id, _last_updated_sequence_number "
+            f"FROM {table_name} ORDER BY id").collect()
+
+    def collect_file_metadata(spark, table_name):
+        return spark.sql(
+            f"SELECT record_count, first_row_id FROM {table_name}.files "
+            "ORDER BY first_row_id").collect()
+
+    cpu_lineage = with_cpu_session(lambda spark: collect_lineage(spark, cpu_table_name))
+    gpu_lineage = with_cpu_session(lambda spark: collect_lineage(spark, gpu_table_name))
+    assert_equal(cpu_lineage, gpu_lineage)
+    assert [row._row_id for row in gpu_lineage] == list(range(5))
+    assert [row._last_updated_sequence_number for row in gpu_lineage] == [1, 1, 1, 2, 2]
+
+    cpu_files = with_cpu_session(lambda spark: collect_file_metadata(spark, cpu_table_name))
+    gpu_files = with_cpu_session(lambda spark: collect_file_metadata(spark, gpu_table_name))
+    assert_equal(cpu_files, gpu_files)
+    assert [(row.record_count, row.first_row_id) for row in gpu_files] == [(3, 0), (2, 3)]
 
 
 @iceberg

@@ -1005,6 +1005,42 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("FetchRowId adds first row ID to the shared file-global row position") {
+    import com.nvidia.spark.rapids.Arm.withResource
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
+
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val rowIdFieldId = RowLineageMetadata.ROW_ID_FIELD_ID
+    val expectedSchema = new Schema(
+      MetadataColumns.ROW_POSITION,
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val idToConstant = new JHashMap[Integer, Any]()
+    idToConstant.put(rowIdFieldId, 1000L)
+
+    val (parquetInfo, shadedSchema) =
+      createMultiBlockParquetInfo(parquetSchema, Seq(3L), firstFileGlobalRowIndex = 500L)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      idToConstant,
+      expectedSchema,
+      shadedSchema,
+      Map.empty)
+    val input = new ColumnarBatch(Array.empty[SparkColumnVector], 3)
+
+    withResource(processor.process(input)) { batch =>
+      assert(batch.numCols() == 2)
+      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { positions =>
+        withResource(batch.column(1).asInstanceOf[GpuColumnVector].copyToHost()) { rowIds =>
+          (0 until 3).foreach { index =>
+            assert(positions.getBase.getLong(index) == 500L + index)
+            assert(rowIds.getBase.getLong(index) == 1500L + index)
+          }
+        }
+      }
+    }
+  }
+
   test("Constant struct with required children does not throw") {
     val structFieldId = 1
     val fieldAId = 2
