@@ -37,6 +37,11 @@ supports_iceberg_v3 = (
     runtime_iceberg_version is not None and
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9))
 ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 only supported after iceberg 1.9.0"
+supports_iceberg_row_lineage_inheritance = (
+    runtime_iceberg_version is not None and
+    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))
+ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON = \
+    "Iceberg row lineage inheritance requires iceberg 1.10.0 or later"
 
 # iceberg supported types
 iceberg_table_gen = MappingProxyType({
