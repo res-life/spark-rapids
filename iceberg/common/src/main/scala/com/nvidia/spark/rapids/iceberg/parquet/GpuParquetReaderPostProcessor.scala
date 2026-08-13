@@ -19,10 +19,11 @@ package com.nvidia.spark.rapids.iceberg.parquet
 import java.util.{List => JList, Map => JMap, Objects, Optional}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.Stack
+import scala.collection.mutable.{ArrayBuffer, Stack}
 
 import ai.rapids.cudf.{BinaryOp, ColumnVector => CudfColumnVector, ColumnView, DType}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.AutoClosableArrayBuffer
 import com.nvidia.spark.rapids.CastOptions
 import com.nvidia.spark.rapids.GpuCast
 import com.nvidia.spark.rapids.GpuColumnVector
@@ -668,6 +669,10 @@ class GpuParquetReaderPostProcessor(
     shadedFileReadSchema: ShadedMessageType,
     metrics: Map[String, com.nvidia.spark.rapids.GpuMetric]
 ) {
+  // Microbenchmarks on an NVIDIA L4 show that sequence + concatenate overtakes the CPU
+  // fromLongs path between 256K and 512K rows when a batch spans multiple position ranges.
+  private val multiRangeGpuMinRows = 512 * 1024
+
   private val icebergBuildActionTimeMetricName = "icebergBuildActionTime"
   private val icebergPostProcessTimeMetricName = "icebergPostProcessTime"
 
@@ -699,10 +704,13 @@ class GpuParquetReaderPostProcessor(
 
   private[iceberg] def getRowPositions(numRows: Int): CudfColumnVector = {
     if (currentRowPositions == null) {
-      val rowPositions = new Array[Long](numRows)
+      // Plan contiguous file-position ranges on the CPU, then materialize them on the GPU.
+      // Predicate filtering can remove row groups, so a batch can contain non-contiguous
+      // file-global positions and may require multiple sequences followed by a concatenate.
+      val positionRanges = new ArrayBuffer[(Long, Int)]
 
-      // Advance state in locals and commit only after fromLongs succeeds. process() restores
-      // the matching snapshot when withRetryNoSplit retries a later allocation.
+      // Advance state in locals and commit only after position materialization succeeds.
+      // process() restores the matching snapshot when withRetryNoSplit retries a later allocation.
       var localBlockIndex = curBlockIndex
       var localProcessedRowCount = processedRowCount
       var localProcessedBlockRowCounts = processedBlockRowCounts
@@ -712,9 +720,9 @@ class GpuParquetReaderPostProcessor(
       var curBlockRowEnd = curBlockRowStart + curBlockRowCount
       var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
 
-      var i = 0
-      while (i < numRows) {
-        if (curRowPos >= curBlockRowEnd) {
+      var remainingRows = numRows
+      while (remainingRows > 0) {
+        while (curRowPos >= curBlockRowEnd) {
           localBlockIndex += 1
           localProcessedBlockRowCounts += curBlockRowCount
           curRowPos = parquetInfo.blocksFirstRowIndices(localBlockIndex)
@@ -724,14 +732,60 @@ class GpuParquetReaderPostProcessor(
           curBlockRowEnd = curBlockRowStart + curBlockRowCount
         }
 
-        rowPositions(i) = curRowPos
-        curRowPos += 1
-        localProcessedRowCount += 1
-        i += 1
+        val rangeLength = Math.min(remainingRows.toLong, curBlockRowEnd - curRowPos).toInt
+        if (positionRanges.nonEmpty &&
+            positionRanges.last._1 + positionRanges.last._2 == curRowPos) {
+          val (start, length) = positionRanges.last
+          positionRanges(positionRanges.length - 1) = (start, length + rangeLength)
+        } else {
+          positionRanges += ((curRowPos, rangeLength))
+        }
+        curRowPos += rangeLength
+        localProcessedRowCount += rangeLength
+        remainingRows -= rangeLength
       }
 
-      currentRowPositions = CudfColumnVector.fromLongs(rowPositions: _*)
-      currentMaxRowPosition = if (numRows == 0) -1L else rowPositions(numRows - 1)
+      def makeSequence(start: Long, length: Int): CudfColumnVector = {
+        withResource(GpuScalar.from(start, LongType)) { startScalar =>
+          CudfColumnVector.sequence(startScalar, length)
+        }
+      }
+
+      def makeHostPositions(): CudfColumnVector = {
+        val rowPositions = new Array[Long](numRows)
+        var outputIndex = 0
+        positionRanges.foreach { case (start, length) =>
+          var position = start
+          val outputEnd = outputIndex + length
+          while (outputIndex < outputEnd) {
+            rowPositions(outputIndex) = position
+            outputIndex += 1
+            position += 1
+          }
+        }
+        CudfColumnVector.fromLongs(rowPositions: _*)
+      }
+
+      currentRowPositions = if (positionRanges.isEmpty) {
+        CudfColumnVector.fromLongs()
+      } else if (positionRanges.length == 1) {
+        val (start, length) = positionRanges.head
+        makeSequence(start, length)
+      } else if (numRows < multiRangeGpuMinRows) {
+        // Multiple GPU kernels plus concatenate cost more than the CPU fill/upload path for
+        // small batches. Keep the GPU path for larger batches where it wins decisively.
+        makeHostPositions()
+      } else {
+        withResource(new AutoClosableArrayBuffer[CudfColumnVector]) { sequences =>
+          positionRanges.foreach { case (start, length) =>
+            sequences.append(makeSequence(start, length))
+          }
+          CudfColumnVector.concatenate(sequences.toArray: _*)
+        }
+      }
+      currentMaxRowPosition = positionRanges.lastOption
+        .map { case (start, length) => start + length - 1 }
+        .getOrElse(-1L)
       curBlockIndex = localBlockIndex
       processedRowCount = localProcessedRowCount
       processedBlockRowCounts = localProcessedBlockRowCounts
