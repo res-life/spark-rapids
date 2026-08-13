@@ -966,6 +966,33 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("Unsupported Iceberg defaults are identified by subtype and nested path") {
+    val timestampNtzField = fieldWithDefaults(
+      3,
+      "created_at",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val timestampField = fieldWithDefaults(
+      4,
+      "updated_at",
+      Types.TimestampType.withZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val unsupportedSchema = new Schema(Types.NestedField.optional(
+      1, "payload", Types.StructType.of(timestampNtzField)))
+    val supportedSchema = new Schema(timestampField)
+
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedSchema)
+      .contains("payload.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(supportedSchema).isEmpty)
+  }
+
   test("Present struct children take precedence over defaults for missing children") {
     val structId = 1
     val presentId = 2

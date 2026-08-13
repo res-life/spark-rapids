@@ -70,7 +70,7 @@ object IcebergFormatVersionSupport {
     }
   }
 
-  private def unsupportedDefault(schema: Schema): Option[(String, String)] = {
+  private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
     def find(fields: Seq[Types.NestedField], parent: String): Option[(String, String)] = {
       fields.iterator.map { field =>
         val path = if (parent.isEmpty) field.name() else s"$parent.${field.name()}"
@@ -78,8 +78,10 @@ object IcebergFormatVersionSupport {
           ShimUtils.hasInitialDefault(field) || ShimUtils.hasWriteDefault(field)
         val fieldType = field.`type`()
 
+        val unsupportedTimestampNtz = fieldType == Types.TimestampType.withoutZone()
         if (hasDefault && fieldType.isPrimitiveType &&
-            !SupportedDefaultTypeIds.contains(fieldType.typeId().name())) {
+            (!SupportedDefaultTypeIds.contains(fieldType.typeId().name()) ||
+              unsupportedTimestampNtz)) {
           Some(path -> fieldType.toString)
         } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
           Some(path -> fieldType.toString)
