@@ -42,8 +42,8 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
       id: Int,
       name: String,
       icebergType: org.apache.iceberg.types.Type,
-      initialDefault: AnyRef,
-      writeDefault: AnyRef): Option[Types.NestedField] = {
+      initialDefault: Option[AnyRef],
+      writeDefault: Option[AnyRef]): Option[Types.NestedField] = {
     try {
       val builder = classOf[Types.NestedField].getMethod("optional", classOf[String])
         .invoke(null, name)
@@ -51,10 +51,12 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
       builderClass.getMethod("withId", java.lang.Integer.TYPE).invoke(builder, Int.box(id))
       builderClass.getMethod("ofType", classOf[org.apache.iceberg.types.Type])
         .invoke(builder, icebergType)
-      builderClass.getMethod("withInitialDefault", classOf[Object])
-        .invoke(builder, initialDefault)
-      builderClass.getMethod("withWriteDefault", classOf[Object])
-        .invoke(builder, writeDefault)
+      initialDefault.foreach { value =>
+        builderClass.getMethod("withInitialDefault", classOf[Object]).invoke(builder, value)
+      }
+      writeDefault.foreach { value =>
+        builderClass.getMethod("withWriteDefault", classOf[Object]).invoke(builder, value)
+      }
       Some(builderClass.getMethod("build").invoke(builder).asInstanceOf[Types.NestedField])
     } catch {
       case _: NoSuchMethodException => None
@@ -78,8 +80,8 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
       1,
       "value",
       Types.IntegerType.get(),
-      initialDefault = Int.box(7),
-      writeDefault = Int.box(9)).getOrElse {
+      initialDefault = Some(Int.box(7)),
+      writeDefault = Some(Int.box(9))).getOrElse {
       cancel("Iceberg runtime does not expose v3 field defaults")
     }
 
@@ -87,6 +89,35 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     assert(metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(metadata.getString(GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY) == "7")
     assert(metadata.getString(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY) == "9")
+  }
+
+  test("toSparkType keeps initial and write defaults independent") {
+    val initialOnly = fieldWithDefaults(
+      2,
+      "initial_only",
+      Types.IntegerType.get(),
+      initialDefault = Some(Int.box(7)),
+      writeDefault = None).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val writeOnly = fieldWithDefaults(
+      3,
+      "write_only",
+      Types.IntegerType.get(),
+      initialDefault = None,
+      writeDefault = Some(Int.box(9))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+
+    val initialMetadata = fieldOf(initialOnly)
+    assert(initialMetadata.getString(
+      GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY) == "7")
+    assert(!initialMetadata.contains(GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY))
+
+    val writeMetadata = fieldOf(writeOnly)
+    assert(!writeMetadata.contains(GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY))
+    assert(writeMetadata.getString(
+      GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY) == "9")
   }
 
   test("toSparkType: flat list records only the element id") {
