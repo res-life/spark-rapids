@@ -28,6 +28,7 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded._
 import com.nvidia.spark.rapids.parquet.{GpuParquetUtils, ParquetFileInfoWithBlockMeta}
 import com.nvidia.spark.rapids.shims.PartitionedFileUtilsShim
+import com.nvidia.spark.rapids.shims.parquet.GpuParquetUtilsShims
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.{MetadataColumns, Schema}
@@ -202,14 +203,25 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
   }
 
   def filterParquetBlocks(file: IcebergPartitionedFile,
-      requiredSchema: Schema): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+      requiredSchema: Schema,
+      hasDeletionVector: Boolean = false): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
     withResource(file.newReader(conf.metrics)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
-      val (typeWithIds, fileReadSchema) = projectSchema(fileSchema, requiredSchema)
-      val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val needsRowPosition =
         requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
-      val blockFirstRowIndices: Seq[Long] = if (needsRowPosition) {
+      val initialProjection = projectSchema(fileSchema, requiredSchema)
+      val (typeWithIds, fileReadSchema) =
+        if (hasDeletionVector && needsRowPosition && initialProjection._2.getFieldCount == 0 &&
+            fileSchema.getFieldCount > 0) {
+          val firstFileField = ParquetSchemaUtil.convert(fileSchema).columns().get(0)
+          val projectionFields = requiredSchema.columns().asScala
+            .filterNot(_.fieldId() == firstFileField.fieldId()) :+ firstFileField
+          projectSchema(fileSchema, new Schema(projectionFields.asJava))
+        } else {
+          initialProjection
+        }
+      val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
+      val blockFirstRowIndices: Seq[Long] = if (needsRowPosition || hasDeletionVector) {
         // _pos is file-global. When file.split is set the reader is opened with
         // ParquetReadOptions.withRange, which makes the footer expose only the row groups
         // that intersect the range, so the ranged reader's own footer is not usable for
@@ -253,6 +265,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         }
       }
       val blocks = clipBlocksToSchema(fileReadSchema, filteredBlocks.map(_._1))
+      blocks.zip(blockFirstRowIndices).foreach { case (block, firstRowIndex) =>
+        GpuParquetUtilsShims.setRowIndexOffset(block, firstRowIndex)
+      }
 
       val sqlConf = SQLConf.get
       val partReaderSparkSchema = new ParquetToSparkSchemaConverter(

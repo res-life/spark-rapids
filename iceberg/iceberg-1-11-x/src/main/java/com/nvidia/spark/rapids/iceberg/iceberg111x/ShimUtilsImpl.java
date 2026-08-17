@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids.iceberg.iceberg111x;
 import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
@@ -38,6 +39,7 @@ import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -75,14 +77,14 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+    public IcebergDeletionVector readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
             throws IOException {
         Long offset = deleteFile.contentOffset();
         Long size = deleteFile.contentSizeInBytes();
         if (offset == null || offset < 0) {
             throw new IllegalArgumentException("Invalid deletion vector offset: " + offset);
         }
-        if (size == null || size < 0 || size > Integer.MAX_VALUE) {
+        if (size == null || size < 20 || size > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("Invalid deletion vector size: " + size);
         }
 
@@ -94,19 +96,36 @@ public class ShimUtilsImpl implements IcebergShimUtils {
 
         PositionDeleteIndex index = PositionDeleteIndex.deserialize(bytes, deleteFile);
         long cardinality = index.cardinality();
-        if (cardinality > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException(
-                    "Cannot materialize deletion vector with more than 2^31-1 positions: "
-                            + cardinality);
-        }
-        long[] positions = new long[(int) cardinality];
-        int[] next = new int[] {0};
-        index.forEach(position -> positions[next[0]++] = position);
-        if (next[0] != positions.length) {
-            throw new IllegalStateException(
-                    "Deletion vector cardinality changed while materializing positions");
-        }
-        return positions;
+        byte[] serializedBitmap = Arrays.copyOfRange(bytes, 8, bytes.length - 4);
+        return new IcebergDeletionVector() {
+            @Override
+            public byte[] serializedBitmap() {
+                return serializedBitmap;
+            }
+
+            @Override
+            public long cardinality() {
+                return cardinality;
+            }
+
+            @Override
+            public long countDeletedRows(long[] rowGroupOffsets, int[] rowGroupNumRows) {
+                if (rowGroupOffsets.length != rowGroupNumRows.length) {
+                    throw new IllegalArgumentException("Mismatched row-group metadata lengths");
+                }
+                long[] count = new long[] {0L};
+                index.forEach(position -> {
+                    for (int i = 0; i < rowGroupOffsets.length; i++) {
+                        long start = rowGroupOffsets[i];
+                        if (position >= start && position - start < rowGroupNumRows[i]) {
+                            count[0] += 1L;
+                            break;
+                        }
+                    }
+                });
+                return count[0];
+            }
+        };
     }
 
     @Override

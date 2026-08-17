@@ -80,7 +80,8 @@ public class ShimUtils {
         return IMPL.contentSizeInBytes(deleteFile);
     }
 
-    public static long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+    public static IcebergDeletionVector readDeletionVector(DeleteFile deleteFile,
+                                                             InputFile inputFile)
             throws IOException {
         return IMPL.readDeletionVector(deleteFile, inputFile);
     }

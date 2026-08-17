@@ -162,6 +162,12 @@ private[iceberg] case object FetchFilePath extends ColumnAction {
 /** Fetch ROW_POSITION metadata column. */
 private[iceberg] case object FetchRowPosition extends ColumnAction {
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
+    if (ctx.processor.hasNativeRowIndex) {
+      val rowIndex = ctx.requireColumn("FetchRowPosition")
+      rowIndex.incRefCount()
+      return rowIndex
+    }
+
     val numRows = ctx.numRows
     val rowPoses = new Array[Long](numRows)
     val processor = ctx.processor
@@ -629,7 +635,8 @@ class GpuParquetReaderPostProcessor(
     private[iceberg] val idToConstant: JMap[Integer, _],
     private[iceberg] val expectedSchema: Schema,
     shadedFileReadSchema: ShadedMessageType,
-    metrics: Map[String, com.nvidia.spark.rapids.GpuMetric]
+    metrics: Map[String, com.nvidia.spark.rapids.GpuMetric],
+    private[iceberg] val hasNativeRowIndex: Boolean = false
 ) {
   private val icebergBuildActionTimeMetricName = "icebergBuildActionTime"
   private val icebergPostProcessTimeMetricName = "icebergPostProcessTime"
@@ -666,7 +673,8 @@ class GpuParquetReaderPostProcessor(
   // Map field ID to that batch position.
   private lazy val fieldIdToBatchIndex: Map[Int, Int] = {
     (0 until fileReadSchema.getFieldCount).flatMap { i =>
-      Option(fileReadSchema.getType(i).getId).map(id => id.intValue() -> i)
+      val batchIndex = if (hasNativeRowIndex) i + 1 else i
+      Option(fileReadSchema.getType(i).getId).map(id => id.intValue() -> batchIndex)
     }.toMap
   }
 
@@ -685,7 +693,7 @@ class GpuParquetReaderPostProcessor(
   private lazy val expectedSparkTypes = expectedFields.map(f => SparkSchemaUtil.convert(f.`type`()))
 
   // Check if we can pass through the entire batch without any processing.
-  private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough
+  private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough && !hasNativeRowIndex
 
   // Only constants that synthesize projected fields need to participate in combining checks.
   // If a projected field is still read from the parquet file, differing constant-map values for
@@ -777,6 +785,8 @@ class GpuParquetReaderPostProcessor(
           // PassThrough is handled by canPassThroughBatch early return)
           val fieldActions = rootAction match {
             case ProcessStruct(actions, _) => actions
+            case PassThrough if hasNativeRowIndex =>
+              Seq.fill(expectedFields.size)(PassThrough)
             case _ => throw new IllegalStateException(
               s"Root action must be ProcessStruct, but got: ${rootAction.getClass.getSimpleName}")
           }
@@ -786,7 +796,12 @@ class GpuParquetReaderPostProcessor(
           // batch column (or None for generated fields) and assemble the output batch ourselves.
           val columns: Seq[ColumnVector] = fieldActions.zip(fields).zipWithIndex.safeMap {
             case ((action, field), idx) =>
-              val batchIdx = fieldIdToBatchIndex.get(field.fieldId())
+              val batchIdx = if (hasNativeRowIndex &&
+                  field.fieldId() == MetadataColumns.ROW_POSITION.fieldId()) {
+                Some(0)
+              } else {
+                fieldIdToBatchIndex.get(field.fieldId())
+              }
               val col = batchIdx.map(i => batch.column(i).asInstanceOf[GpuColumnVector].getBase)
               val ctx = new ColumnActionContext(this, col, currentNumRows)
               val result = action.execute(ctx)

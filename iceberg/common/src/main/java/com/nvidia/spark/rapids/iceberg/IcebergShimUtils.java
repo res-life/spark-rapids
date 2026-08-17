@@ -71,13 +71,14 @@ public interface IcebergShimUtils {
     Long contentSizeInBytes(DeleteFile deleteFile);
 
     /**
-     * Reads exactly the recorded deletion-vector byte range and returns its 64-bit row positions.
+     * Reads exactly the recorded deletion-vector byte range and returns its compressed bitmap.
      *
      * <p>This is version-dispatched because Iceberg 1.6 does not expose the Puffin file format or
      * deletion-vector manifest fields, and its {@code PositionDeleteIndex} lacks the decode and
      * iteration APIs available in later releases.
      */
-    long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile) throws IOException;
+    IcebergDeletionVector readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+            throws IOException;
 
     /**
      * Builds the constants map for a file scan task. Constants include partition values,

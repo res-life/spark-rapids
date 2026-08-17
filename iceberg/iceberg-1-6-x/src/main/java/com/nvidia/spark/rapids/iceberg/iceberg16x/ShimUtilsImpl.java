@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.iceberg.iceberg16x;
 
 import com.nvidia.spark.rapids.RapidsConf;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import org.apache.iceberg.*;
 import org.apache.iceberg.io.FileIO;
@@ -82,7 +83,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public long[] readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+    public IcebergDeletionVector readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
             throws IOException {
         throw new UnsupportedOperationException(
                 "Iceberg 1.6 does not support Puffin deletion vectors");

@@ -56,7 +56,11 @@ class DeletionVectorReaderSuite extends AnyFunSuite {
         fileSize = fileBytes.length)
       val inputFile = HadoopInputFile.fromPath(new HadoopPath(path.toUri), new Configuration())
 
-      assert(ShimUtils.readDeletionVector(deleteFile, inputFile).toSeq == expectedPositions)
+      val deletionVector = ShimUtils.readDeletionVector(deleteFile, inputFile)
+      assert(deletionVector.serializedBitmap().sameElements(portableBitmap(targetBlob)))
+      assert(deletionVector.cardinality() == expectedPositions.size)
+      assert(deletionVector.countDeletedRows(
+        Array(0L, 1L << 40), Array(18, 4)) == expectedPositions.size)
     } finally {
       Files.deleteIfExists(path)
     }
@@ -76,7 +80,11 @@ class DeletionVectorReaderSuite extends AnyFunSuite {
         fileSize = blob.length)
       val inputFile = HadoopInputFile.fromPath(new HadoopPath(path.toUri), new Configuration())
 
-      assert(ShimUtils.readDeletionVector(deleteFile, inputFile).isEmpty)
+      val deletionVector = ShimUtils.readDeletionVector(deleteFile, inputFile)
+      assert(deletionVector.serializedBitmap().sameElements(portableBitmap(blob)))
+      assert(deletionVector.serializedBitmap().length == 8)
+      assert(deletionVector.cardinality() == 0)
+      assert(deletionVector.countDeletedRows(Array(0L), Array(100)) == 0)
     } finally {
       Files.deleteIfExists(path)
     }
@@ -93,6 +101,10 @@ class DeletionVectorReaderSuite extends AnyFunSuite {
     val bytes = new Array[Byte](copy.remaining())
     copy.get(bytes)
     bytes
+  }
+
+  private def portableBitmap(serializedIndex: Array[Byte]): Array[Byte] = {
+    serializedIndex.slice(8, serializedIndex.length - 4)
   }
 
   private def deletionVectorFile(
