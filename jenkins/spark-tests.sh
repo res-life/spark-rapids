@@ -463,6 +463,7 @@ software.amazon.awssdk:url-connection-client:${AWS_SDK_VERSION},\
 software.amazon.awssdk:s3tables:${AWS_SDK_VERSION},\
 org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},\
 com.amazonaws:aws-java-sdk-bundle:${AWS_SDK_BUNDLE_VERSION}"
+
       # Spark 4.1 uses Netty 4.2, which cannot coexist with the Netty 4.1 jars pulled in by
       # AWS SDK 2.x. Let AWS use the Netty version provided by Spark instead.
       local exclude_group_ids=""
