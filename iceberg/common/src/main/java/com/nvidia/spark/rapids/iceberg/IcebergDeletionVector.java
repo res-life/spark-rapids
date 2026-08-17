@@ -16,20 +16,49 @@
 
 package com.nvidia.spark.rapids.iceberg;
 
+import ai.rapids.cudf.HostMemoryBuffer;
+
 /**
  * A validated Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
  *
- * <p>The serialized bytes use the portable 64-bit Roaring format expected by cuDF. Range
- * counting is provided by the version-specific Iceberg implementation so the common module does
- * not depend on deletion-index APIs that are absent from Iceberg 1.6.
+ * <p>The serialized bytes use the portable 64-bit Roaring format expected by cuDF. This object
+ * owns its host buffer and must be closed after all borrowed references have been released.
  */
-public interface IcebergDeletionVector {
-    /** Returns the portable serialized 64-bit Roaring bitmap expected by cuDF. */
-    byte[] serializedBitmap();
+public final class IcebergDeletionVector implements AutoCloseable {
+    private final HostMemoryBuffer serializedBitmap;
+    private final long cardinality;
+
+    public IcebergDeletionVector(
+            byte[] serializedIndex,
+            int bitmapOffset,
+            int bitmapLength,
+            long cardinality) {
+        HostMemoryBuffer bitmap = HostMemoryBuffer.allocate(bitmapLength);
+        try {
+            bitmap.setBytes(0, serializedIndex, bitmapOffset, bitmapLength);
+        } catch (RuntimeException | Error e) {
+            bitmap.close();
+            throw e;
+        }
+        this.serializedBitmap = bitmap;
+        this.cardinality = cardinality;
+    }
+
+    /**
+     * Returns a new reference to the portable serialized 64-bit Roaring bitmap expected by cuDF.
+     */
+    public HostMemoryBuffer serializedBitmap() {
+        serializedBitmap.incRefCount();
+        return serializedBitmap;
+    }
 
     /** Returns the number of positions in the deletion vector. */
-    long cardinality();
+    public long cardinality() {
+        return cardinality;
+    }
 
-    /** Returns the number of deleted positions contained in the supplied file-row ranges. */
-    long countDeletedRows(long[] rowGroupOffsets, int[] rowGroupNumRows);
+    @Override
+    public void close() {
+        serializedBitmap.close();
+    }
 }

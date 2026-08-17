@@ -42,8 +42,7 @@ import com.nvidia.spark.rapids.iceberg.data.TestGpuDeleteLoader._
 import com.nvidia.spark.rapids.iceberg.parquet.{GpuIcebergParquetReaderConf, SingleFile}
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.conf.Configuration
-import org.apache.iceberg.{DeleteFile, FileContent, FileFormat, FileMetadata, MetadataColumns,
-  PartitionSpec, Schema}
+import org.apache.iceberg.{DeleteFile, FileContent, FileFormat, FileMetadata, MetadataColumns, PartitionSpec, Schema}
 import org.apache.iceberg.MetadataColumns.isMetadataColumn
 import org.apache.iceberg.common.DynMethods
 import org.apache.iceberg.hadoop.HadoopFileIO

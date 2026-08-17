@@ -23,8 +23,7 @@ import com.nvidia.spark.rapids.MapUtil.toMapStrict
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
-import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileInfo,
-  GpuDeleteFilter}
+import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFilter}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg._
 import org.apache.iceberg.encryption.EncryptedFiles
@@ -46,17 +45,14 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
   private lazy val rapidsFileIO = new IcebergFileIO(fileIO)
   private lazy val conf = newConf()
   private lazy val (inputFiles, tasks) = collectFiles()
-  private lazy val deleteInfoMap: Map[IcebergPartitionedFile, GpuDeleteFileInfo] =
+  private lazy val deleteInfoMap =
     tasks.map { case (file, scanTask) =>
-      file -> GpuDeleteFileInfo(scanTask.file(), scanTask.deletes().asScala.toSeq)
+      file -> GpuDeleteFilter.splitDeleteFiles(scanTask.deletes().asScala.toSeq)
     }
-  private lazy val deletionVectorMap = {
-    val loader = new DefaultDeleteLoader(rapidsFileIO, inputFiles, conf)
-    deleteInfoMap.map { case (file, deleteInfo) =>
-      val deletionVector = deleteInfo.deletionVector.map { delete =>
-        loader.loadDeletionVector(delete, ShimUtils.locationOf(tasks(file).file()))
-      }
-      file -> deletionVector
+  private lazy val deleteLoader = new DefaultDeleteLoader(rapidsFileIO, inputFiles, conf)
+  private def deletionVectorProvider(file: IcebergPartitionedFile) = {
+    deleteInfoMap(file).deletionVector.map { delete =>
+      deleteLoader.loadDeletionVector(delete, ShimUtils.locationOf(tasks(file).file()))
     }
   }
   private lazy val gpuDeleteFiterMap: Map[IcebergPartitionedFile, Option[GpuDeleteFilter]] =
@@ -100,10 +96,10 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
     threadConf match {
       case SingleFile =>
         new GpuSingleThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
-          gpuDeleteFiterMap, deletionVectorMap, conf)
+          gpuDeleteFiterMap, deletionVectorProvider, conf)
       case _: MultiThread =>
         new GpuMultiThreadIcebergParquetReader(rapidsFileIO, files, constantsMap,
-          gpuDeleteFiterMap, deletionVectorMap, conf)
+          gpuDeleteFiterMap, deletionVectorProvider, conf)
       case _: MultiFile =>
         new GpuCoalescingIcebergParquetReader(rapidsFileIO, files, constantsMap, conf)
     }

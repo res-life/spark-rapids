@@ -39,6 +39,33 @@ import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
 import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
+object GpuDeleteFilter {
+  case class DeleteFileInfo(
+      deletionVector: Option[DeleteFile],
+      postReadDeletes: Seq[DeleteFile])
+
+  /** Gives a deletion vector precedence over legacy position-delete files. */
+  def splitDeleteFiles(deletes: Seq[DeleteFile]): DeleteFileInfo = {
+    val equalityDeletes = new ArrayBuffer[DeleteFile]
+    val positionDeletes = new ArrayBuffer[DeleteFile]
+    var deletionVector: Option[DeleteFile] = None
+
+    deletes.foreach { delete =>
+      delete.content() match {
+        case FileContent.EQUALITY_DELETES => equalityDeletes += delete
+        case FileContent.POSITION_DELETES if ShimUtils.isDeletionVector(delete) =>
+          deletionVector = Some(delete)
+        case FileContent.POSITION_DELETES => positionDeletes += delete
+        case content =>
+          throw new UnsupportedOperationException(s"Unsupported delete content: $content")
+      }
+    }
+
+    val effectivePositionDeletes = if (deletionVector.isDefined) Seq.empty else positionDeletes
+    DeleteFileInfo(deletionVector, equalityDeletes.toSeq ++ effectivePositionDeletes)
+  }
+}
+
 class GpuDeleteFilter(
     private val rapidsFileIO: IcebergFileIO,
     private val tableSchema: Schema,
@@ -57,11 +84,7 @@ class GpuDeleteFilter(
       .foreach(d => {
         throw new UnsupportedOperationException(s"Unsupported delete content: ${d.content()}")
       })
-    val (equalityDeletes, positionDeletes) =
-      deletes.partition(_.content() == FileContent.EQUALITY_DELETES)
-    require(!positionDeletes.exists(ShimUtils.isDeletionVector),
-      "Deletion vectors must be applied by the native Parquet reader")
-    (equalityDeletes, positionDeletes)
+    deletes.partition(_.content() == FileContent.EQUALITY_DELETES)
   }
 
   /**
@@ -71,8 +94,8 @@ class GpuDeleteFilter(
    * 1. Add all the fields in the [[GpuIcebergParquetReaderConf.expectedSchema]].
    * 2. Add all missing fields which are required by the equality delete files, but not in the
    * [[GpuIcebergParquetReaderConf.expectedSchema]], if any.
-   * 3. Add [[MetadataColumns.ROW_POSITION]] and [[MetadataColumns.FILE_PATH]] for legacy
-   * position-delete files, if not already projected.
+   * 3. Add [[MetadataColumns.ROW_POSITION]] and [[MetadataColumns.FILE_PATH]] if there are
+   * position delete files, and they are not in the schema.
    */
   lazy val requiredSchema: Schema = computeRequiredSchema()
 
@@ -343,6 +366,7 @@ object GpuDeleteFilter2 {
   private[iceberg] val POS_DELETE_SCHEMA: Schema = new Schema(
     MetadataColumns.DELETE_FILE_PATH,
     MetadataColumns.DELETE_FILE_POS)
+
 
   private[iceberg] def mergeColumn(
       batch: ColumnarBatch, srcColIdx: Int, destColIdx: Int)

@@ -29,6 +29,7 @@ import java.nio.file.Files
 
 import scala.collection.JavaConverters._
 
+import com.nvidia.spark.rapids.Arm.withResource
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path => HadoopPath}
 import org.apache.iceberg.{DeleteFile, FileFormat, FileMetadata, PartitionSpec}
@@ -56,11 +57,10 @@ class DeletionVectorReaderSuite extends AnyFunSuite {
         fileSize = fileBytes.length)
       val inputFile = HadoopInputFile.fromPath(new HadoopPath(path.toUri), new Configuration())
 
-      val deletionVector = ShimUtils.readDeletionVector(deleteFile, inputFile)
-      assert(deletionVector.serializedBitmap().sameElements(portableBitmap(targetBlob)))
-      assert(deletionVector.cardinality() == expectedPositions.size)
-      assert(deletionVector.countDeletedRows(
-        Array(0L, 1L << 40), Array(18, 4)) == expectedPositions.size)
+      withResource(ShimUtils.readDeletionVector(deleteFile, inputFile)) { deletionVector =>
+        assert(serializedBitmap(deletionVector).sameElements(portableBitmap(targetBlob)))
+        assert(deletionVector.cardinality() == expectedPositions.size)
+      }
     } finally {
       Files.deleteIfExists(path)
     }
@@ -80,11 +80,12 @@ class DeletionVectorReaderSuite extends AnyFunSuite {
         fileSize = blob.length)
       val inputFile = HadoopInputFile.fromPath(new HadoopPath(path.toUri), new Configuration())
 
-      val deletionVector = ShimUtils.readDeletionVector(deleteFile, inputFile)
-      assert(deletionVector.serializedBitmap().sameElements(portableBitmap(blob)))
-      assert(deletionVector.serializedBitmap().length == 8)
-      assert(deletionVector.cardinality() == 0)
-      assert(deletionVector.countDeletedRows(Array(0L), Array(100)) == 0)
+      withResource(ShimUtils.readDeletionVector(deleteFile, inputFile)) { deletionVector =>
+        val bitmap = serializedBitmap(deletionVector)
+        assert(bitmap.sameElements(portableBitmap(blob)))
+        assert(bitmap.length == 8)
+        assert(deletionVector.cardinality() == 0)
+      }
     } finally {
       Files.deleteIfExists(path)
     }
@@ -105,6 +106,14 @@ class DeletionVectorReaderSuite extends AnyFunSuite {
 
   private def portableBitmap(serializedIndex: Array[Byte]): Array[Byte] = {
     serializedIndex.slice(8, serializedIndex.length - 4)
+  }
+
+  private def serializedBitmap(deletionVector: IcebergDeletionVector): Array[Byte] = {
+    withResource(deletionVector.serializedBitmap()) { bitmap =>
+      val bytes = new Array[Byte](bitmap.getLength.toInt)
+      bitmap.getBytes(bytes, 0, 0, bytes.length)
+      bytes
+    }
   }
 
   private def deletionVectorFile(

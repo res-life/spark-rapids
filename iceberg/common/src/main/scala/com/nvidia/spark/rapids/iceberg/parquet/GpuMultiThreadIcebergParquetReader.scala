@@ -19,6 +19,8 @@ package com.nvidia.spark.rapids.iceberg.parquet
 import java.util.{Map => JMap}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 
+import scala.collection.JavaConverters._
+
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
@@ -26,12 +28,9 @@ import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
 import com.nvidia.spark.rapids.parquet.{CpuCompressionConfig, HostMemoryBuffersWithMetaData,
-  HostMemoryEmptyMetaData, MultiFileCloudParquetPartitionReader, ParquetDataBlock}
-import org.apache.parquet.hadoop.metadata.BlockMetaData
-import org.apache.parquet.schema.MessageType
+  MultiFileCloudParquetPartitionReader, ParquetDataBlock}
 
 import org.apache.spark.TaskContext
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.types.{LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -46,14 +45,20 @@ class GpuMultiThreadIcebergParquetReader(
   private val pathToFile = files.groupBy(_.urlEncodedPath).mapValues(_.toSeq)
   private val postProcessors: ConcurrentMap[IcebergPartitionedFile, GpuParquetReaderPostProcessor]
   = new ConcurrentHashMap[IcebergPartitionedFile, GpuParquetReaderPostProcessor](files.size)
+  private val deletionVectors: ConcurrentMap[IcebergPartitionedFile, IcebergDeletionVector] =
+    new ConcurrentHashMap[IcebergPartitionedFile, IcebergDeletionVector](files.size)
 
 
   private var inited = false
   private lazy val reader = createParquetReader()
 
   override def close(): Unit = {
-    if (inited) {
-      withResource(reader) { _ => }
+    try {
+      if (inited) {
+        withResource(reader) { _ => }
+      }
+    } finally {
+      deletionVectors.values().asScala.toSeq.safeClose()
     }
   }
 
@@ -72,7 +77,6 @@ class GpuMultiThreadIcebergParquetReader(
   private def createParquetReader() = {
     val sparkPartitionedFiles = files.map(_.sparkPartitionedFile).toArray
     val multiThreadConf = conf.threadConf.asInstanceOf[MultiThread]
-    val readerConf = conf
 
     inited = true
     new MultiFileCloudParquetPartitionReader(
@@ -117,7 +121,7 @@ class GpuMultiThreadIcebergParquetReader(
       override protected def readBufferToBatches(
           buffer: HostMemoryBuffersWithMetaData): Iterator[ColumnarBatch] = {
         val icebergFile = findIcebergFile(buffer.partitionedFile)
-        deletionVectorProvider(icebergFile).map { deletionVector =>
+        Option(deletionVectors.get(icebergFile)).map { deletionVector =>
           val hmbAndInfo = buffer.memBuffersAndSizes.head
           val hostBuffers = hmbAndInfo.hmbs
           val blocks = hmbAndInfo.blockMeta.map(_.asInstanceOf[ParquetDataBlock].dataBlock)
@@ -131,47 +135,22 @@ class GpuMultiThreadIcebergParquetReader(
               val hostBufs = hostBuffers.safeMap(_.getDataHostBuffer())
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
               val producer = GpuIcebergDeletionVector.makeProducer(
-                readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
-                readerConf.conf, readerConf.targetBatchSizeBytes, parseOptions, hostBufs,
-                readerConf.metrics, buffer.dateRebaseMode, buffer.timestampRebaseMode,
-                readerConf.caseSensitive,
+                GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
+                GpuMultiThreadIcebergParquetReader.this.conf.maxChunkedReaderMemoryUsageSizeBytes,
+                GpuMultiThreadIcebergParquetReader.this.conf.conf,
+                GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
+                parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,
+                buffer.dateRebaseMode, buffer.timestampRebaseMode,
+                GpuMultiThreadIcebergParquetReader.this.conf.caseSensitive,
                 useFieldId = false, buffer.readSchema, buffer.clippedSchema,
-                Array(buffer.partitionedFile), readerConf.parquetDebugDumpPrefix,
-                readerConf.parquetDebugDumpAlways, deletionVector, blocks)
+                Array(buffer.partitionedFile),
+                GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpPrefix,
+                GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpAlways,
+                deletionVector, blocks)
               CachedGpuBatchIterator(producer, columnTypes)
             }
           }
         }.getOrElse(super.readBufferToBatches(buffer))
-      }
-
-      override protected def newHMEmptyMetadataForChunks(
-          partitionedFile: PartitionedFile,
-          bufferSize: Long,
-          bytesRead: Long,
-          dateRebaseMode: DateTimeRebaseMode,
-          timestampRebaseMode: DateTimeRebaseMode,
-          hasInt96Timestamps: Boolean,
-          clippedSchema: MessageType,
-          readSchema: StructType,
-          numRows: Long,
-          blocks: collection.Seq[BlockMetaData]): HostMemoryEmptyMetaData = {
-        IcebergHostMemoryEmptyMetaData(partitionedFile, bufferSize, bytesRead,
-          dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
-          clippedSchema, readSchema, numRows, blocks)
-      }
-
-      override protected def computeNumRowsAlive(
-          totalNumRows: Long,
-          metadata: HostMemoryBuffersWithMetaDataBase): Int = {
-        val icebergFile = findIcebergFile(metadata.partitionedFile)
-        deletionVectorProvider(icebergFile).map { deletionVector =>
-          val blocks = metadata match {
-            case empty: IcebergHostMemoryEmptyMetaData => empty.blocks
-            case _ => metadata.memBuffersAndSizes.flatMap(_.blockMeta)
-              .map(_.asInstanceOf[ParquetDataBlock].dataBlock).toSeq
-          }
-          GpuIcebergDeletionVector.computeNumRowsAlive(totalNumRows, blocks, deletionVector)
-        }.getOrElse(Math.toIntExact(totalNumRows))
       }
 
       override def readBatches(
@@ -197,36 +176,29 @@ class GpuMultiThreadIcebergParquetReader(
     val icebergFile = findIcebergFile(f)
     val deleteFilter = deleteFilterProvider(icebergFile)
     val deletionVector = deletionVectorProvider(icebergFile)
+    closeOnExcept(deletionVector) { _ =>
+      val requiredSchema = deleteFilter.map(_.requiredSchema).getOrElse(conf.expectedSchema)
 
-    val requiredSchema = deleteFilter.map(_.requiredSchema).getOrElse(conf.expectedSchema)
+      val (filteredParquet, shadedFileReadSchema) =
+        super.filterParquetBlocks(icebergFile, requiredSchema, deletionVector.isDefined)
 
-    val (filteredParquet, shadedFileReadSchema) =
-      super.filterParquetBlocks(icebergFile, requiredSchema, deletionVector.isDefined)
+      val postProcessor = new GpuParquetReaderPostProcessor(
+        filteredParquet,
+        constantsProvider(icebergFile),
+        requiredSchema,
+        shadedFileReadSchema,
+        conf.metrics,
+        hasNativeRowIndex = deletionVector.isDefined)
 
-    val postProcessor = new GpuParquetReaderPostProcessor(
-      filteredParquet,
-      constantsProvider(icebergFile),
-      requiredSchema,
-      shadedFileReadSchema,
-      conf.metrics,
-      hasNativeRowIndex = deletionVector.isDefined)
-
-    val old = postProcessors.put(icebergFile, postProcessor)
-    require(old == null, "Iceberg parquet partition file post processor already exists!")
-    filteredParquet
+      val oldProcessor = postProcessors.put(icebergFile, postProcessor)
+      require(oldProcessor == null,
+        "Iceberg parquet partition file post processor already exists!")
+      deletionVector.foreach { dv =>
+        val oldVector = deletionVectors.put(icebergFile, dv)
+        require(oldVector == null,
+          "Iceberg parquet partition file deletion vector already exists!")
+      }
+      filteredParquet
+    }
   }
 }
-
-private case class IcebergHostMemoryEmptyMetaData(
-    override val partitionedFile: PartitionedFile,
-    bufferSize: Long,
-    override val bytesRead: Long,
-    dateRebaseMode: DateTimeRebaseMode,
-    timestampRebaseMode: DateTimeRebaseMode,
-    hasInt96Timestamps: Boolean,
-    clippedSchema: MessageType,
-    readSchema: StructType,
-    numRows: Long,
-    blocks: collection.Seq[BlockMetaData],
-    override val allPartValues: Option[Array[(Long, InternalRow)]] = None)
-  extends HostMemoryEmptyMetaData

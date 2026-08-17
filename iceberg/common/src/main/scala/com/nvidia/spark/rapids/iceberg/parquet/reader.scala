@@ -211,7 +211,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
       val initialProjection = projectSchema(fileSchema, requiredSchema)
       val (typeWithIds, fileReadSchema) =
-        if (hasDeletionVector && needsRowPosition && initialProjection._2.getFieldCount == 0 &&
+        if (hasDeletionVector && initialProjection._2.getFieldCount == 0 &&
             fileSchema.getFieldCount > 0) {
           val firstFileField = ParquetSchemaUtil.convert(fileSchema).columns().get(0)
           val projectionFields = requiredSchema.columns().asScala

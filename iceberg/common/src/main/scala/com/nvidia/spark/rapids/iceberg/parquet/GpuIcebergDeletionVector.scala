@@ -44,18 +44,6 @@ object GpuIcebergDeletionVector extends Logging {
     (offsets.toArray, rowCounts.map(_.toInt).toArray)
   }
 
-  def computeNumRowsAlive(
-      totalNumRows: Long,
-      blocks: collection.Seq[BlockMetaData],
-      deletionVector: IcebergDeletionVector): Int = {
-    val (offsets, rowCounts) = rowGroupMetadata(blocks)
-    val deletedRows = deletionVector.countDeletedRows(offsets, rowCounts)
-    require(deletedRows <= totalNumRows,
-      s"Deletion vector cardinality in selected row groups ($deletedRows) exceeds " +
-        s"selected row count ($totalNumRows)")
-    Math.toIntExact(totalNumRows - deletedRows)
-  }
-
   /**
    * Creates a cuDF table producer. The returned tables contain a leading INT64 file-row-index
    * column followed by the evolved Parquet columns.
@@ -98,11 +86,26 @@ object GpuIcebergDeletionVector extends Logging {
     } else {
       withResource(buffers) { _ =>
         withResource(dvInfo.serializedBitmap) { _ =>
-          val rawTable = decodeWithErrorContext(conf, buffers, metrics, splits,
-            debugDumpPrefix, debugDumpAlways) {
-            RmmRapidsRetryIterator.withRetryNoSplit[Table] {
-              DeletionVector.readParquet(opts, buffers, Array(dvInfo))
+          val rawTable = try {
+            NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
+              metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns {
+                RmmRapidsRetryIterator.withRetryNoSplit[Table] {
+                  DeletionVector.readParquet(opts, buffers, Array(dvInfo))
+                }
+              }
             }
+          } catch {
+            case e: Exception =>
+              val dumpMessage = debugDumpPrefix.map { prefix =>
+                if (!debugDumpAlways) {
+                  val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+                  s", data dumped to $path"
+                } else {
+                  ""
+                }
+              }.getOrElse("")
+              throw new IOException(s"Error when processing ${splits.mkString("; ")}" +
+                s"$dumpMessage", e)
           }
           new SingleGpuDataProducer(processTable(rawTable, readDataSchema, clippedParquetSchema,
             dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, splits,
@@ -115,47 +118,14 @@ object GpuIcebergDeletionVector extends Logging {
   private def makeInfo(
       deletionVector: IcebergDeletionVector,
       blocks: collection.Seq[BlockMetaData]): DeletionVector.DeletionVectorInfo = {
-    val bytes = deletionVector.serializedBitmap()
-    val bitmap = closeOnExcept(HostMemoryBuffer.allocate(bytes.length)) { buffer =>
-      buffer.setBytes(0, bytes, 0, bytes.length)
-      buffer
-    }
+    val bitmap = deletionVector.serializedBitmap()
     closeOnExcept(bitmap) { _ =>
       val (offsets, rowCounts) = rowGroupMetadata(blocks)
       new DeletionVector.DeletionVectorInfo(bitmap, false, offsets, rowCounts)
     }
   }
 
-  private def decodeWithMetrics[T](metrics: Map[String, GpuMetric])(decode: => T): T = {
-    NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
-      metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns(decode)
-    }
-  }
-
-  private def decodeWithErrorContext[T](
-      conf: Configuration,
-      buffers: Array[HostMemoryBuffer],
-      metrics: Map[String, GpuMetric],
-      splits: Array[PartitionedFile],
-      debugDumpPrefix: Option[String],
-      debugDumpAlways: Boolean)(decode: => T): T = {
-    try {
-      decodeWithMetrics(metrics)(decode)
-    } catch {
-      case e: Exception =>
-        val dumpMessage = debugDumpPrefix.map { prefix =>
-          if (!debugDumpAlways) {
-            val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
-            s", data dumped to $path"
-          } else {
-            ""
-          }
-        }.getOrElse("")
-        throw new IOException(s"Error when processing ${splits.mkString("; ")}$dumpMessage", e)
-    }
-  }
-
-  private def processTable(
+  private[parquet] def processTable(
       rawTable: Table,
       readDataSchema: StructType,
       clippedParquetSchema: MessageType,
@@ -192,39 +162,58 @@ object GpuIcebergDeletionVector extends Logging {
     }
   }
 
-  private class ChunkedDeletionVectorProducer(
-      maxChunkedReaderMemoryUsageSizeBytes: Long,
-      conf: Configuration,
-      chunkSizeByteLimit: Long,
-      opts: ParquetOptions,
-      buffers: Array[HostMemoryBuffer],
-      metrics: Map[String, GpuMetric],
-      dateRebaseMode: DateTimeRebaseMode,
-      timestampRebaseMode: DateTimeRebaseMode,
-      isSchemaCaseSensitive: Boolean,
-      useFieldId: Boolean,
-      readDataSchema: StructType,
-      clippedParquetSchema: MessageType,
-      splits: Array[PartitionedFile],
-      debugDumpPrefix: Option[String],
-      debugDumpAlways: Boolean,
-      dvInfo: DeletionVector.DeletionVectorInfo) extends GpuDataProducer[Table] {
-    private val reader = DeletionVector.newParquetChunkedReader(
-      chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, Array(dvInfo))
+}
 
-    override def hasNext: Boolean = reader.hasNext
+private class ChunkedDeletionVectorProducer(
+    maxChunkedReaderMemoryUsageSizeBytes: Long,
+    conf: Configuration,
+    chunkSizeByteLimit: Long,
+    opts: ParquetOptions,
+    buffers: Array[HostMemoryBuffer],
+    metrics: Map[String, GpuMetric],
+    dateRebaseMode: DateTimeRebaseMode,
+    timestampRebaseMode: DateTimeRebaseMode,
+    isSchemaCaseSensitive: Boolean,
+    useFieldId: Boolean,
+    readDataSchema: StructType,
+    clippedParquetSchema: MessageType,
+    splits: Array[PartitionedFile],
+    debugDumpPrefix: Option[String],
+    debugDumpAlways: Boolean,
+    dvInfo: DeletionVector.DeletionVectorInfo) extends GpuDataProducer[Table] {
+  private val reader = DeletionVector.newParquetChunkedReader(
+    chunkSizeByteLimit, maxChunkedReaderMemoryUsageSizeBytes, opts, buffers, Array(dvInfo))
 
-    override def next: Table = {
-      val rawTable = decodeWithErrorContext(conf, buffers, metrics, splits,
-        debugDumpPrefix, debugDumpAlways) {
-        reader.readChunk()
+  override def hasNext: Boolean = reader.hasNext
+
+  override def next: Table = {
+    val rawTable = decodeWithErrorContext {
+      reader.readChunk()
+    }
+    GpuIcebergDeletionVector.processTable(rawTable, readDataSchema, clippedParquetSchema,
+      dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, splits, metrics)
+  }
+
+  private def decodeWithErrorContext[T](decode: => T): T = {
+    try {
+      NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
+        metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns(decode)
       }
-      processTable(rawTable, readDataSchema, clippedParquetSchema, dateRebaseMode,
-        timestampRebaseMode, isSchemaCaseSensitive, useFieldId, splits, metrics)
+    } catch {
+      case e: Exception =>
+        val dumpMessage = debugDumpPrefix.map { prefix =>
+          if (!debugDumpAlways) {
+            val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+            s", data dumped to $path"
+          } else {
+            ""
+          }
+        }.getOrElse("")
+        throw new IOException(s"Error when processing ${splits.mkString("; ")}$dumpMessage", e)
     }
+  }
 
-    override def close(): Unit = {
-      (Seq(reader) ++ buffers ++ Seq(dvInfo.serializedBitmap)).safeClose()
-    }
+  override def close(): Unit = {
+    (Seq(reader) ++ buffers ++ Seq(dvInfo.serializedBitmap)).safeClose()
   }
 }

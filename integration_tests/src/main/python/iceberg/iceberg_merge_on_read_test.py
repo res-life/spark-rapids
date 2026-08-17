@@ -101,43 +101,6 @@ def test_iceberg_v2_position_delete(spark_tmp_table_factory, reader_type):
 
 @iceberg
 @ignore_order(local=True)
-@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.parametrize('reader_type', rapids_reader_types)
-@validate_execs_in_gpu_plan('GpuBatchScanExec')
-def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
-    table_name = get_full_table_name(spark_tmp_table_factory)
-    create_iceberg_table(
-        table_name,
-        table_prop={
-            'format-version': '3',
-            'write.delete.mode': 'merge-on-read',
-        },
-        df_gen=lambda spark: spark.range(256).selectExpr(
-            'id', 'CAST(id % 11 AS INT) AS value'))
-
-    def setup_deletion_vector(spark):
-        spark.range(256).selectExpr(
-            'id', 'CAST(id % 11 AS INT) AS value').writeTo(table_name).append()
-        spark.sql(f'DELETE FROM {table_name} WHERE id % 5 = 0')
-        spark.sql(f'REFRESH TABLE {table_name}')
-        delete_formats = {
-            row.file_format for row in
-            spark.sql(f'SELECT file_format FROM {table_name}.delete_files').collect()
-        }
-        assert 'PUFFIN' in delete_formats, \
-            f'Expected a Puffin deletion vector, found delete formats {delete_formats}'
-
-    with_cpu_session(setup_deletion_vector)
-
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(f'SELECT id, value FROM {table_name}'),
-        conf={
-            'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-            'spark.rapids.sql.format.parquet.reader.type': reader_type,
-        })
-
-@iceberg
-@ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 # This requires setting a write data path for data files, which is hard to confirm with aws
 # s3tables.
@@ -162,12 +125,14 @@ def test_iceberg_v2_position_delete_with_url_encoded_path(spark_tmp_table_factor
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.xfail(reason = "https://github.com/NVIDIA/spark-rapids/issues/12885")
 # When using this datagen, local run is 784 rows
 @pytest.mark.datagen_overrides(seed=1749483297, permanent=True,
                                reason="Debug https://github.com/NVIDIA/spark-rapids/issues/12885")
-def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
-                                  register_iceberg_add_eq_deletes_udf):
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
+                               register_iceberg_add_eq_deletes_udf):
     # We use a fixed seed here to ensure that data deletion vector has been generated
     table_name = setup_base_iceberg_table(spark_tmp_table_factory)
     # Position deletes
@@ -193,18 +158,44 @@ def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
                                                 spark_tmp_path),
                   "No equation deletes generated")
 
+    # Upgrade only after creating v2 position deletes, then create a v3 deletion vector. This
+    # leaves equality deletes, legacy position deletes, and deletion vectors in the same table.
+    def add_deletion_vector(spark):
+        spark.sql(
+            f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version' = '3')")
+        spark.sql(f"DELETE FROM {table_name} where _c1 >= 0 and _c2 % 7 = 0")
+        spark.sql(f"REFRESH TABLE {table_name}")
+        delete_files = {
+            (row.content, row.file_format) for row in
+            spark.sql(
+                f"SELECT content, file_format FROM {table_name}.delete_files").collect()
+        }
+        expected_delete_files = {
+            (1, 'PARQUET'),  # Legacy position delete
+            (2, 'PARQUET'),  # Equality delete
+            (1, 'PUFFIN'),   # Deletion vector
+        }
+        assert expected_delete_files.issubset(delete_files), \
+            f"Expected mixed delete files {expected_delete_files}, found {delete_files}"
+
+    with_cpu_session(add_deletion_vector)
+
+    read_conf = {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+    }
 
     # Trigger a count operation to verify that it works
     gpu_count = with_gpu_session(lambda spark: spark.table(table_name).count(),
-                     conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+                                 conf=read_conf)
     cpu_count = with_cpu_session(lambda spark: spark.table(table_name).count(),
-                                 conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+                                 conf=read_conf)
     assert gpu_count == cpu_count, f"Result count diverges, cpu: {cpu_count}, gpu: {gpu_count}"
     logging.info(f"Count is {cpu_count}")
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(table_name),
-        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+        conf=read_conf)
 
 
 def _normalize_position_delete_df(df):

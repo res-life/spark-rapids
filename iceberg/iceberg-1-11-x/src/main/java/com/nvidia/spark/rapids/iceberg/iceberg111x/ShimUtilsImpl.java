@@ -39,7 +39,6 @@ import org.apache.iceberg.util.PartitionUtil;
 import org.apache.spark.sql.connector.read.Scan;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -95,37 +94,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
         }
 
         PositionDeleteIndex index = PositionDeleteIndex.deserialize(bytes, deleteFile);
-        long cardinality = index.cardinality();
-        byte[] serializedBitmap = Arrays.copyOfRange(bytes, 8, bytes.length - 4);
-        return new IcebergDeletionVector() {
-            @Override
-            public byte[] serializedBitmap() {
-                return serializedBitmap;
-            }
-
-            @Override
-            public long cardinality() {
-                return cardinality;
-            }
-
-            @Override
-            public long countDeletedRows(long[] rowGroupOffsets, int[] rowGroupNumRows) {
-                if (rowGroupOffsets.length != rowGroupNumRows.length) {
-                    throw new IllegalArgumentException("Mismatched row-group metadata lengths");
-                }
-                long[] count = new long[] {0L};
-                index.forEach(position -> {
-                    for (int i = 0; i < rowGroupOffsets.length; i++) {
-                        long start = rowGroupOffsets[i];
-                        if (position >= start && position - start < rowGroupNumRows[i]) {
-                            count[0] += 1L;
-                            break;
-                        }
-                    }
-                });
-                return count[0];
-            }
-        };
+        return new IcebergDeletionVector(bytes, 8, bytes.length - 12, index.cardinality());
     }
 
     @Override
