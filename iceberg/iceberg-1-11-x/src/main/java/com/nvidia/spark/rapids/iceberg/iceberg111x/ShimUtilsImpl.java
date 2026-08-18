@@ -20,13 +20,13 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
+import com.nvidia.spark.rapids.iceberg.IcebergDeletionVectorReader;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
 import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.IOUtil;
-import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions;
@@ -61,40 +61,12 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public String referencedDataFile(DeleteFile deleteFile) {
-        return deleteFile.referencedDataFile();
-    }
-
-    @Override
-    public Long contentOffset(DeleteFile deleteFile) {
-        return deleteFile.contentOffset();
-    }
-
-    @Override
-    public Long contentSizeInBytes(DeleteFile deleteFile) {
-        return deleteFile.contentSizeInBytes();
-    }
-
-    @Override
-    public IcebergDeletionVector readDeletionVector(DeleteFile deleteFile, InputFile inputFile)
+    public IcebergDeletionVector readDeletionVector(
+            DeleteFile deleteFile, RapidsInputFile inputFile)
             throws IOException {
-        Long offset = deleteFile.contentOffset();
-        Long size = deleteFile.contentSizeInBytes();
-        if (offset == null || offset < 0) {
-            throw new IllegalArgumentException("Invalid deletion vector offset: " + offset);
-        }
-        if (size == null || size < 20 || size > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("Invalid deletion vector size: " + size);
-        }
-
-        byte[] bytes = new byte[size.intValue()];
-        try (org.apache.iceberg.io.SeekableInputStream stream = inputFile.newStream()) {
-            stream.seek(offset);
-            IOUtil.readFully(stream, bytes, 0, bytes.length);
-        }
-
-        PositionDeleteIndex index = PositionDeleteIndex.deserialize(bytes, deleteFile);
-        return new IcebergDeletionVector(bytes, 8, bytes.length - 12, index.cardinality());
+        return IcebergDeletionVectorReader.read(
+                inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
+                bytes -> PositionDeleteIndex.deserialize(bytes, deleteFile).cardinality());
     }
 
     @Override

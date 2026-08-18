@@ -39,13 +39,21 @@ import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
 import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
-object GpuDeleteFilter {
-  case class DeleteFileInfo(
-      deletionVector: Option[DeleteFile],
-      postReadDeletes: Seq[DeleteFile])
+/** Delete files split by the phase that applies them. */
+case class GpuDeleteFileInfo(
+    deletionVector: Option[DeleteFile],
+    postReadDeletes: Seq[DeleteFile])
 
-  /** Gives a deletion vector precedence over legacy position-delete files. */
-  def splitDeleteFiles(deletes: Seq[DeleteFile]): DeleteFileInfo = {
+object GpuDeleteFileInfo {
+  /**
+   * Iceberg scan planning produces one of two valid combinations for a data file:
+   *  - no deletion vector, with optional position and equality deletes; or
+   *  - one deletion vector, no position deletes, and optional equality deletes.
+   *
+   * The precedence below also avoids applying legacy position deletes twice if a task ever
+   * contains both representations.
+   */
+  def apply(deletes: Seq[DeleteFile]): GpuDeleteFileInfo = {
     val equalityDeletes = new ArrayBuffer[DeleteFile]
     val positionDeletes = new ArrayBuffer[DeleteFile]
     var deletionVector: Option[DeleteFile] = None
@@ -62,7 +70,7 @@ object GpuDeleteFilter {
     }
 
     val effectivePositionDeletes = if (deletionVector.isDefined) Seq.empty else positionDeletes
-    DeleteFileInfo(deletionVector, equalityDeletes.toSeq ++ effectivePositionDeletes)
+    new GpuDeleteFileInfo(deletionVector, equalityDeletes.toSeq ++ effectivePositionDeletes)
   }
 }
 

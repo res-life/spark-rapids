@@ -1051,6 +1051,50 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("native deletion-vector row index is dropped through the root action tree") {
+    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+    import com.nvidia.spark.rapids.GpuColumnVector
+    import org.apache.spark.sql.types.LongType
+    import org.apache.spark.sql.vectorized.ColumnarBatch
+
+    val dataFieldId = 1
+    val dataField = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
+      .id(dataFieldId)
+      .named("data")
+    val parquetSchema = new ShadedMessageType("test", Seq[ShadedType](dataField).asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(dataFieldId, "data", Types.LongType.get()))
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      new JHashMap[Integer, Any](),
+      expectedSchema,
+      shadedSchema,
+      Map.empty,
+      hasNativeRowIndex = true)
+
+    assert(processor.displayActionPlan() ==
+      "ProcessStruct\n  data (input[1]):\n    PassThrough")
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val data = closeOnExcept(CudfColumnVector.fromLongs(10L, 12L, 15L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions, data), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 1)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(10L, 12L, 15L))
+      }
+    }
+  }
+
   test("Constant struct with required children does not throw") {
     val structFieldId = 1
     val fieldAId = 2

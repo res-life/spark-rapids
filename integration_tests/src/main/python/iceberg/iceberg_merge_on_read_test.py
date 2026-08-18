@@ -125,14 +125,12 @@ def test_iceberg_v2_position_delete_with_url_encoded_path(spark_tmp_table_factor
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
-@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.xfail(reason = "https://github.com/NVIDIA/spark-rapids/issues/12885")
 # When using this datagen, local run is 784 rows
 @pytest.mark.datagen_overrides(seed=1749483297, permanent=True,
                                reason="Debug https://github.com/NVIDIA/spark-rapids/issues/12885")
-@validate_execs_in_gpu_plan('GpuBatchScanExec')
-def test_iceberg_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
-                               register_iceberg_add_eq_deletes_udf):
+def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
+                                  register_iceberg_add_eq_deletes_udf):
     # We use a fixed seed here to ensure that data deletion vector has been generated
     table_name = setup_base_iceberg_table(spark_tmp_table_factory)
     # Position deletes
@@ -158,8 +156,49 @@ def test_iceberg_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_t
                                                 spark_tmp_path),
                   "No equation deletes generated")
 
-    # Upgrade only after creating v2 position deletes, then create a v3 deletion vector. This
-    # leaves equality deletes, legacy position deletes, and deletion vectors in the same table.
+    # Trigger a count operation to verify that it works
+    gpu_count = with_gpu_session(lambda spark: spark.table(table_name).count(),
+                     conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    cpu_count = with_cpu_session(lambda spark: spark.table(table_name).count(),
+                                 conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+    assert gpu_count == cpu_count, f"Result count diverges, cpu: {cpu_count}, gpu: {gpu_count}"
+    logging.info(f"Count is {cpu_count}")
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.table(table_name),
+        conf={'spark.rapids.sql.format.parquet.reader.type': reader_type})
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.xfail(reason = "https://github.com/NVIDIA/spark-rapids/issues/12885")
+# When using this datagen, local run is 784 rows
+@pytest.mark.datagen_overrides(seed=1749483297, permanent=True,
+                               reason="Debug https://github.com/NVIDIA/spark-rapids/issues/12885")
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_v3_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
+                                  register_iceberg_add_eq_deletes_udf):
+    table_name = setup_base_iceberg_table(spark_tmp_table_factory)
+    _change_table(table_name,
+                  lambda spark: spark.sql(f"DELETE FROM {table_name} where _c1 < 0"),
+                  "No position deletes generated")
+    _change_table(table_name,
+                  lambda spark: _add_eq_deletes(spark, ["_c0"], 170, table_name, spark_tmp_path),
+                  "No equation deletes generated")
+    _change_table(table_name,
+                  lambda spark: _add_eq_deletes(spark, ["_c2", "_c3", "_c6"], 140, table_name,
+                                                spark_tmp_path),
+                  "No equation deletes generated")
+    _change_table(table_name,
+                  lambda spark: _add_eq_deletes(spark, ["_c1", "_c2"], 110, table_name,
+                                                spark_tmp_path),
+                  "No equation deletes generated")
+
+    # Upgrade after creating v2 position deletes, then create a v3 deletion vector. This leaves
+    # equality deletes, legacy position deletes, and deletion vectors in the same table.
     def add_deletion_vector(spark):
         spark.sql(
             f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version' = '3')")
@@ -185,7 +224,6 @@ def test_iceberg_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_t
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
     }
 
-    # Trigger a count operation to verify that it works
     gpu_count = with_gpu_session(lambda spark: spark.table(table_name).count(),
                                  conf=read_conf)
     cpu_count = with_cpu_session(lambda spark: spark.table(table_name).count(),

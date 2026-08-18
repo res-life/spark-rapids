@@ -211,6 +211,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null
       val initialProjection = projectSchema(fileSchema, requiredSchema)
       val (typeWithIds, fileReadSchema) =
+        // cuDF's deletion-vector Parquet path needs at least one physical data column. Force one
+        // into metadata-only and count projections so native row-index filtering can determine
+        // the surviving row count; the post-processor drops it from the requested output.
         if (hasDeletionVector && initialProjection._2.getFieldCount == 0 &&
             fileSchema.getFieldCount > 0) {
           val firstFileField = ParquetSchemaUtil.convert(fileSchema).columns().get(0)

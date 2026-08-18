@@ -26,6 +26,7 @@ import ai.rapids.cudf.HostMemoryBuffer;
  */
 public final class IcebergDeletionVector implements AutoCloseable {
     private final HostMemoryBuffer serializedBitmap;
+    private final long serializedSizeInBytes;
     private final long cardinality;
 
     public IcebergDeletionVector(
@@ -41,15 +42,23 @@ public final class IcebergDeletionVector implements AutoCloseable {
             throw e;
         }
         this.serializedBitmap = bitmap;
+        this.serializedSizeInBytes = serializedIndex.length;
         this.cardinality = cardinality;
     }
 
     /**
-     * Returns a new reference to the portable serialized 64-bit Roaring bitmap expected by cuDF.
+     * Returns the portable serialized 64-bit Roaring bitmap expected by cuDF.
+     *
+     * <p>The returned buffer is owned by this object. Callers that retain it must increment its
+     * reference count.
      */
     public HostMemoryBuffer serializedBitmap() {
-        serializedBitmap.incRefCount();
         return serializedBitmap;
+    }
+
+    /** Returns the full serialized deletion-vector size, including its header and checksum. */
+    public long serializedSizeInBytes() {
+        return serializedSizeInBytes;
     }
 
     /** Returns the number of positions in the deletion vector. */

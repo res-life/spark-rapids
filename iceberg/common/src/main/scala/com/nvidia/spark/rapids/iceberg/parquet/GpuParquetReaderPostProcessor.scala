@@ -667,33 +667,43 @@ class GpuParquetReaderPostProcessor(
   // Convert shaded parquet schema to Iceberg schema for comparison
   private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
 
-  // Build field ID to batch index mapping using the UNSHADED schema from parquetInfo.
-  // The parquet reader returns top-level columns in the physical file-read order captured by
-  // parquetInfo.schema, which can differ from the requested Iceberg schema order.
-  // Map field ID to that batch position.
-  private lazy val fieldIdToBatchIndex: Map[Int, Int] = {
-    (0 until fileReadSchema.getFieldCount).flatMap { i =>
-      val batchIndex = if (hasNativeRowIndex) i + 1 else i
-      Option(fileReadSchema.getType(i).getId).map(id => id.intValue() -> batchIndex)
-    }.toMap
-  }
-
   // Pre-compute action tree by visiting expected schema with file schema as partner
   private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {
     val visitor = new ActionBuildingVisitor(idToConstant)
     val accessors = new FileSchemaAccessors()
-    SchemaWithPartnerVisitor.visit(
+    val action = SchemaWithPartnerVisitor.visit(
       expectedSchema.asStruct(),
       fileIcebergSchema.asStruct(),
       visitor,
       accessors)
+
+    if (hasNativeRowIndex) {
+      action match {
+        case PassThrough =>
+          // The native row index is input[0]. Select only the requested file columns, which
+          // makes dropping an unrequested row index part of the normal root action tree.
+          ProcessStruct(
+            Seq.fill(expectedFields.size)(PassThrough),
+            expectedFields.indices.map(index => Some(index + 1)))
+        case ProcessStruct(actions, inputIndices) =>
+          val shiftedInputIndices = expectedFields.zip(inputIndices).map {
+            case (field, _) if field.fieldId() == MetadataColumns.ROW_POSITION.fieldId() =>
+              Some(0)
+            case (_, inputIndex) => inputIndex.map(_ + 1)
+          }.toSeq
+          ProcessStruct(actions, shiftedInputIndices)
+        case other => other
+      }
+    } else {
+      action
+    }
   }
 
   private lazy val expectedFields = expectedSchema.asStruct().fields().asScala
   private lazy val expectedSparkTypes = expectedFields.map(f => SparkSchemaUtil.convert(f.`type`()))
 
   // Check if we can pass through the entire batch without any processing.
-  private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough && !hasNativeRowIndex
+  private lazy val canPassThroughBatch: Boolean = rootAction == PassThrough
 
   // Only constants that synthesize projected fields need to participate in combining checks.
   // If a projected field is still read from the parquet file, differing constant-map values for
@@ -779,14 +789,10 @@ class GpuParquetReaderPostProcessor(
         withResource(scb.getColumnarBatch()) { batch =>
           currentNumRows = batch.numRows()
 
-          val fields = expectedFields
-
           // Execute actions on batch (rootAction must be ProcessStruct here since
           // PassThrough is handled by canPassThroughBatch early return)
-          val fieldActions = rootAction match {
-            case ProcessStruct(actions, _) => actions
-            case PassThrough if hasNativeRowIndex =>
-              Seq.fill(expectedFields.size)(PassThrough)
+          val (fieldActions, inputIndices) = rootAction match {
+            case ProcessStruct(actions, indices) => (actions, indices)
             case _ => throw new IllegalStateException(
               s"Root action must be ProcessStruct, but got: ${rootAction.getClass.getSimpleName}")
           }
@@ -794,15 +800,11 @@ class GpuParquetReaderPostProcessor(
           // Root-level columns are not wrapped in a single struct column, so we cannot execute
           // ProcessStruct directly here. Instead we run each field action against the matching
           // batch column (or None for generated fields) and assemble the output batch ourselves.
-          val columns: Seq[ColumnVector] = fieldActions.zip(fields).zipWithIndex.safeMap {
-            case ((action, field), idx) =>
-              val batchIdx = if (hasNativeRowIndex &&
-                  field.fieldId() == MetadataColumns.ROW_POSITION.fieldId()) {
-                Some(0)
-              } else {
-                fieldIdToBatchIndex.get(field.fieldId())
-              }
-              val col = batchIdx.map(i => batch.column(i).asInstanceOf[GpuColumnVector].getBase)
+          val columns: Seq[ColumnVector] =
+            fieldActions.zip(inputIndices).zipWithIndex.safeMap {
+            case ((action, inputIndex), idx) =>
+              val col = inputIndex.map(i =>
+                batch.column(i).asInstanceOf[GpuColumnVector].getBase)
               val ctx = new ColumnActionContext(this, col, currentNumRows)
               val result = action.execute(ctx)
               closeOnExcept(result) { _ =>

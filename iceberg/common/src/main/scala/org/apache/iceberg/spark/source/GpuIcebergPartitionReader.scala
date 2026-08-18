@@ -23,7 +23,8 @@ import com.nvidia.spark.rapids.MapUtil.toMapStrict
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.ShimUtils
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
-import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFilter}
+import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileInfo,
+  GpuDeleteFilter}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg._
 import org.apache.iceberg.encryption.EncryptedFiles
@@ -47,12 +48,12 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
   private lazy val (inputFiles, tasks) = collectFiles()
   private lazy val deleteInfoMap =
     tasks.map { case (file, scanTask) =>
-      file -> GpuDeleteFilter.splitDeleteFiles(scanTask.deletes().asScala.toSeq)
+      file -> GpuDeleteFileInfo(scanTask.deletes().asScala.toSeq)
     }
   private lazy val deleteLoader = new DefaultDeleteLoader(rapidsFileIO, inputFiles, conf)
   private def deletionVectorProvider(file: IcebergPartitionedFile) = {
     deleteInfoMap(file).deletionVector.map { delete =>
-      deleteLoader.loadDeletionVector(delete, ShimUtils.locationOf(tasks(file).file()))
+      deleteLoader.loadDeletionVector(delete)
     }
   }
   private lazy val gpuDeleteFiterMap: Map[IcebergPartitionedFile, Option[GpuDeleteFilter]] =

@@ -45,33 +45,20 @@ class DefaultDeleteLoader(
     private val inputFiles: Map[String, IcebergInputFile],
     private val parquetConf: GpuIcebergParquetReaderConf) extends GpuDeleteLoader {
 
-  def loadDeletionVector(delete: DeleteFile,
-      dataFilePath: String): IcebergDeletionVector = {
+  def loadDeletionVector(delete: DeleteFile): IcebergDeletionVector = {
     require(ShimUtils.isDeletionVector(delete),
       s"Expected a Puffin deletion vector, found ${delete.format()}")
-
-    val referencedDataFile = ShimUtils.referencedDataFile(delete)
-    require(referencedDataFile != null,
-      s"Deletion vector ${locationOf(delete)} has no referenced data file")
-    require(dataFilePath == referencedDataFile,
-      s"Deletion vector ${locationOf(delete)} references $referencedDataFile, not $dataFilePath")
-
-    val contentOffset = ShimUtils.contentOffset(delete)
-    val contentSize = ShimUtils.contentSizeInBytes(delete)
-    require(contentOffset != null && contentOffset >= 0,
-      s"Deletion vector ${locationOf(delete)} has invalid offset $contentOffset")
-    require(contentSize != null && contentSize >= 0 && contentSize <= Int.MaxValue,
-      s"Deletion vector ${locationOf(delete)} has invalid size $contentSize")
 
     val inputFile = inputFiles.getOrElse(locationOf(delete),
       throw new IllegalArgumentException(
         s"No decrypted input file was provided for deletion vector ${locationOf(delete)}"))
     val decodeTime = parquetConf.metrics.getOrElse(ICEBERG_DV_DECODE_TIME, NoopMetric)
     val deletionVector = decodeTime.ns {
-      ShimUtils.readDeletionVector(delete, inputFile.getDelegate)
+      ShimUtils.readDeletionVector(delete, inputFile)
     }
 
-    parquetConf.metrics.getOrElse(ICEBERG_DV_BYTES, NoopMetric) += contentSize.longValue()
+    parquetConf.metrics.getOrElse(ICEBERG_DV_BYTES, NoopMetric) +=
+      deletionVector.serializedSizeInBytes()
     parquetConf.metrics.getOrElse(ICEBERG_DV_POSITIONS, NoopMetric) +=
       deletionVector.cardinality()
     deletionVector

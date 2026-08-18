@@ -119,6 +119,7 @@ object GpuIcebergDeletionVector extends Logging {
       deletionVector: IcebergDeletionVector,
       blocks: collection.Seq[BlockMetaData]): DeletionVector.DeletionVectorInfo = {
     val bitmap = deletionVector.serializedBitmap()
+    bitmap.incRefCount()
     closeOnExcept(bitmap) { _ =>
       val (offsets, rowCounts) = rowGroupMetadata(blocks)
       new DeletionVector.DeletionVectorInfo(bitmap, false, offsets, rowCounts)
