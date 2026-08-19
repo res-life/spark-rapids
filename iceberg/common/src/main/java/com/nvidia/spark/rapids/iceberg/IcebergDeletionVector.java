@@ -22,10 +22,9 @@ import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.IOUtil;
 
 import java.io.IOException;
-import java.util.function.ToLongFunction;
 
 /**
- * A validated Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
+ * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
  *
  * <p>The serialized bytes use the portable 64-bit Roaring format expected by cuDF. This object
  * owns its host buffer and must be closed after all borrowed references have been released.
@@ -52,12 +51,12 @@ public final class IcebergDeletionVector implements AutoCloseable {
         this.cardinality = cardinality;
     }
 
-    /** Reads and validates an Iceberg deletion-vector byte range. */
+    /** Reads an Iceberg deletion-vector byte range. */
     public static IcebergDeletionVector read(
             RapidsInputFile inputFile,
             Long offset,
             Long size,
-            ToLongFunction<byte[]> cardinality) throws IOException {
+            long cardinality) throws IOException {
         if (offset == null || offset < 0) {
             throw new IllegalArgumentException("Invalid deletion vector offset: " + offset);
         }
@@ -72,7 +71,7 @@ public final class IcebergDeletionVector implements AutoCloseable {
         }
 
         return new IcebergDeletionVector(
-                bytes, 8, bytes.length - 12, cardinality.applyAsLong(bytes));
+                bytes, 8, bytes.length - 12, cardinality);
     }
 
     /**

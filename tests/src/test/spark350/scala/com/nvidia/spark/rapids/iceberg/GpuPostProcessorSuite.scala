@@ -1027,9 +1027,8 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      shadedSchema,
-      Map.empty,
-      hasNativeRowIndex = true)
+      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      Map.empty)
 
     val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
       GpuColumnVector.from(column, LongType)
@@ -1071,9 +1070,8 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       parquetInfo,
       new JHashMap[Integer, Any](),
       expectedSchema,
-      shadedSchema,
-      Map.empty,
-      hasNativeRowIndex = true)
+      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      Map.empty)
 
     assert(processor.displayActionPlan() ==
       "ProcessStruct\n  data (input[1]):\n    PassThrough")

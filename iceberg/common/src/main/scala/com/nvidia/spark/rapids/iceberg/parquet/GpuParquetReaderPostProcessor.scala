@@ -36,11 +36,7 @@ import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.schema.SchemaWithPartnerVisitor
-import org.apache.iceberg.shaded.org.apache.parquet.schema.{
-  MessageType => ShadedMessageType, Types => ShadedTypes}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{
-  PrimitiveTypeName => ShadedPrimitiveTypeName}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.Type.{Repetition => ShadedRepetition}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
 import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.types.{Type, Types}
 
@@ -627,16 +623,13 @@ private class FileSchemaAccessors
  * @param idToConstant          Constant fields.
  * @param expectedSchema        Iceberg schema required by reader.
  * @param shadedFileReadSchema  Shaded parquet file read schema (to avoid conversion overhead).
- * @param hasNativeRowIndex     True when the cuDF deletion-vector reader prepends its file-global
- *                              row-index column to every output batch.
  */
 class GpuParquetReaderPostProcessor(
     private[iceberg] val parquetInfo: ParquetFileInfoWithBlockMeta,
     private[iceberg] val idToConstant: JMap[Integer, _],
     private[iceberg] val expectedSchema: Schema,
     shadedFileReadSchema: ShadedMessageType,
-    metrics: Map[String, com.nvidia.spark.rapids.GpuMetric],
-    hasNativeRowIndex: Boolean = false
+    metrics: Map[String, com.nvidia.spark.rapids.GpuMetric]
 ) {
   private val icebergBuildActionTimeMetricName = "icebergBuildActionTime"
   private val icebergPostProcessTimeMetricName = "icebergPostProcessTime"
@@ -664,23 +657,8 @@ class GpuParquetReaderPostProcessor(
   // Top-level batch row count for actions that generate a column without an input column.
   private[iceberg] var currentNumRows = 0
 
-  // The cuDF deletion-vector reader prepends a file-global row index to its output. Add that
-  // column to the read schema so the standard field-ID-based action builder can select `_pos`
-  // when requested and drop it otherwise.
-  private lazy val actionFileReadSchema = if (hasNativeRowIndex) {
-    val rowPosition = ShadedTypes
-      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.REQUIRED)
-      .id(MetadataColumns.ROW_POSITION.fieldId())
-      .named(MetadataColumns.ROW_POSITION.name())
-    new ShadedMessageType(
-      shadedFileReadSchema.getName,
-      (rowPosition +: shadedFileReadSchema.getFields.asScala).asJava)
-  } else {
-    shadedFileReadSchema
-  }
-
   // Convert shaded parquet schema to Iceberg schema for comparison
-  private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(actionFileReadSchema)
+  private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
 
   // Pre-compute action tree by visiting expected schema with file schema as partner
   private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {

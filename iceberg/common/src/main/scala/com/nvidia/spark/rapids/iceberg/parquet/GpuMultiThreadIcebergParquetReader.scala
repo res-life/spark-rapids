@@ -187,8 +187,7 @@ class GpuMultiThreadIcebergParquetReader(
         constantsProvider(icebergFile),
         requiredSchema,
         shadedFileReadSchema,
-        conf.metrics,
-        hasNativeRowIndex = deletionVector.isDefined)
+        conf.metrics)
 
       val oldProcessor = postProcessors.put(icebergFile, postProcessor)
       require(oldProcessor == null,

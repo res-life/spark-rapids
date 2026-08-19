@@ -24,7 +24,6 @@ import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.*;
-import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.StorageCredential;
 import org.apache.iceberg.io.SupportsStorageCredentials;
@@ -65,7 +64,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
             throws IOException {
         return IcebergDeletionVector.read(
                 inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
-                bytes -> PositionDeleteIndex.deserialize(bytes, deleteFile).cardinality());
+                deleteFile.recordCount());
     }
 
     @Override

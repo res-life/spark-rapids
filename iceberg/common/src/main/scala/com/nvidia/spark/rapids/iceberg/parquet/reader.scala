@@ -40,7 +40,11 @@ import org.apache.iceberg.parquet._
 import org.apache.iceberg.shaded.org.apache.parquet.{HadoopReadOptions, ParquetReadOptions}
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaData => ShadedBlockMetaData}
-import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{
+  MessageType => ShadedMessageType, Types => ShadedTypes}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{
+  PrimitiveTypeName => ShadedPrimitiveTypeName}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.Type.{Repetition => ShadedRepetition}
 import org.apache.parquet.hadoop.metadata.BlockMetaData
 
 import org.apache.spark.internal.Logging
@@ -291,8 +295,13 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         hasInt96Timestamps = true,
         blockFirstRowIndices,
       )
-      
-      (parquetFileInfo, fileReadSchema)
+
+      val postProcessorReadSchema = if (hasDeletionVector) {
+        GpuIcebergParquetReader.withNativeRowIndex(fileReadSchema)
+      } else {
+        fileReadSchema
+      }
+      (parquetFileInfo, postProcessorReadSchema)
     }
   }
 }
@@ -302,6 +311,21 @@ object GpuIcebergParquetReader {
     "parquet.read.filter",
     "parquet.private.read.filter.predicate",
     "parquet.read.support.class")
+
+  /**
+   * Adds the leading file-global row index emitted by the cuDF deletion-vector reader to the
+   * schema consumed by the Iceberg post-processor.
+   */
+  private[iceberg] def withNativeRowIndex(
+      fileReadSchema: ShadedMessageType): ShadedMessageType = {
+    val rowPosition = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.REQUIRED)
+      .id(MetadataColumns.ROW_POSITION.fieldId())
+      .named(MetadataColumns.ROW_POSITION.name())
+    new ShadedMessageType(
+      fileReadSchema.getName,
+      (rowPosition +: fileReadSchema.getFields.asScala).asJava)
+  }
 
   def buildReaderOptions(file: InputFile, split: Option[(Long, Long)])
   : ParquetReadOptions = {

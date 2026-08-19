@@ -189,8 +189,7 @@ private class SingleFileReader(
       idToConstant,
       requiredSchema,
       shadedFileReadSchema,
-      conf.metrics,
-      hasNativeRowIndex = deletionVector.isDefined)
+      conf.metrics)
 
     inited = true
     (parquetReader, postProcessor)
