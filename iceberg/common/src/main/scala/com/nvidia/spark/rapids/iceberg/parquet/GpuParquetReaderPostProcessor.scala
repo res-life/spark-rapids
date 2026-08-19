@@ -36,7 +36,11 @@ import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.schema.SchemaWithPartnerVisitor
-import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => ShadedMessageType}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.{
+  MessageType => ShadedMessageType, Types => ShadedTypes}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{
+  PrimitiveTypeName => ShadedPrimitiveTypeName}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.Type.{Repetition => ShadedRepetition}
 import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.types.{Type, Types}
 
@@ -162,12 +166,6 @@ private[iceberg] case object FetchFilePath extends ColumnAction {
 /** Fetch ROW_POSITION metadata column. */
 private[iceberg] case object FetchRowPosition extends ColumnAction {
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
-    if (ctx.processor.hasNativeRowIndex) {
-      val rowIndex = ctx.requireColumn("FetchRowPosition")
-      rowIndex.incRefCount()
-      return rowIndex
-    }
-
     val numRows = ctx.numRows
     val rowPoses = new Array[Long](numRows)
     val processor = ctx.processor
@@ -629,6 +627,8 @@ private class FileSchemaAccessors
  * @param idToConstant          Constant fields.
  * @param expectedSchema        Iceberg schema required by reader.
  * @param shadedFileReadSchema  Shaded parquet file read schema (to avoid conversion overhead).
+ * @param hasNativeRowIndex     True when the cuDF deletion-vector reader prepends its file-global
+ *                              row-index column to every output batch.
  */
 class GpuParquetReaderPostProcessor(
     private[iceberg] val parquetInfo: ParquetFileInfoWithBlockMeta,
@@ -636,7 +636,7 @@ class GpuParquetReaderPostProcessor(
     private[iceberg] val expectedSchema: Schema,
     shadedFileReadSchema: ShadedMessageType,
     metrics: Map[String, com.nvidia.spark.rapids.GpuMetric],
-    private[iceberg] val hasNativeRowIndex: Boolean = false
+    hasNativeRowIndex: Boolean = false
 ) {
   private val icebergBuildActionTimeMetricName = "icebergBuildActionTime"
   private val icebergPostProcessTimeMetricName = "icebergPostProcessTime"
@@ -664,39 +664,33 @@ class GpuParquetReaderPostProcessor(
   // Top-level batch row count for actions that generate a column without an input column.
   private[iceberg] var currentNumRows = 0
 
+  // The cuDF deletion-vector reader prepends a file-global row index to its output. Add that
+  // column to the read schema so the standard field-ID-based action builder can select `_pos`
+  // when requested and drop it otherwise.
+  private lazy val actionFileReadSchema = if (hasNativeRowIndex) {
+    val rowPosition = ShadedTypes
+      .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.REQUIRED)
+      .id(MetadataColumns.ROW_POSITION.fieldId())
+      .named(MetadataColumns.ROW_POSITION.name())
+    new ShadedMessageType(
+      shadedFileReadSchema.getName,
+      (rowPosition +: shadedFileReadSchema.getFields.asScala).asJava)
+  } else {
+    shadedFileReadSchema
+  }
+
   // Convert shaded parquet schema to Iceberg schema for comparison
-  private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
+  private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(actionFileReadSchema)
 
   // Pre-compute action tree by visiting expected schema with file schema as partner
   private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {
     val visitor = new ActionBuildingVisitor(idToConstant)
     val accessors = new FileSchemaAccessors()
-    val action = SchemaWithPartnerVisitor.visit(
+    SchemaWithPartnerVisitor.visit(
       expectedSchema.asStruct(),
       fileIcebergSchema.asStruct(),
       visitor,
       accessors)
-
-    if (hasNativeRowIndex) {
-      action match {
-        case PassThrough =>
-          // The native row index is input[0]. Select only the requested file columns, which
-          // makes dropping an unrequested row index part of the normal root action tree.
-          ProcessStruct(
-            Seq.fill(expectedFields.size)(PassThrough),
-            expectedFields.indices.map(index => Some(index + 1)))
-        case ProcessStruct(actions, inputIndices) =>
-          val shiftedInputIndices = expectedFields.zip(inputIndices).map {
-            case (field, _) if field.fieldId() == MetadataColumns.ROW_POSITION.fieldId() =>
-              Some(0)
-            case (_, inputIndex) => inputIndex.map(_ + 1)
-          }.toSeq
-          ProcessStruct(actions, shiftedInputIndices)
-        case other => other
-      }
-    } else {
-      action
-    }
   }
 
   private lazy val expectedFields = expectedSchema.asStruct().fields().asScala

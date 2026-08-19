@@ -17,6 +17,12 @@
 package com.nvidia.spark.rapids.iceberg;
 
 import ai.rapids.cudf.HostMemoryBuffer;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
+import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
+import org.apache.iceberg.io.IOUtil;
+
+import java.io.IOException;
+import java.util.function.ToLongFunction;
 
 /**
  * A validated Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
@@ -44,6 +50,29 @@ public final class IcebergDeletionVector implements AutoCloseable {
         this.serializedBitmap = bitmap;
         this.serializedSizeInBytes = serializedIndex.length;
         this.cardinality = cardinality;
+    }
+
+    /** Reads and validates an Iceberg deletion-vector byte range. */
+    public static IcebergDeletionVector read(
+            RapidsInputFile inputFile,
+            Long offset,
+            Long size,
+            ToLongFunction<byte[]> cardinality) throws IOException {
+        if (offset == null || offset < 0) {
+            throw new IllegalArgumentException("Invalid deletion vector offset: " + offset);
+        }
+        if (size == null || size < 20 || size > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Invalid deletion vector size: " + size);
+        }
+
+        byte[] bytes = new byte[size.intValue()];
+        try (SeekableInputStream stream = inputFile.open()) {
+            stream.seek(offset);
+            IOUtil.readFully(stream, bytes, 0, bytes.length);
+        }
+
+        return new IcebergDeletionVector(
+                bytes, 8, bytes.length - 12, cardinality.applyAsLong(bytes));
     }
 
     /**

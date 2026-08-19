@@ -20,7 +20,6 @@ import com.nvidia.spark.rapids.GpuMetric;
 import com.nvidia.spark.rapids.RapidsConf;
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergInputFile;
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector;
-import com.nvidia.spark.rapids.iceberg.IcebergDeletionVectorReader;
 import com.nvidia.spark.rapids.iceberg.IcebergShimUtils;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import org.apache.hadoop.fs.Path;
@@ -64,7 +63,7 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     public IcebergDeletionVector readDeletionVector(
             DeleteFile deleteFile, RapidsInputFile inputFile)
             throws IOException {
-        return IcebergDeletionVectorReader.read(
+        return IcebergDeletionVector.read(
                 inputFile, deleteFile.contentOffset(), deleteFile.contentSizeInBytes(),
                 bytes -> PositionDeleteIndex.deserialize(bytes, deleteFile).cardinality());
     }
