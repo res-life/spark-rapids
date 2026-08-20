@@ -34,8 +34,8 @@ import com.nvidia.spark.rapids.shims.{NullIntolerantShim, ShimBinaryExpression, 
 
 import org.apache.spark.sql.catalyst.expressions.{BinaryExpression, ExpectsInputTypes, Expression, FromUnixTime, FromUTCTimestamp, ImplicitCastInputTypes, MonthsBetween, TimeZoneAwareExpression, ToUTCTimestamp, TruncDate, TruncTimestamp}
 import org.apache.spark.sql.catalyst.util.DateTimeConstants
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.CalendarInterval
@@ -729,13 +729,8 @@ object GpuToTimestamp {
           lhs.getBase, sparkFormat, parserPolicy)
       } catch {
         case e: CastException =>
-          val input = e.getStringWithError
-          throw TrampolineUtil.makeSparkUpgradeException(
-            "3.0",
-            s"Fail to parse '$input' in the new parser. You can set " +
-              s"${SQLConf.LEGACY_TIME_PARSER_POLICY.key} to LEGACY to restore the behavior " +
-              "before Spark 3.0, or set to CORRECTED and treat it as an invalid datetime string.",
-            e)
+          throw QueryExecutionErrors.failToParseDateTimeInNewParserError(
+            e.getStringWithError, e)
       }
       closeOnExcept(parsed) { _ =>
         if (failOnError && parsed.getNullCount > lhs.getBase.getNullCount) {
