@@ -54,8 +54,8 @@ import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColu
 /**
  * Verifies the snapshot/restore around `withRetryNoSplit` in
  * GpuParquetReaderPostProcessor.process under simulated retry. FetchRowPosition commits its
- * counter advance to the processor as soon as GPU sequence generation succeeds; if a later field
- * action in the same safeMap iteration OOMs, withRetryNoSplit reruns the whole block. Without the
+ * counter advance to the processor as soon as fromLongs succeeds; if a later field action in
+ * the same safeMap iteration OOMs, withRetryNoSplit reruns the whole block. Without the
  * snapshot/restore the rerun would see already-advanced counters and emit wrong _pos values.
  */
 class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
@@ -124,7 +124,7 @@ class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
       }
     }
 
-    // Skip 1 GPU allocation (FetchRowPosition.sequence, which commits counters as soon as
+    // Skip 1 GPU allocation (FetchRowPosition.fromLongs, which commits counters as soon as
     // it succeeds), then OOM on the next allocation (FillNull's columnVectorFromNull).
     // withRetryNoSplit catches it and reruns the whole block; snapshot/restore must reset
     // _pos counters back to their pre-block values so the rerun emits 500..799, not
@@ -142,69 +142,6 @@ class GpuPostProcessorRetrySuite extends RmmSparkRetrySuiteBase {
     withResource(processor.process(emptyBatch(200))) { batch =>
       assert(batch.numRows() == 200)
       assertPosColumnRange(batch, 800L)
-    }
-  }
-
-  test("FetchRowPosition retries GPU sequence concatenation across a row-group gap") {
-    // Keep this boundary synchronized with multiRangeGpuMinRows in the processor.
-    val gpuMinRows = 512 * 1024
-    val rowsPerFullBlock = gpuMinRows / 2
-    val secondBlockStart = 1000000L
-    val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
-    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
-    val expectedSchema = new Schema(
-      Types.NestedField.optional(rowPosId, "_pos", Types.LongType.get()))
-
-    // The gap between the two blocks forces multiple position ranges. A batch exactly at the
-    // hybrid threshold uses two GPU sequences followed by a concatenate.
-    val blocks = Seq(rowsPerFullBlock.toLong, rowsPerFullBlock.toLong + 50L)
-      .map(createBlockMetaData)
-    val parquetInfo = ParquetFileInfoWithBlockMeta(
-      filePath = new Path("/test/file.parquet"),
-      blocks = blocks,
-      partValues = InternalRow.empty,
-      schema = unshade(parquetSchema),
-      readSchema = StructType(Seq.empty),
-      dateRebaseMode = null,
-      timestampRebaseMode = null,
-      hasInt96Timestamps = false,
-      blocksFirstRowIndices = Seq(500L, secondBlockStart)
-    )
-    val processor = new GpuParquetReaderPostProcessor(
-      parquetInfo,
-      new JHashMap[Integer, Any](),
-      expectedSchema,
-      parquetSchema,
-      Map.empty)
-
-    def emptyBatch(rows: Int): ColumnarBatch =
-      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
-
-    def assertPositions(batch: ColumnarBatch, expected: Seq[Long]): Unit = {
-      val posCol = batch.column(0).asInstanceOf[GpuColumnVector]
-      withResource(posCol.copyToHost()) { hostCol =>
-        val base = hostCol.getBase
-        expected.zipWithIndex.foreach { case (position, index) =>
-          assert(base.getLong(index) == position,
-            s"_pos[$index] expected $position, got ${base.getLong(index)}")
-        }
-      }
-    }
-
-    // Skip both sequence allocations and inject the retry OOM into concatenate. State must not
-    // advance until the entire GPU position column has been materialized successfully.
-    RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
-      RmmSpark.OomInjectionType.GPU.ordinal, 2)
-    withResource(processor.process(emptyBatch(gpuMinRows))) { batch =>
-      assertPositions(batch,
-        (500L until 500L + rowsPerFullBlock) ++
-          (secondBlockStart until secondBlockStart + rowsPerFullBlock))
-    }
-
-    // Verify that the successful retry committed the counters exactly once.
-    withResource(processor.process(emptyBatch(50))) { batch =>
-      assertPositions(batch,
-        secondBlockStart + rowsPerFullBlock until secondBlockStart + rowsPerFullBlock + 50L)
     }
   }
 }
