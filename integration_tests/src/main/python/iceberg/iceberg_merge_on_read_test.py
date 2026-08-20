@@ -172,15 +172,14 @@ def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
-@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @validate_execs_in_gpu_plan('GpuBatchScanExec')
 def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
-    table_name = setup_base_iceberg_table(spark_tmp_table_factory)
+    table_name = setup_base_iceberg_table(
+        spark_tmp_table_factory,
+        table_prop={'format-version': '3'})
 
     def add_deletion_vector(spark):
-        spark.sql(
-            f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version' = '3')")
         spark.sql(f"DELETE FROM {table_name} where _c1 < 0")
         spark.sql(f"REFRESH TABLE {table_name}")
         delete_files = {
@@ -218,7 +217,12 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
 @validate_execs_in_gpu_plan('GpuBatchScanExec')
 def test_iceberg_v3_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reader_type,
                                   register_iceberg_add_eq_deletes_udf):
-    table_name = setup_base_iceberg_table(spark_tmp_table_factory)
+    table_name = setup_base_iceberg_table(
+        spark_tmp_table_factory,
+        table_prop={
+            'format-version': '2',
+            'write.delete.mode': 'merge-on-read',
+        })
     _change_table(table_name,
                   lambda spark: spark.sql(f"DELETE FROM {table_name} where _c1 < 0"),
                   "No position deletes generated")

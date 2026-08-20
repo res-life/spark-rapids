@@ -32,7 +32,9 @@ import java.util.{HashMap => JHashMap}
 
 import scala.collection.JavaConverters._
 
-import com.nvidia.spark.rapids.RapidsConf
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
 import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
@@ -55,7 +57,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
  * Unit tests for GpuParquetReaderPostProcessor to verify that the correct
@@ -1006,12 +1009,6 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("native deletion-vector row index supplies _pos and shifts physical columns") {
-    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
-    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-    import com.nvidia.spark.rapids.GpuColumnVector
-    import org.apache.spark.sql.types.LongType
-    import org.apache.spark.sql.vectorized.ColumnarBatch
-
     val dataFieldId = 1
     val rowPositionFieldId = MetadataColumns.ROW_POSITION.fieldId()
     val dataField = ShadedTypes
@@ -1053,12 +1050,6 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("native deletion-vector row index is dropped through the root action tree") {
-    import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
-    import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-    import com.nvidia.spark.rapids.GpuColumnVector
-    import org.apache.spark.sql.types.LongType
-    import org.apache.spark.sql.vectorized.ColumnarBatch
-
     val dataFieldId = 1
     val dataField = ShadedTypes
       .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
