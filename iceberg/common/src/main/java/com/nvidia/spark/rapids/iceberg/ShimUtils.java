@@ -62,6 +62,10 @@ public class ShimUtils {
         return IMPL.formatVersion(table);
     }
 
+    public static boolean supportsRowLineageInheritance() {
+        return IMPL.supportsRowLineageInheritance();
+    }
+
     public static int rowIdFieldId() {
         return IMPL.rowIdFieldId();
     }

@@ -209,9 +209,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       val (typeWithIds, fileReadSchema) = projectSchema(fileSchema, requiredSchema)
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val needsRowPosition = {
-        val rowIdFieldId = ShimUtils.rowIdFieldId()
         requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
-          (rowIdFieldId >= 0 && requiredSchema.findField(rowIdFieldId) != null)
+          (ShimUtils.supportsRowLineageInheritance() &&
+            requiredSchema.findField(ShimUtils.rowIdFieldId()) != null)
       }
       val blockFirstRowIndices: Seq[Long] = if (needsRowPosition) {
         // `_pos` and inherited `_row_id` are file-global. When file.split is set the reader is

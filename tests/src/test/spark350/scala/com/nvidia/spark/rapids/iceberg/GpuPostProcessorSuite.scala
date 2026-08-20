@@ -1057,15 +1057,29 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("Row lineage field IDs follow the runtime capability") {
+    if (ShimUtils.supportsRowLineageInheritance()) {
+      assert(ShimUtils.rowIdFieldId() >= 0)
+      assert(ShimUtils.lastUpdatedSequenceNumberFieldId() >= 0)
+    } else {
+      intercept[UnsupportedOperationException] {
+        ShimUtils.rowIdFieldId()
+      }
+      intercept[UnsupportedOperationException] {
+        ShimUtils.lastUpdatedSequenceNumberFieldId()
+      }
+    }
+  }
+
   test("Row lineage reuses file-global positions and materializes missing columns") {
     import com.nvidia.spark.rapids.Arm.withResource
     import com.nvidia.spark.rapids.GpuColumnVector
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(rowIdFieldId >= 0 && sequenceFieldId >= 0,
-      "The selected Iceberg runtime predates row lineage")
 
     val rowPosFieldId = MetadataColumns.ROW_POSITION.fieldId()
     val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
@@ -1117,10 +1131,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import org.apache.spark.sql.types.LongType
     import org.apache.spark.sql.vectorized.ColumnarBatch
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(rowIdFieldId >= 0 && sequenceFieldId >= 0,
-      "The selected Iceberg runtime predates row lineage")
 
     val rowIdType = ShadedTypes
       .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
@@ -1168,10 +1182,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import org.apache.spark.sql.types.LongType
     import org.apache.spark.sql.vectorized.ColumnarBatch
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(rowIdFieldId >= 0 && sequenceFieldId >= 0,
-      "The selected Iceberg runtime predates row lineage")
 
     val rowIdType = ShadedTypes
       .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
@@ -1216,8 +1230,9 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import org.apache.spark.sql.types.LongType
     import org.apache.spark.sql.vectorized.ColumnarBatch
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
-    assume(rowIdFieldId >= 0, "The selected Iceberg runtime predates row lineage")
 
     val rowIdType = ShadedTypes
       .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
@@ -1246,10 +1261,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import com.nvidia.spark.rapids.GpuColumnVector
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(rowIdFieldId >= 0 && sequenceFieldId >= 0,
-      "The selected Iceberg runtime predates row lineage")
 
     val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
     val expectedSchema = new Schema(
@@ -1274,10 +1289,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import com.nvidia.spark.rapids.GpuColumnVector
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(rowIdFieldId >= 0 && sequenceFieldId >= 0,
-      "The selected Iceberg runtime predates row lineage")
 
     val rowPosFieldId = MetadataColumns.ROW_POSITION.fieldId()
     val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
@@ -1318,10 +1333,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("Physical lineage constants prevent incompatible file combining") {
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(rowIdFieldId >= 0 && sequenceFieldId >= 0,
-      "The selected Iceberg runtime predates row lineage")
 
     val rowIdType = ShadedTypes
       .primitive(ShadedPrimitiveTypeName.INT64, ShadedRepetition.OPTIONAL)
@@ -1379,8 +1394,9 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import com.nvidia.spark.rapids.GpuColumnVector
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
-    assume(rowIdFieldId >= 0, "The selected Iceberg runtime predates row lineage")
 
     val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
     val expectedSchema = new Schema(
@@ -1402,8 +1418,9 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     import com.nvidia.spark.rapids.GpuColumnVector
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val sequenceFieldId = ShimUtils.lastUpdatedSequenceNumberFieldId()
-    assume(sequenceFieldId >= 0, "The selected Iceberg runtime predates row lineage")
 
     val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
     val expectedSchema = new Schema(
@@ -1426,8 +1443,9 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
   test("Inherited row ID checks 64-bit overflow") {
     import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
 
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
     val rowIdFieldId = ShimUtils.rowIdFieldId()
-    assume(rowIdFieldId >= 0, "The selected Iceberg runtime predates row lineage")
 
     val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
     val expectedSchema = new Schema(

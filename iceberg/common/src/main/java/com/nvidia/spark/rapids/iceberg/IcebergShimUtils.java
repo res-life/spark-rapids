@@ -48,15 +48,21 @@ public interface IcebergShimUtils {
     /** Returns the Iceberg table format version from the table's current metadata. */
     int formatVersion(Table table);
 
+    /** Returns whether this Iceberg version supports per-row lineage inheritance. */
+    boolean supportsRowLineageInheritance();
+
     /**
-     * Returns the field ID of Iceberg's {@code _row_id} metadata column, or {@code -1}
-     * when the runtime Iceberg version predates row lineage.
+     * Returns the field ID of Iceberg's {@code _row_id} metadata column.
+     *
+     * @throws UnsupportedOperationException if per-row lineage inheritance is unsupported
      */
     int rowIdFieldId();
 
     /**
      * Returns the field ID of Iceberg's {@code _last_updated_sequence_number} metadata
-     * column, or {@code -1} when the runtime Iceberg version predates row lineage.
+     * column.
+     *
+     * @throws UnsupportedOperationException if per-row lineage inheritance is unsupported
      */
     int lastUpdatedSequenceNumberFieldId();
 
