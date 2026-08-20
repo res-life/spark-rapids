@@ -720,8 +720,13 @@ object GpuToTimestamp {
     val tsVector = if (isSimpleSparkFormat(sparkFormat, isLegacy = false)) {
       // Fused kernel skips the regex+length+cuDF-asTimestamp chain.
       val parsed = try {
+        val parserPolicy = if (exceptionPolicy) {
+          CastStrings.TIME_PARSER_POLICY_EXCEPTION
+        } else {
+          CastStrings.TIME_PARSER_POLICY_CORRECTED
+        }
         CastStrings.parseTimestampWithFormat(
-          lhs.getBase, sparkFormat, false, exceptionPolicy)
+          lhs.getBase, sparkFormat, parserPolicy)
       } catch {
         case e: CastException =>
           val input = e.getStringWithError
