@@ -341,7 +341,7 @@ class TestGpuDeleteLoader(private val tableGen: PooledTableGen,
   override def loadDeletionVectorDeletes(
       delete: DeleteFile): LazySpillableColumnarBatch = {
     throw new UnsupportedOperationException(
-      s"Deletion vector ${delete.location()} is not supported by TestGpuDeleteLoader")
+      s"Deletion vector $delete is not supported by TestGpuDeleteLoader")
   }
 
   override def loadDeletes(deletes: Seq[DeleteFile],
