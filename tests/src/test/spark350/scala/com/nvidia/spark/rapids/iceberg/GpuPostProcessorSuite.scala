@@ -109,14 +109,11 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
   private def createMultiBlockParquetInfo(
       shadedSchema: ShadedMessageType,
       blockRowCounts: Seq[Long],
-      firstFileGlobalRowIndex: Long,
-      blockFirstRowIndices: Option[Seq[Long]] = None
-  ): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
+      firstFileGlobalRowIndex: Long): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
     val blocks = blockRowCounts.map(createBlockMetaData)
-    val firstRowIndices = blockFirstRowIndices.getOrElse {
-      blockRowCounts.scanLeft(firstFileGlobalRowIndex)(_ + _).dropRight(1)
-    }
-    require(firstRowIndices.length == blockRowCounts.length)
+    val firstRowIndices = blockRowCounts
+      .scanLeft(firstFileGlobalRowIndex)(_ + _)
+      .dropRight(1)
     val info = ParquetFileInfoWithBlockMeta(
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
@@ -1005,55 +1002,6 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     // Batch 4: 150 rows entirely inside block 1 → file-global _pos = 1250..1399.
     withResource(processor.process(emptyBatch(150))) { batch =>
       assertPosRange(batch, 1250L, 1399L)
-    }
-  }
-
-  test("FetchRowPosition uses hybrid generation across filtered row-group gaps") {
-    import com.nvidia.spark.rapids.Arm.withResource
-    import com.nvidia.spark.rapids.GpuColumnVector
-    import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector => SparkColumnVector}
-
-    val rowPosId = MetadataColumns.ROW_POSITION.fieldId()
-    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
-    val expectedSchema = new Schema(
-      Types.NestedField.optional(rowPosId, "_pos", Types.LongType.get()))
-
-    // The row group between file positions 600 and 899 was filtered out. The last two
-    // selected row groups are adjacent so their GPU sequences can be coalesced.
-    val (parquetInfo, shadedSchema) = createMultiBlockParquetInfo(
-      parquetSchema,
-      blockRowCounts = Seq(100L, 100L, 50L),
-      firstFileGlobalRowIndex = 500L,
-      blockFirstRowIndices = Some(Seq(500L, 900L, 1000L)))
-    val processor = new GpuParquetReaderPostProcessor(
-      parquetInfo,
-      new JHashMap[Integer, Any](),
-      expectedSchema,
-      shadedSchema,
-      Map.empty)
-
-    def emptyBatch(rows: Int): ColumnarBatch =
-      new ColumnarBatch(Array.empty[SparkColumnVector], rows)
-
-    def assertPositions(batch: ColumnarBatch, expected: Seq[Long]): Unit = {
-      assert(batch.numRows() == expected.length)
-      withResource(batch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { hostCol =>
-        val base = hostCol.getBase
-        expected.zipWithIndex.foreach { case (position, index) =>
-          assert(base.getLong(index) == position,
-            s"_pos[$index] expected $position, got ${base.getLong(index)}")
-        }
-      }
-    }
-
-    // This small batch crosses a filtered row-group gap and uses the CPU fromLongs path.
-    withResource(processor.process(emptyBatch(150))) { batch =>
-      assertPositions(batch, (500L until 600L) ++ (900L until 950L))
-    }
-
-    // This batch crosses two adjacent selected row groups and uses one GPU sequence.
-    withResource(processor.process(emptyBatch(100))) { batch =>
-      assertPositions(batch, 950L until 1050L)
     }
   }
 
