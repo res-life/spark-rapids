@@ -77,11 +77,13 @@ object GpuIcebergDeletionVector extends Logging {
     }
     val dvInfo = makeInfo(deletionVector, blocks)
     if (useChunkedReader) {
-      closeOnExcept(dvInfo.serializedBitmap) { _ =>
-        new ChunkedDeletionVectorProducer(
-          maxChunkedReaderMemoryUsageSizeBytes, conf, chunkSizeByteLimit, opts, buffers, metrics,
-          dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId,
-          readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways, dvInfo)
+      closeOnExcept(buffers) { _ =>
+        closeOnExcept(dvInfo.serializedBitmap) { _ =>
+          new ChunkedDeletionVectorProducer(
+            maxChunkedReaderMemoryUsageSizeBytes, conf, chunkSizeByteLimit, opts, buffers, metrics,
+            dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId,
+            readDataSchema, clippedParquetSchema, splits, debugDumpPrefix, debugDumpAlways, dvInfo)
+        }
       }
     } else {
       withResource(buffers) { _ =>
@@ -89,9 +91,7 @@ object GpuIcebergDeletionVector extends Logging {
           val rawTable = try {
             NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
               metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns {
-                RmmRapidsRetryIterator.withRetryNoSplit[Table] {
-                  DeletionVector.readParquet(opts, buffers, Array(dvInfo))
-                }
+                DeletionVector.readParquet(opts, buffers, Array(dvInfo))
               }
             }
           } catch {

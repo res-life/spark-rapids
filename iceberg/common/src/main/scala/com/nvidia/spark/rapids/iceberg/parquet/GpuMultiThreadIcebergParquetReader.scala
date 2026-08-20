@@ -130,9 +130,9 @@ class GpuMultiThreadIcebergParquetReader(
           }
           val columnTypes = LongType +: buffer.readSchema.fields.map(_.dataType)
 
-          withResource(hostBuffers) { _ =>
-            RmmRapidsRetryIterator.withRetryNoSplit[Iterator[ColumnarBatch]] {
-              val hostBufs = hostBuffers.safeMap(_.getDataHostBuffer())
+          RmmRapidsRetryIterator.withRetryNoSplit(hostBuffers.toSeq) { spillableBuffers =>
+            val hostBufs = spillableBuffers.safeMap(_.getDataHostBuffer()).toArray
+            closeOnExcept(hostBufs) { _ =>
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
               val producer = GpuIcebergDeletionVector.makeProducer(
                 GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
@@ -166,7 +166,7 @@ class GpuMultiThreadIcebergParquetReader(
           postProcessor.process(batch)
         }
         deleteFilterProvider(icebergFile)
-          .map(_.filterAndDelete(postProcessed))
+          .map(_.filterOrDelete(postProcessed))
           .getOrElse(postProcessed)
       }
     }

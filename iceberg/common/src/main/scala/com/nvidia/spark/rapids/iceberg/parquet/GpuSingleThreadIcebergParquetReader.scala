@@ -23,7 +23,7 @@ import scala.annotation.tailrec
 import ai.rapids.cudf.ParquetOptions
 import com.nvidia.spark.rapids.{CachedGpuBatchIterator, DateTimeRebaseCorrected, GpuSemaphore,
   PartitionReaderWithBytesRead, RmmRapidsRetryIterator, SpillableHostBuffer}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.IcebergDeletionVector
 import com.nvidia.spark.rapids.iceberg.data.GpuDeleteFilter
@@ -74,7 +74,7 @@ class GpuSingleThreadIcebergParquetReader(
         parquetIterator = new SingleFileReader(rapidsFileIO, file, constantsProvider(file),
           gpuDeleteFilter, deletionVectorProvider(file), conf)
         dataIterator = gpuDeleteFilter
-          .map(_.filterAndDelete(parquetIterator))
+          .map(_.filterOrDelete(parquetIterator))
           .getOrElse(parquetIterator)
         // update the current file for Spark's filename() function
         InputFileUtils.setInputFileBlock(file.path.toString, file.start, file.length)
@@ -169,16 +169,18 @@ private class SingleFileReader(
         deletionVector.map { dv =>
           RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { _ =>
             val hostBuffer = dataBuffer.getDataHostBuffer()
-            GpuSemaphore.acquireIfNecessary(TaskContext.get())
-            val producer = GpuIcebergDeletionVector.makeProducer(
-              readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
-              readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
-              readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
-              readerConf.caseSensitive,
-              useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
-              Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
-              readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)
-            CachedGpuBatchIterator(producer, LongType +: colTypes)
+            closeOnExcept(hostBuffer) { _ =>
+              GpuSemaphore.acquireIfNecessary(TaskContext.get())
+              val producer = GpuIcebergDeletionVector.makeProducer(
+                readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
+                readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
+                readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
+                readerConf.caseSensitive,
+                useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
+                Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
+                readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)
+              CachedGpuBatchIterator(producer, LongType +: colTypes)
+            }
           }
         }.getOrElse(super.readBuffer(parquetOpts, colTypes, chunkedBlocks, dataBuffer))
       }
