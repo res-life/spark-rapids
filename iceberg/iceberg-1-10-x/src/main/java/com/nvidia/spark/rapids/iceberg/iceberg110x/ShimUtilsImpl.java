@@ -49,6 +49,11 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
+    public boolean supportsRowLineageInheritance() {
+        return true;
+    }
+
+    @Override
     public int rowIdFieldId() {
         return MetadataColumns.ROW_ID.fieldId();
     }

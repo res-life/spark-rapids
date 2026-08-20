@@ -75,6 +75,10 @@ public class ShimUtils {
         return IMPL.readDeletionVector(deleteFile, inputFile, validateCrc);
     }
 
+    public static boolean supportsRowLineageInheritance() {
+        return IMPL.supportsRowLineageInheritance();
+    }
+
     public static int rowIdFieldId() {
         return IMPL.rowIdFieldId();
     }

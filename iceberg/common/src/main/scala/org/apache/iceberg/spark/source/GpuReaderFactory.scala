@@ -103,10 +103,10 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     val hasNoDeletes = scans.forall(_.deletes.isEmpty)
     val hasFilePathMetadata =
       partition.expectedSchema.findField(MetadataColumns.FILE_PATH.fieldId()) != null
-    val rowIdFieldId = ShimUtils.rowIdFieldId()
     val hasRowPositionMetadata =
       partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
-        (rowIdFieldId >= 0 && partition.expectedSchema.findField(rowIdFieldId) != null)
+        (ShimUtils.supportsRowLineageInheritance() &&
+          partition.expectedSchema.findField(ShimUtils.rowIdFieldId()) != null)
 
     val allParquet = scans.forall(_.file.format == FileFormat.PARQUET)
 

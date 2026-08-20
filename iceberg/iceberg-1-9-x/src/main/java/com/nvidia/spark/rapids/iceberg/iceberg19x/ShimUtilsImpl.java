@@ -44,15 +44,20 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
+    public boolean supportsRowLineageInheritance() {
+        return false;
+    }
+
+    @Override
     public int rowIdFieldId() {
-        // Iceberg 1.9 exposes the v3 lineage columns but materializes them as file constants.
-        // Per-row inheritance was added to the reader in Iceberg 1.10.
-        return -1;
+        throw new UnsupportedOperationException(
+                "Iceberg 1.9 does not support per-row lineage inheritance");
     }
 
     @Override
     public int lastUpdatedSequenceNumberFieldId() {
-        return -1;
+        throw new UnsupportedOperationException(
+                "Iceberg 1.9 does not support per-row lineage inheritance");
     }
 
     @Override

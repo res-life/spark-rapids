@@ -213,10 +213,10 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
       hasDeletionVector: Boolean = false): (ParquetFileInfoWithBlockMeta, ShadedMessageType) = {
     withResource(file.newReader(conf.metrics)) { reader =>
       val fileSchema = reader.getFileMetaData.getSchema
-      val rowIdFieldId = ShimUtils.rowIdFieldId()
       val needsRowPosition =
         requiredSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
-          (rowIdFieldId >= 0 && requiredSchema.findField(rowIdFieldId) != null)
+          (ShimUtils.supportsRowLineageInheritance() &&
+            requiredSchema.findField(ShimUtils.rowIdFieldId()) != null)
       val initialProjection = projectSchema(fileSchema, requiredSchema)
       val (typeWithIds, fileReadSchema) =
         // cuDF's deletion-vector Parquet path needs at least one physical data column. Force one
