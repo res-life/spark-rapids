@@ -174,6 +174,43 @@ def test_iceberg_v2_mixed_deletes(spark_tmp_table_factory, spark_tmp_path, reade
 @pytest.mark.parametrize('reader_type', rapids_reader_types)
 @pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
+    table_name = setup_base_iceberg_table(spark_tmp_table_factory)
+
+    def add_deletion_vector(spark):
+        spark.sql(
+            f"ALTER TABLE {table_name} SET TBLPROPERTIES ('format-version' = '3')")
+        spark.sql(f"DELETE FROM {table_name} where _c1 < 0")
+        spark.sql(f"REFRESH TABLE {table_name}")
+        delete_files = {
+            (row.content, row.file_format) for row in
+            spark.sql(
+                f"SELECT content, file_format FROM {table_name}.delete_files").collect()
+        }
+        expected_delete_files = {(1, 'PUFFIN')}
+        assert delete_files == expected_delete_files, \
+            f"Expected only deletion vectors {expected_delete_files}, found {delete_files}"
+
+    with_cpu_session(add_deletion_vector)
+
+    read_conf = {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+    }
+
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.table(table_name),
+        conf=read_conf,
+        # Reset the GPU plan-validation config before fixture teardown.
+        is_cpu_first=False)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason = "S3tables catalog is managed")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.xfail(reason = "https://github.com/NVIDIA/spark-rapids/issues/12885")
 # When using this datagen, local run is 784 rows
 @pytest.mark.datagen_overrides(seed=1749483297, permanent=True,

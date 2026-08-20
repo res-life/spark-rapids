@@ -1030,6 +1030,8 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
       Map.empty)
 
+    assert(!processor.displayActionPlan().contains("FetchRowPosition"))
+
     val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
       GpuColumnVector.from(column, LongType)
     }
