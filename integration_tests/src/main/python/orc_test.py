@@ -1184,3 +1184,20 @@ def test_orc_gpu_write_cpu_read_timestamp_before_epoch(spark_tmp_path):
     with_gpu_session(lambda spark: gen_df(spark, [("c1", ts_gen)]).write.orc(gpu_write_path))
     # Read timestamp on CPU and GPU
     assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))
+
+
+@pytest.mark.skipif(is_not_utc(), reason="https://github.com/NVIDIA/cudf-spark/issues/15385")
+@ignore_order(local=True)
+def test_orc_gpu_write_cpu_read_timestamp_near_epoch(spark_tmp_path):
+    gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU_NEAR_EPOCH"
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    # Exercise the negative fractional timestamp encoding fixed by
+    # https://github.com/NVIDIA/cudf/pull/23391 by randomly sampling 16 values from the
+    # inclusive [-1000000 us, 0 us] range around the epoch.
+    ts_gen = TimestampGen(
+        start=epoch - timedelta(microseconds=1000000), end=epoch, nullable=False)
+    # Write timestamp on GPU
+    with_gpu_session(
+        lambda spark: gen_df(spark, [("c1", ts_gen)], length=16).write.orc(gpu_write_path))
+    # Read timestamp on CPU and GPU
+    assert_gpu_and_cpu_are_equal_collect(read_orc_df(gpu_write_path))
