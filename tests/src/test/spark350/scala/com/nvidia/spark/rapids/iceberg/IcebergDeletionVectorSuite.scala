@@ -40,17 +40,17 @@ import java.nio.{ByteBuffer, ByteOrder}
 import java.util.OptionalLong
 import java.util.zip.CRC32
 
+import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import org.scalatest.funsuite.AnyFunSuite
 
 class IcebergDeletionVectorSuite extends AnyFunSuite {
   private val MagicNumber = 1681511377
-  private val StagingBufferSizeBytes = 64 * 1024
 
   private class ByteArraySeekableInputStream(bytes: Array[Byte]) extends SeekableInputStream {
     private var pos = 0
-    var maxRequestedReadLength = 0
 
     override def read(): Int = {
       if (pos >= bytes.length) {
@@ -63,7 +63,6 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     }
 
     override def read(output: Array[Byte], offset: Int, length: Int): Int = {
-      maxRequestedReadLength = math.max(maxRequestedReadLength, length)
       if (pos >= bytes.length) {
         -1
       } else {
@@ -83,16 +82,30 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
 
   private class ByteArrayInputFile(bytes: Array[Byte]) extends RapidsInputFile {
     var openCount = 0
-    var stream: ByteArraySeekableInputStream = _
+    var readVectoredCount = 0
+    var lastCopyRange: CopyRange = _
 
     override def getLength: Long = bytes.length
 
     override def getLastModificationTime: OptionalLong = OptionalLong.empty()
 
+    override def readVectored(
+        output: HostMemoryBuffer,
+        copyRanges: java.util.List[CopyRange]): Unit = {
+      readVectoredCount += 1
+      assert(copyRanges.size() == 1)
+      lastCopyRange = copyRanges.get(0)
+      val inputOffset = Math.toIntExact(lastCopyRange.getInputOffset)
+      val length = Math.toIntExact(lastCopyRange.getLength)
+      if (inputOffset < 0 || length < 0 || inputOffset > bytes.length - length) {
+        throw new IOException("Invalid copy range")
+      }
+      output.setBytes(lastCopyRange.getOutputOffset, bytes, inputOffset, length)
+    }
+
     override def open(): SeekableInputStream = {
       openCount += 1
-      stream = new ByteArraySeekableInputStream(bytes)
-      stream
+      new ByteArraySeekableInputStream(bytes)
     }
   }
 
@@ -111,7 +124,7 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
       .array()
   }
 
-  test("read a deletion vector from a non-zero offset with bounded staging") {
+  test("read a deletion vector from a non-zero offset with one vectored read") {
     val bitmap = Array.tabulate[Byte](128 * 1024 + 7)(i => i.toByte)
     val envelope = serializeEnvelope(bitmap)
     val prefix = Array.fill[Byte](17)(1)
@@ -125,8 +138,10 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
       assert(actual.sameElements(bitmap))
       assert(vector.serializedSizeInBytes() == envelope.length)
       assert(vector.cardinality() == 123L)
-      assert(inputFile.stream.getPos == prefix.length + envelope.length)
-      assert(inputFile.stream.maxRequestedReadLength <= StagingBufferSizeBytes)
+      assert(inputFile.readVectoredCount == 1)
+      assert(inputFile.lastCopyRange.getInputOffset == prefix.length)
+      assert(inputFile.lastCopyRange.getLength == envelope.length)
+      assert(inputFile.lastCopyRange.getOutputOffset == 0)
     }
   }
 
@@ -192,5 +207,6 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
       }
     }
     assert(inputFile.openCount == 0)
+    assert(inputFile.readVectoredCount == 0)
   }
 }

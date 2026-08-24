@@ -18,12 +18,12 @@ package com.nvidia.spark.rapids.iceberg;
 
 import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
-import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
-import org.apache.iceberg.io.IOUtil;
+import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Collections;
 import java.util.zip.CRC32;
 
 /**
@@ -40,7 +40,6 @@ public final class IcebergDeletionVector implements AutoCloseable {
     private static final int BITMAP_OFFSET_BYTES = LENGTH_SIZE_BYTES + MAGIC_NUMBER_SIZE_BYTES;
     private static final int ENVELOPE_SIZE_BYTES = BITMAP_OFFSET_BYTES + CRC_SIZE_BYTES;
     private static final int MINIMUM_SIZE_BYTES = 20;
-    private static final int STAGING_BUFFER_SIZE_BYTES = 64 * 1024;
 
     private final HostMemoryBuffer serializedBitmap;
     private final long serializedSizeInBytes;
@@ -79,51 +78,40 @@ public final class IcebergDeletionVector implements AutoCloseable {
                     "Invalid deletion vector range: offset=" + offset + ", size=" + size);
         }
 
-        try (SeekableInputStream stream = inputFile.open()) {
-            stream.seek(offset);
-            byte[] header = new byte[BITMAP_OFFSET_BYTES];
-            IOUtil.readFully(stream, header, 0, header.length);
-            ByteBuffer headerBuffer = ByteBuffer.wrap(header);
-            int bitmapDataLength = headerBuffer.getInt();
+        try (HostMemoryBuffer envelope = HostMemoryBuffer.allocate(size)) {
+            inputFile.readVectored(
+                    envelope,
+                    Collections.singletonList(new CopyRange(offset, size, 0)));
+            ByteBuffer envelopeBuffer = envelope.asByteBuffer().order(ByteOrder.BIG_ENDIAN);
+            int bitmapDataLength = envelopeBuffer.getInt();
             int expectedBitmapDataLength =
                     Math.toIntExact(size - LENGTH_SIZE_BYTES - CRC_SIZE_BYTES);
             if (bitmapDataLength != expectedBitmapDataLength) {
                 throw new IOException("Invalid bitmap data length: " + bitmapDataLength
                         + ", expected " + expectedBitmapDataLength);
             }
-            int magicNumber = headerBuffer.order(ByteOrder.LITTLE_ENDIAN).getInt(LENGTH_SIZE_BYTES);
+            int magicNumber =
+                    envelopeBuffer.order(ByteOrder.LITTLE_ENDIAN).getInt(LENGTH_SIZE_BYTES);
             if (magicNumber != MAGIC_NUMBER) {
                 throw new IOException("Invalid magic number: " + magicNumber
                         + ", expected " + MAGIC_NUMBER);
             }
 
             int bitmapLength = Math.toIntExact(size - ENVELOPE_SIZE_BYTES);
-            HostMemoryBuffer bitmap = HostMemoryBuffer.allocate(bitmapLength);
+            CRC32 crc = new CRC32();
+            crc.update(envelope.asByteBuffer(LENGTH_SIZE_BYTES, expectedBitmapDataLength));
+            int expectedCrc = envelope.asByteBuffer(
+                    size - CRC_SIZE_BYTES, CRC_SIZE_BYTES).order(ByteOrder.BIG_ENDIAN).getInt();
+            int actualCrc = (int) crc.getValue();
+            if (actualCrc != expectedCrc) {
+                throw new IOException("Invalid CRC: " + actualCrc
+                        + ", expected " + expectedCrc);
+            }
+
+            HostMemoryBuffer bitmap = envelope.slice(BITMAP_OFFSET_BYTES, bitmapLength);
             try {
-                CRC32 crc = new CRC32();
-                crc.update(header, LENGTH_SIZE_BYTES, MAGIC_NUMBER_SIZE_BYTES);
-                // Use bounded heap staging instead of allocating a byte[] for the entire DV.
-                byte[] staging = new byte[Math.min(STAGING_BUFFER_SIZE_BYTES, bitmapLength)];
-                int remaining = bitmapLength;
-                long bitmapOffset = 0;
-                while (remaining > 0) {
-                    int bytesToRead = Math.min(staging.length, remaining);
-                    IOUtil.readFully(stream, staging, 0, bytesToRead);
-                    bitmap.setBytes(bitmapOffset, staging, 0, bytesToRead);
-                    crc.update(staging, 0, bytesToRead);
-                    bitmapOffset += bytesToRead;
-                    remaining -= bytesToRead;
-                }
-                byte[] crcBytes = new byte[CRC_SIZE_BYTES];
-                IOUtil.readFully(stream, crcBytes, 0, crcBytes.length);
-                int expectedCrc = ByteBuffer.wrap(crcBytes).getInt();
-                int actualCrc = (int) crc.getValue();
-                if (actualCrc != expectedCrc) {
-                    throw new IOException("Invalid CRC: " + actualCrc
-                            + ", expected " + expectedCrc);
-                }
                 return new IcebergDeletionVector(bitmap, size, cardinality);
-            } catch (IOException | RuntimeException | Error e) {
+            } catch (RuntimeException | Error e) {
                 bitmap.close();
                 throw e;
             }
