@@ -48,8 +48,6 @@ trait GpuBatchScanExecMetrics extends GpuExec {
       createMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_DV_POSITIONS),
     ICEBERG_DV_LOAD_TIME ->
       createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_DV_LOAD_TIME),
-    ICEBERG_DV_FILTER_TIME ->
-      createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_ICEBERG_DV_FILTER_TIME),
   ) ++ fileCacheMetrics ++ scanCustomMetrics
 
   lazy val fileCacheMetrics: Map[String, GpuMetric] = createFileCacheMetrics()

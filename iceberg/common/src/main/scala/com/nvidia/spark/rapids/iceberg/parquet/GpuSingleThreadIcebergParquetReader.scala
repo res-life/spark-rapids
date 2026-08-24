@@ -167,20 +167,20 @@ private class SingleFileReader(
           chunkedBlocks: Seq[BlockMetaData],
           dataBuffer: SpillableHostBuffer): Iterator[ColumnarBatch] = {
         deletionVector.map { dv =>
-          RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { _ =>
-            val hostBuffer = dataBuffer.getDataHostBuffer()
+          RmmRapidsRetryIterator.withRetryNoSplit(dataBuffer) { spillableBuffer =>
+            val hostBuffer = spillableBuffer.getDataHostBuffer()
             closeOnExcept(hostBuffer) { _ =>
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
-              val producer = GpuIcebergDeletionVector.makeProducer(
-                readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
-                readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
-                readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
-                readerConf.caseSensitive,
-                useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
-                Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
-                readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)
-              CachedGpuBatchIterator(producer, LongType +: colTypes)
             }
+            val producer = GpuIcebergDeletionVector.makeProducer(
+              readerConf.useChunkedReader, readerConf.maxChunkedReaderMemoryUsageSizeBytes,
+              readerConf.conf, readerConf.targetBatchSizeBytes, parquetOpts, Array(hostBuffer),
+              readerConf.metrics, DateTimeRebaseCorrected, DateTimeRebaseCorrected,
+              readerConf.caseSensitive,
+              useFieldId = false, filteredParquet.readSchema, filteredParquet.schema,
+              Array(file.sparkPartitionedFile), readerConf.parquetDebugDumpPrefix,
+              readerConf.parquetDebugDumpAlways, dv, chunkedBlocks)
+            CachedGpuBatchIterator(producer, LongType +: colTypes)
           }
         }.getOrElse(super.readBuffer(parquetOpts, colTypes, chunkedBlocks, dataBuffer))
       }

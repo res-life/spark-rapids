@@ -146,7 +146,6 @@ object GpuMetric extends Logging {
   val ICEBERG_DV_BYTES = "icebergDvBytes"
   val ICEBERG_DV_POSITIONS = "icebergDvPositions"
   val ICEBERG_DV_LOAD_TIME = "icebergDvLoadTime"
-  val ICEBERG_DV_FILTER_TIME = "icebergDvFilterTime"
 
   // Metric Descriptions.
   val DESCRIPTION_BUFFER_TIME = "buffer time"
@@ -208,7 +207,6 @@ object GpuMetric extends Logging {
   val DESCRIPTION_ICEBERG_DV_BYTES = "Iceberg deletion vector bytes loaded"
   val DESCRIPTION_ICEBERG_DV_POSITIONS = "Iceberg deletion vector positions loaded"
   val DESCRIPTION_ICEBERG_DV_LOAD_TIME = "Iceberg deletion vector load time"
-  val DESCRIPTION_ICEBERG_DV_FILTER_TIME = "Iceberg deletion vector filtering time"
 
   /**
    * Determine if a GpuMetric wraps a TimingMetric or NanoTimingMetric.

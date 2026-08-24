@@ -22,9 +22,6 @@ import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.IOUtil;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.zip.CRC32;
 
 /**
  * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
@@ -33,11 +30,9 @@ import java.util.zip.CRC32;
  * owns its host buffer and must be closed after all borrowed references have been released.
  */
 public final class IcebergDeletionVector implements AutoCloseable {
-    private static final int LENGTH_SIZE_BYTES = 4;
-    private static final int MAGIC_NUMBER_SIZE_BYTES = 4;
-    private static final int CRC_SIZE_BYTES = 4;
+    private static final int BITMAP_OFFSET_BYTES = 8;
+    private static final int ENVELOPE_SIZE_BYTES = 12;
     private static final int MINIMUM_SIZE_BYTES = 20;
-    private static final int MAGIC_NUMBER = 1681511377;
     private static final int STAGING_BUFFER_SIZE_BYTES = 64 * 1024;
 
     private final HostMemoryBuffer serializedBitmap;
@@ -71,33 +66,10 @@ public final class IcebergDeletionVector implements AutoCloseable {
         }
 
         try (SeekableInputStream stream = inputFile.open()) {
-            stream.seek(offset);
-            byte[] header = new byte[LENGTH_SIZE_BYTES + MAGIC_NUMBER_SIZE_BYTES];
-            IOUtil.readFully(stream, header, 0, header.length);
-
-            int bitmapDataLength = ByteBuffer.wrap(header).getInt();
-            long expectedBitmapDataLength = size - LENGTH_SIZE_BYTES - CRC_SIZE_BYTES;
-            if (bitmapDataLength != expectedBitmapDataLength) {
-                throw new IllegalArgumentException(
-                        "Invalid deletion-vector bitmap data length: " + bitmapDataLength
-                                + ", expected " + expectedBitmapDataLength);
-            }
-
-            int magicNumber = ByteBuffer.wrap(header)
-                    .order(ByteOrder.LITTLE_ENDIAN)
-                    .getInt(LENGTH_SIZE_BYTES);
-            if (magicNumber != MAGIC_NUMBER) {
-                throw new IllegalArgumentException(
-                        "Invalid deletion-vector magic number: " + magicNumber
-                                + ", expected " + MAGIC_NUMBER);
-            }
-
-            int bitmapLength = bitmapDataLength - MAGIC_NUMBER_SIZE_BYTES;
+            stream.seek(offset + BITMAP_OFFSET_BYTES);
+            int bitmapLength = Math.toIntExact(size - ENVELOPE_SIZE_BYTES);
             HostMemoryBuffer bitmap = HostMemoryBuffer.allocate(bitmapLength);
             try {
-                CRC32 crc = new CRC32();
-                crc.update(header, LENGTH_SIZE_BYTES, MAGIC_NUMBER_SIZE_BYTES);
-
                 byte[] staging = new byte[Math.min(STAGING_BUFFER_SIZE_BYTES, bitmapLength)];
                 int remaining = bitmapLength;
                 long bitmapOffset = 0;
@@ -105,21 +77,10 @@ public final class IcebergDeletionVector implements AutoCloseable {
                     int bytesToRead = Math.min(staging.length, remaining);
                     IOUtil.readFully(stream, staging, 0, bytesToRead);
                     bitmap.setBytes(bitmapOffset, staging, 0, bytesToRead);
-                    crc.update(staging, 0, bytesToRead);
                     bitmapOffset += bytesToRead;
                     remaining -= bytesToRead;
                 }
-
-                byte[] expectedCrcBytes = new byte[CRC_SIZE_BYTES];
-                IOUtil.readFully(stream, expectedCrcBytes, 0, expectedCrcBytes.length);
-                int expectedCrc = ByteBuffer.wrap(expectedCrcBytes).getInt();
-                int actualCrc = (int) crc.getValue();
-                if (actualCrc != expectedCrc) {
-                    throw new IllegalArgumentException(
-                            "Invalid deletion-vector CRC: " + actualCrc
-                                    + ", expected " + expectedCrc);
-                }
-
+                IOUtil.readFully(stream, new byte[Integer.BYTES], 0, Integer.BYTES);
                 return new IcebergDeletionVector(bitmap, size, cardinality);
             } catch (IOException | RuntimeException | Error e) {
                 bitmap.close();

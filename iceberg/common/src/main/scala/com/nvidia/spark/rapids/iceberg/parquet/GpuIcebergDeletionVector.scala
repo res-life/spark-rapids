@@ -48,7 +48,8 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
 
   /**
    * Creates a cuDF table producer. The returned tables contain a leading INT64 file-row-index
-   * column followed by the evolved Parquet columns.
+   * column followed by the evolved Parquet columns. This method takes ownership of `buffers`,
+   * including when producer construction fails.
    */
   def makeProducer(
       useChunkedReader: Boolean,
@@ -69,17 +70,21 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
       debugDumpAlways: Boolean,
       deletionVector: IcebergDeletionVector,
       blocks: collection.Seq[BlockMetaData]): GpuDataProducer[Table] = {
-    require(buffers.length == 1,
-      s"Iceberg deletion-vector reads require one Parquet buffer, found ${buffers.length}")
-    debugDumpPrefix.foreach { prefix =>
-      if (debugDumpAlways) {
-        val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
-        logWarning(s"Wrote data for ${splits.mkString(", ")} to $path")
+    def makeDeletionVectorInfo(): DeletionVector.DeletionVectorInfo = {
+      require(buffers.length == 1,
+        s"Iceberg deletion-vector reads require one Parquet buffer, found ${buffers.length}")
+      debugDumpPrefix.foreach { prefix =>
+        if (debugDumpAlways) {
+          val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
+          logWarning(s"Wrote data for ${splits.mkString(", ")} to $path")
+        }
       }
+      makeInfo(deletionVector, blocks)
     }
-    val dvInfo = makeInfo(deletionVector, blocks)
+
     if (useChunkedReader) {
       closeOnExcept(buffers) { _ =>
+        val dvInfo = makeDeletionVectorInfo()
         closeOnExcept(dvInfo.serializedBitmap) { _ =>
           new ChunkedDeletionVectorProducer(
             maxChunkedReaderMemoryUsageSizeBytes, conf, chunkSizeByteLimit, opts, buffers, metrics,
@@ -89,12 +94,11 @@ private[parquet] object GpuIcebergDeletionVector extends Logging {
       }
     } else {
       withResource(buffers) { _ =>
+        val dvInfo = makeDeletionVectorInfo()
         withResource(dvInfo.serializedBitmap) { _ =>
           val rawTable = try {
             NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
-              metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns {
-                DeletionVector.readParquet(opts, buffers, Array(dvInfo))
-              }
+              DeletionVector.readParquet(opts, buffers, Array(dvInfo))
             }
           } catch {
             case NonFatal(e) =>
@@ -200,7 +204,7 @@ private class ChunkedDeletionVectorProducer(
   private def decodeWithErrorContext[T](decode: => T): T = {
     try {
       NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
-        metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns(decode)
+        decode
       }
     } catch {
       case NonFatal(e) =>

@@ -137,21 +137,21 @@ class GpuMultiThreadIcebergParquetReader(
             val hostBufs = spillableBuffers.safeMap(_.getDataHostBuffer()).toArray
             closeOnExcept(hostBufs) { _ =>
               GpuSemaphore.acquireIfNecessary(TaskContext.get())
-              val producer = GpuIcebergDeletionVector.makeProducer(
-                GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
-                GpuMultiThreadIcebergParquetReader.this.conf.maxChunkedReaderMemoryUsageSizeBytes,
-                GpuMultiThreadIcebergParquetReader.this.conf.conf,
-                GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
-                parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,
-                buffer.dateRebaseMode, buffer.timestampRebaseMode,
-                GpuMultiThreadIcebergParquetReader.this.conf.caseSensitive,
-                useFieldId = false, buffer.readSchema, buffer.clippedSchema,
-                Array(buffer.partitionedFile),
-                GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpPrefix,
-                GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpAlways,
-                deletionVector, blocks)
-              CachedGpuBatchIterator(producer, columnTypes)
             }
+            val producer = GpuIcebergDeletionVector.makeProducer(
+              GpuMultiThreadIcebergParquetReader.this.conf.useChunkedReader,
+              GpuMultiThreadIcebergParquetReader.this.conf.maxChunkedReaderMemoryUsageSizeBytes,
+              GpuMultiThreadIcebergParquetReader.this.conf.conf,
+              GpuMultiThreadIcebergParquetReader.this.conf.targetBatchSizeBytes,
+              parseOptions, hostBufs, GpuMultiThreadIcebergParquetReader.this.conf.metrics,
+              buffer.dateRebaseMode, buffer.timestampRebaseMode,
+              GpuMultiThreadIcebergParquetReader.this.conf.caseSensitive,
+              useFieldId = false, buffer.readSchema, buffer.clippedSchema,
+              Array(buffer.partitionedFile),
+              GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpPrefix,
+              GpuMultiThreadIcebergParquetReader.this.conf.parquetDebugDumpAlways,
+              deletionVector, blocks)
+            CachedGpuBatchIterator(producer, columnTypes)
           }
         }.getOrElse(super.readBufferToBatches(buffer))
       }
