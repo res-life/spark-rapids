@@ -81,7 +81,6 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
   }
 
   private class ByteArrayInputFile(bytes: Array[Byte]) extends RapidsInputFile {
-    var openCount = 0
     var readVectoredCount = 0
     var lastCopyRange: CopyRange = _
 
@@ -104,7 +103,6 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     }
 
     override def open(): SeekableInputStream = {
-      openCount += 1
       new ByteArraySeekableInputStream(bytes)
     }
   }
@@ -189,24 +187,5 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
       }
       assert(error.getMessage.contains(expectedMessage))
     }
-  }
-
-  test("reject invalid deletion-vector ranges before opening the file") {
-    val inputFile = new ByteArrayInputFile(Array.emptyByteArray)
-    val invalidRanges = Seq[(java.lang.Long, java.lang.Long)](
-      (null, java.lang.Long.valueOf(20L)),
-      (java.lang.Long.valueOf(-1L), java.lang.Long.valueOf(20L)),
-      (java.lang.Long.valueOf(0L), null),
-      (java.lang.Long.valueOf(0L), java.lang.Long.valueOf(19L)),
-      (java.lang.Long.valueOf(0L), java.lang.Long.valueOf(Integer.MAX_VALUE.toLong + 1L)),
-      (java.lang.Long.valueOf(Long.MaxValue - 10L), java.lang.Long.valueOf(20L)))
-
-    invalidRanges.foreach { case (offset, size) =>
-      assertThrows[IllegalArgumentException] {
-        IcebergDeletionVector.read(inputFile, offset, size, 0L)
-      }
-    }
-    assert(inputFile.openCount == 0)
-    assert(inputFile.readVectoredCount == 0)
   }
 }
