@@ -971,8 +971,8 @@ case class GpuStringTranslate(
   private def buildLists(fromExpr: GpuScalar, toExpr: GpuScalar): (List[String], List[String]) = {
     val fromString = fromExpr.getValue.asInstanceOf[UTF8String].toString
     val toString = toExpr.getValue.asInstanceOf[UTF8String].toString
-    var fromCharsArray = Array[String]()
-    var toCharsArray = Array[String]()
+    val fromCharsArray = ArrayBuffer[String]()
+    val toCharsArray = ArrayBuffer[String]()
     var i = 0
     var j = 0
     while (i < fromString.length) {
@@ -987,8 +987,8 @@ case class GpuStringTranslate(
       val matchCharCount = Character.charCount(fromString.codePointAt(i))
       val matchStr = fromString.substring(i, i + matchCharCount)
       i += matchCharCount
-      fromCharsArray :+= matchStr
-      toCharsArray :+= replaceStr
+      fromCharsArray += matchStr
+      toCharsArray += replaceStr
     }
     (fromCharsArray.toList, toCharsArray.toList)
   }
@@ -1352,7 +1352,7 @@ case class GpuContainsAny(input: Expression, targets: Seq[UTF8String])
 
   def multiOrsAst: ast.AstExpression = {
     (1 until targets.length)
-    .foldLeft(new ast.ColumnReference(0).asInstanceOf[ast.AstExpression]) { (acc, id) =>
+    .foldLeft[ast.AstExpression](new ast.ColumnReference(0)) { (acc, id) =>
       new ast.BinaryOperation(ast.BinaryOperator.NULL_LOGICAL_OR, acc, new ast.ColumnReference(id))
     }
   }
@@ -1846,11 +1846,7 @@ trait BasePad
   override def doColumnar(str: GpuColumnVector, len: GpuScalar, pad: GpuScalar): ColumnVector = {
     if (len.isValid && pad.isValid) {
       val l = math.max(0, len.getValue.asInstanceOf[Int])
-      val padStr = if (pad.isValid) {
-        pad.getValue.asInstanceOf[UTF8String].toString
-      } else {
-        null
-      }
+      val padStr = pad.getValue.asInstanceOf[UTF8String].toString
       withResource(str.getBase.pad(l, direction, padStr)) { padded =>
         padded.substring(0, l)
       }
