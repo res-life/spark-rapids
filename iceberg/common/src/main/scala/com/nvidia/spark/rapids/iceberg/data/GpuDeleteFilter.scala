@@ -36,7 +36,7 @@ import org.apache.iceberg.types.TypeUtil.getProjectedIds
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.ExprId
 import org.apache.spark.sql.rapids.execution.HashedExistenceJoinIterator
-import org.apache.spark.sql.types.{BooleanType, DataType, LongType}
+import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /** Delete files split by the phase that applies them. */
@@ -80,8 +80,7 @@ class GpuDeleteFilter(
     val inputFiles: Map[String, IcebergInputFile],
     val parquetConf: GpuIcebergParquetReaderConf,
     private val deletes: Seq[DeleteFile],
-    deleteLoaderProvider: => Option[GpuDeleteLoader] = None,
-    private val deletionVector: Option[DeleteFile] = None) extends Logging with AutoCloseable {
+    deleteLoaderProvider: => Option[GpuDeleteLoader] = None) extends Logging with AutoCloseable {
   private lazy val readSchema = parquetConf.expectedSchema
 
   private lazy val deleteLoader = deleteLoaderProvider.getOrElse(
@@ -136,39 +135,7 @@ class GpuDeleteFilter(
   }
 
   private lazy val posDeleteContext = loadPosDeletesContext()
-  private lazy val deletionVectorContext = loadDeletionVectorContext()
   private lazy val eqDeleteContexts = loadEqDeleteContexts()
-
-  private lazy val dropFilterColumnsMask = {
-    val expectedFieldIds = parquetConf.expectedSchema.columns().asScala.map(_.fieldId()).toSet
-    Array.tabulate[Boolean](filterOutputSparkDataTypes.length) { i =>
-      if (i < requiredSchema.columns().size()) {
-        !expectedFieldIds.contains(requiredSchema.columns().get(i).fieldId())
-      } else {
-        true
-      }
-    }
-  }
-
-  /**
-   * Applies deletes using Iceberg's projected schema semantics. When `_deleted` is projected,
-   * retain rows and update that column; otherwise remove deleted rows.
-   */
-  def filterOrDelete(input: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = {
-    isDeleteColIdx match {
-      case Some(_) =>
-        filter(input).map { batch =>
-          if (dropFilterColumnsMask.exists(identity)) {
-            withResource(batch) { _ =>
-              GpuColumnVector.dropColumns(batch, dropFilterColumnsMask)
-            }
-          } else {
-            batch
-          }
-        }
-      case None => filterAndDelete(input)
-    }
-  }
 
 
   /**
@@ -189,12 +156,24 @@ class GpuDeleteFilter(
    * @return Output column batches with rows deleted based on the filter result.
    */
   def filterAndDelete(input: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = {
+    // Compute which columns to keep (only those in the original expectedSchema)
+    val expectedFieldIds = parquetConf.expectedSchema.columns().asScala.map(_.fieldId()).toSet
+
+    val dropMask = Array.tabulate[Boolean](filterOutputSparkDataTypes.length) { i =>
+      if (i < requiredSchema.columns().size()) {
+        val fieldId = requiredSchema.columns().get(i).fieldId()
+        !expectedFieldIds.contains(fieldId)  // Drop if not in expected schema
+      } else {
+        true  // Drop IS_DELETED column (if appended)
+      }
+    }
+
     filter(input).map(cb => {
       isDeleteColIdx match {
         case Some(idx) =>
           filterAndDrop(cb, idx, filterOutputSparkDataTypes)
         case None =>
-          filterAndDrop(cb, cb.numCols() - 1, filterOutputSparkDataTypes, dropFilterColumnsMask)
+          filterAndDrop(cb, cb.numCols() - 1, filterOutputSparkDataTypes, dropMask)
       }
     })
   }
@@ -219,7 +198,7 @@ class GpuDeleteFilter(
     val mergeFunc = (delCol1: GpuColumnVector, delCol2: GpuColumnVector) => {
       GpuColumnVector.from(delCol1.getBase.or(delCol2.getBase), BooleanType)
     }
-    (eqDeleteContexts ++ posDeleteContext ++ deletionVectorContext)
+    (eqDeleteContexts ++ posDeleteContext)
       .zipWithIndex
       .foldLeft(input) {
         case (inputBatches, (ctx, idx)) =>
@@ -241,7 +220,7 @@ class GpuDeleteFilter(
   }
 
   private def computeRequiredSchema(): Schema = {
-    if (deletes.isEmpty && deletionVector.isEmpty) {
+    if (deletes.isEmpty) {
       return readSchema
     }
 
@@ -251,14 +230,11 @@ class GpuDeleteFilter(
         .map(_.toInt)
         .toSet
 
-      val positionDeleteIds = if (posDeleteFiles.nonEmpty) {
-        DELETE_EXTRA_METADATA_COLUMN_IDS
-      } else if (deletionVector.isDefined) {
-        Set(MetadataColumns.ROW_POSITION.fieldId())
+      if (posDeleteFiles.nonEmpty) {
+        eqDeleteIds ++ DELETE_EXTRA_METADATA_COLUMN_IDS
       } else {
-        Set.empty[Int]
+        eqDeleteIds
       }
-      eqDeleteIds ++ positionDeleteIds
     }
 
 
@@ -324,23 +300,6 @@ class GpuDeleteFilter(
       probeKeys,
       parquetConf.metrics(OP_TIME_LEGACY),
       parquetConf.metrics(JOIN_TIME)))
-  }
-
-  private def loadDeletionVectorContext(): Option[DeleteFilterContext] = {
-    deletionVector.map { delete =>
-      val buildSide = deleteLoader.loadDeletionVectorDeletes(delete)
-      val buildKey = GpuBoundReference(0, LongType, nullable = false)(
-        ExprId(0), MetadataColumns.DELETE_FILE_POS.name())
-      val inputIdx = fieldIndex(requiredSchema, MetadataColumns.ROW_POSITION.fieldId())
-      val probeKey = GpuBoundReference(inputIdx, LongType, nullable = false)(
-        ExprId(0), MetadataColumns.ROW_POSITION.name())
-
-      DeleteFilterContext(buildSide,
-        Seq(buildKey),
-        Seq(probeKey),
-        parquetConf.metrics(OP_TIME_LEGACY),
-        parquetConf.metrics(JOIN_TIME))
-    }
   }
 
   private def loadEqDeleteContexts(): Seq[DeleteFilterContext] = {

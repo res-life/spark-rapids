@@ -51,29 +51,18 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       file -> GpuDeleteFileInfo(scanTask.deletes().asScala.toSeq)
     }
   private lazy val deleteLoader = new DefaultDeleteLoader(rapidsFileIO, inputFiles, conf)
-  private lazy val projectsIsDeleted =
-    conf.expectedSchema.findField(MetadataColumns.IS_DELETED.fieldId()) != null
   private def deletionVectorProvider(file: IcebergPartitionedFile) = {
-    if (projectsIsDeleted) {
-      None
-    } else {
-      deleteInfoMap(file).deletionVector.map { delete =>
-        deleteLoader.loadDeletionVector(delete)
-      }
+    deleteInfoMap(file).deletionVector.map { delete =>
+      deleteLoader.loadDeletionVector(delete)
     }
   }
   private lazy val gpuDeleteFiterMap: Map[IcebergPartitionedFile, Option[GpuDeleteFilter]] =
     tasks.map {
       case (file, _) =>
         val postReadDeletes = deleteInfoMap(file).postReadDeletes
-        val postReadDeletionVector = if (projectsIsDeleted) {
-          deleteInfoMap(file).deletionVector
-        } else {
-          None
-        }
-        val filter = if (postReadDeletes.nonEmpty || postReadDeletionVector.nonEmpty) {
+        val filter = if (postReadDeletes.nonEmpty) {
           Some(new GpuDeleteFilter(rapidsFileIO, table.schema(),
-            inputFiles, conf, postReadDeletes, deletionVector = postReadDeletionVector))
+            inputFiles, conf, postReadDeletes))
         } else {
           None
         }

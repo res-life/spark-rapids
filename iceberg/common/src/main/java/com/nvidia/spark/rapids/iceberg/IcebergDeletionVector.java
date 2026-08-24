@@ -20,12 +20,8 @@ import ai.rapids.cudf.HostMemoryBuffer;
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile;
 import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.IOUtil;
-import org.roaringbitmap.IntIterator;
-import org.roaringbitmap.RoaringBitmap;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 
 /**
  * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
@@ -96,63 +92,6 @@ public final class IcebergDeletionVector implements AutoCloseable {
     /** Returns the number of positions in the deletion vector. */
     public long cardinality() {
         return cardinality;
-    }
-
-    /**
-     * Returns the positions encoded by this deletion vector.
-     *
-     * <p>This is used when Iceberg projects {@code _deleted}: the Parquet reader must retain all
-     * rows, so the deletion vector is applied after the read to mark rows instead of removing
-     * them. Iceberg serializes a 64-bit bitmap as a little-endian sequence of keyed 32-bit
-     * Roaring bitmaps.
-     */
-    public long[] deletedPositions() throws IOException {
-        if (cardinality > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException(
-                    "Cannot materialize a deletion vector with more than Integer.MAX_VALUE rows");
-        }
-
-        byte[] bytes = new byte[(int) serializedBitmap.getLength()];
-        serializedBitmap.getBytes(bytes, 0, 0, bytes.length);
-        ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
-
-        long bitmapCount = buffer.getLong();
-        if (bitmapCount < 0 || bitmapCount > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException(
-                    "Invalid deletion-vector bitmap count: " + bitmapCount);
-        }
-
-        long[] positions = new long[(int) cardinality];
-        int positionIndex = 0;
-        int lastKey = -1;
-        for (int i = 0; i < (int) bitmapCount; i++) {
-            int key = buffer.getInt();
-            if (key < 0 || key <= lastKey) {
-                throw new IllegalArgumentException("Invalid deletion-vector bitmap key: " + key);
-            }
-
-            RoaringBitmap bitmap = new RoaringBitmap();
-            bitmap.deserialize(buffer);
-            buffer.position(buffer.position() + bitmap.serializedSizeInBytes());
-            IntIterator iterator = bitmap.getIntIterator();
-            while (iterator.hasNext()) {
-                if (positionIndex == positions.length) {
-                    throw new IllegalArgumentException(
-                            "Deletion-vector cardinality is smaller than its serialized bitmap");
-                }
-                positions[positionIndex] =
-                        (((long) key) << 32) | Integer.toUnsignedLong(iterator.next());
-                positionIndex += 1;
-            }
-            lastKey = key;
-        }
-
-        if (positionIndex != positions.length) {
-            throw new IllegalArgumentException(
-                    "Deletion-vector cardinality does not match its serialized bitmap: expected "
-                            + positions.length + ", found " + positionIndex);
-        }
-        return positions;
     }
 
     @Override

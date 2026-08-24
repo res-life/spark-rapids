@@ -204,13 +204,6 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
         # Reset the GPU plan-validation config before fixture teardown.
         is_cpu_first=False)
 
-    # Projecting _deleted must retain every row and mark the rows referenced by the DV.
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT _c0, _c1, _deleted FROM {table_name}"),
-        conf=read_conf,
-        is_cpu_first=False)
-
 
 @iceberg
 @ignore_order(local=True)

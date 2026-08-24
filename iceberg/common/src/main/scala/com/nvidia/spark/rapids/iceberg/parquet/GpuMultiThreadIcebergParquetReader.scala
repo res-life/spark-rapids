@@ -166,7 +166,7 @@ class GpuMultiThreadIcebergParquetReader(
           postProcessor.process(batch)
         }
         deleteFilterProvider(icebergFile)
-          .map(_.filterOrDelete(postProcessed))
+          .map(_.filterAndDelete(postProcessed))
           .getOrElse(postProcessed)
       }
     }

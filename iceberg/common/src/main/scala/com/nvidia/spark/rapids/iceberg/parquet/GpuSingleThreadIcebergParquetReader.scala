@@ -74,7 +74,7 @@ class GpuSingleThreadIcebergParquetReader(
         parquetIterator = new SingleFileReader(rapidsFileIO, file, constantsProvider(file),
           gpuDeleteFilter, deletionVectorProvider(file), conf)
         dataIterator = gpuDeleteFilter
-          .map(_.filterOrDelete(parquetIterator))
+          .map(_.filterAndDelete(parquetIterator))
           .getOrElse(parquetIterator)
         // update the current file for Spark's filename() function
         InputFileUtils.setInputFileBlock(file.path.toString, file.start, file.length)

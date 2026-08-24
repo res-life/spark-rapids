@@ -40,7 +40,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{MessageType => Shade
 import org.apache.iceberg.spark.SparkSchemaUtil
 import org.apache.iceberg.types.{Type, Types}
 
-import org.apache.spark.sql.types.{BooleanType, DataType, StringType}
+import org.apache.spark.sql.types.{DataType, StringType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 
 /**
@@ -156,19 +156,6 @@ private[iceberg] case object FetchFilePath extends ColumnAction {
 
   override def display(indent: Int): String = {
     " " * indent + "FetchFilePath"
-  }
-}
-
-/** Initialize the IS_DELETED metadata column before applying delete filters. */
-private[iceberg] case object FetchIsDeleted extends ColumnAction {
-  override def execute(ctx: ColumnActionContext): CudfColumnVector = {
-    withResource(GpuScalar.from(false, BooleanType)) { scalar =>
-      CudfColumnVector.fromScalar(scalar, ctx.numRows)
-    }
-  }
-
-  override def display(indent: Int): String = {
-    " " * indent + "FetchIsDeleted"
   }
 }
 
@@ -397,7 +384,7 @@ private[iceberg] object MissingFieldActionBuilder {
       return FetchRowPosition
     }
     if (fieldId == MetadataColumns.IS_DELETED.fieldId) {
-      return FetchIsDeleted
+      throw new UnsupportedOperationException("IS_DELETED meta column is not supported yet")
     }
 
     // 3. Check if optional - fill null

@@ -19,7 +19,7 @@ package com.nvidia.spark.rapids.iceberg.data
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Table => CudfTable}
+import ai.rapids.cudf.{Table => CudfTable}
 import com.nvidia.spark.rapids.{GpuColumnVector, LazySpillableColumnarBatch, NoopMetric}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.GpuMetric.{ICEBERG_DV_BYTES, ICEBERG_DV_DECODE_TIME,
@@ -30,7 +30,7 @@ import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.parquet._
 import org.apache.iceberg.{DeleteFile, MetadataColumns, Schema}
 
-import org.apache.spark.sql.types.{DataType, LongType}
+import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 
@@ -38,8 +38,6 @@ trait GpuDeleteLoader {
   def loadDeletes(deletes: Seq[DeleteFile],
       schema: Schema,
       sparkTypes: Array[DataType]): LazySpillableColumnarBatch
-
-  def loadDeletionVectorDeletes(delete: DeleteFile): LazySpillableColumnarBatch
 }
 
 class DefaultDeleteLoader(
@@ -64,20 +62,6 @@ class DefaultDeleteLoader(
     parquetConf.metrics.getOrElse(ICEBERG_DV_POSITIONS, NoopMetric) +=
       deletionVector.cardinality()
     deletionVector
-  }
-
-  override def loadDeletionVectorDeletes(delete: DeleteFile): LazySpillableColumnarBatch = {
-    withResource(loadDeletionVector(delete)) { deletionVector =>
-      val deletedPositions = deletionVector.deletedPositions()
-      withResource(GpuColumnVector.from(
-          CudfColumnVector.fromLongs(deletedPositions: _*), LongType)) { positionColumn =>
-        withResource(new ColumnarBatch(
-            Array[org.apache.spark.sql.vectorized.ColumnVector](positionColumn),
-            deletedPositions.length)) { batch =>
-          LazySpillableColumnarBatch(batch, "Deletion vector positions")
-        }
-      }
-    }
   }
 
   override def loadDeletes(deletes: Seq[DeleteFile],
