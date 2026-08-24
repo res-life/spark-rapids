@@ -115,6 +115,9 @@ class GpuMultiThreadIcebergParquetReader(
         val curProcessor = postProcessors.get(curFile)
         val nextProcessor = postProcessors.get(nextFile)
         if (curProcessor == null || nextProcessor == null) return true
+        if (deletionVectors.containsKey(curFile) || deletionVectors.containsKey(nextFile)) {
+          return true
+        }
         !curProcessor.compatibleForCombining(nextProcessor)
       }
 
@@ -189,14 +192,16 @@ class GpuMultiThreadIcebergParquetReader(
         shadedFileReadSchema,
         conf.metrics)
 
-      val oldProcessor = postProcessors.put(icebergFile, postProcessor)
-      require(oldProcessor == null,
-        "Iceberg parquet partition file post processor already exists!")
       deletionVector.foreach { dv =>
         val oldVector = deletionVectors.put(icebergFile, dv)
         require(oldVector == null,
           "Iceberg parquet partition file deletion vector already exists!")
       }
+      // Publish the post-processor last. Its presence tells the combiner that the DV state for
+      // this file is final and can be checked without racing filterBlock initialization.
+      val oldProcessor = postProcessors.put(icebergFile, postProcessor)
+      require(oldProcessor == null,
+        "Iceberg parquet partition file post processor already exists!")
       filteredParquet
     }
   }

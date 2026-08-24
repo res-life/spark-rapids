@@ -18,6 +18,8 @@ package com.nvidia.spark.rapids.iceberg.parquet
 
 import java.io.IOException
 
+import scala.util.control.NonFatal
+
 import ai.rapids.cudf.{DeletionVector, DType, HostMemoryBuffer, ParquetOptions, Table}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
@@ -35,7 +37,7 @@ import org.apache.spark.sql.execution.datasources.PartitionedFile
 import org.apache.spark.sql.types.StructType
 
 /** Native cuDF Parquet deletion-vector support shared by the Iceberg readers. */
-object GpuIcebergDeletionVector extends Logging {
+private[parquet] object GpuIcebergDeletionVector extends Logging {
   def rowGroupMetadata(blocks: collection.Seq[BlockMetaData]): (Array[Long], Array[Int]) = {
     val offsets = blocks.map(GpuParquetUtilsShims.getRowIndexOffset)
     require(!offsets.exists(_ < 0), "Found invalid deletion-vector row-group offset")
@@ -95,7 +97,7 @@ object GpuIcebergDeletionVector extends Logging {
               }
             }
           } catch {
-            case e: Exception =>
+            case NonFatal(e) =>
               val dumpMessage = debugDumpPrefix.map { prefix =>
                 if (!debugDumpAlways) {
                   val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
@@ -201,7 +203,7 @@ private class ChunkedDeletionVectorProducer(
         metrics.getOrElse(ICEBERG_DV_FILTER_TIME, NoopMetric).ns(decode)
       }
     } catch {
-      case e: Exception =>
+      case NonFatal(e) =>
         val dumpMessage = debugDumpPrefix.map { prefix =>
           if (!debugDumpAlways) {
             val path = DumpUtils.dumpBuffer(conf, buffers, prefix, ".parquet")
