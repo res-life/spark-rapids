@@ -815,7 +815,7 @@ abstract class GpuToTimestamp
     val tmp = lhs.dataType match {
       case StringType =>
         // rhs is ignored we already parsed the format
-        val res = if (getTimeParserPolicy == LegacyTimeParserPolicy) {
+        val res = if (timeParserPolicy == LegacyTimeParserPolicy) {
           parseStringAsTimestampWithLegacyParserPolicy(lhs, sparkFormat)
         } else {
           parseStringAsTimestamp(
