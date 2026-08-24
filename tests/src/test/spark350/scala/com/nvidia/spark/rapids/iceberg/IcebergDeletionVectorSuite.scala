@@ -153,6 +153,29 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     }
   }
 
+  test("reject invalid deletion-vector envelopes") {
+    val envelope = serializeEnvelope(Array.fill[Byte](32)(3))
+    val invalidLength = envelope.clone()
+    ByteBuffer.wrap(invalidLength).putInt(envelope.length)
+    val invalidMagic = envelope.clone()
+    ByteBuffer.wrap(invalidMagic).order(ByteOrder.LITTLE_ENDIAN)
+      .putInt(Integer.BYTES, MagicNumber + 1)
+    val invalidCrc = envelope.clone()
+    invalidCrc(invalidCrc.length - 1) = (invalidCrc.last ^ 0xff).toByte
+
+    Seq(
+      (invalidLength, "Invalid bitmap data length"),
+      (invalidMagic, "Invalid magic number"),
+      (invalidCrc, "Invalid CRC")
+    ).foreach { case (bytes, expectedMessage) =>
+      val error = intercept[IOException] {
+        IcebergDeletionVector.read(
+          new ByteArrayInputFile(bytes), 0L, bytes.length.toLong, 1L)
+      }
+      assert(error.getMessage.contains(expectedMessage))
+    }
+  }
+
   test("reject invalid deletion-vector ranges before opening the file") {
     val inputFile = new ByteArrayInputFile(Array.emptyByteArray)
     val invalidRanges = Seq[(java.lang.Long, java.lang.Long)](

@@ -22,6 +22,9 @@ import com.nvidia.spark.rapids.jni.fileio.SeekableInputStream;
 import org.apache.iceberg.io.IOUtil;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.zip.CRC32;
 
 /**
  * An Iceberg deletion vector kept in its compressed Roaring-bitmap representation.
@@ -30,8 +33,12 @@ import java.io.IOException;
  * owns its host buffer and must be closed after all borrowed references have been released.
  */
 public final class IcebergDeletionVector implements AutoCloseable {
-    private static final int BITMAP_OFFSET_BYTES = 8;
-    private static final int ENVELOPE_SIZE_BYTES = 12;
+    private static final int MAGIC_NUMBER = 1681511377;
+    private static final int LENGTH_SIZE_BYTES = Integer.BYTES;
+    private static final int MAGIC_NUMBER_SIZE_BYTES = Integer.BYTES;
+    private static final int CRC_SIZE_BYTES = Integer.BYTES;
+    private static final int BITMAP_OFFSET_BYTES = LENGTH_SIZE_BYTES + MAGIC_NUMBER_SIZE_BYTES;
+    private static final int ENVELOPE_SIZE_BYTES = BITMAP_OFFSET_BYTES + CRC_SIZE_BYTES;
     private static final int MINIMUM_SIZE_BYTES = 20;
     private static final int STAGING_BUFFER_SIZE_BYTES = 64 * 1024;
 
@@ -48,7 +55,14 @@ public final class IcebergDeletionVector implements AutoCloseable {
         this.cardinality = cardinality;
     }
 
-    /** Reads an Iceberg deletion-vector byte range. */
+    /**
+     * Reads and validates an Iceberg deletion-vector byte range.
+     *
+     * <p>The range contains the bitmap-data length as a 4-byte big-endian integer, a 4-byte
+     * little-endian magic number, the portable Roaring bitmap in little-endian order, and a
+     * 4-byte big-endian CRC-32 of the magic number and bitmap. Only the bitmap is copied into the
+     * returned host buffer because that is the representation expected by cuDF.
+     */
     public static IcebergDeletionVector read(
             RapidsInputFile inputFile,
             Long offset,
@@ -66,13 +80,29 @@ public final class IcebergDeletionVector implements AutoCloseable {
         }
 
         try (SeekableInputStream stream = inputFile.open()) {
-            // Iceberg wraps the portable Roaring bitmap with an 8-byte header and a 4-byte CRC.
-            // cuDF accepts only the bitmap, so copy just that range instead of retaining a slice
-            // of a full-size host buffer. Use bounded heap staging to avoid a large byte[] for DVs.
-            stream.seek(offset + BITMAP_OFFSET_BYTES);
+            stream.seek(offset);
+            byte[] header = new byte[BITMAP_OFFSET_BYTES];
+            IOUtil.readFully(stream, header, 0, header.length);
+            ByteBuffer headerBuffer = ByteBuffer.wrap(header);
+            int bitmapDataLength = headerBuffer.getInt();
+            int expectedBitmapDataLength =
+                    Math.toIntExact(size - LENGTH_SIZE_BYTES - CRC_SIZE_BYTES);
+            if (bitmapDataLength != expectedBitmapDataLength) {
+                throw new IOException("Invalid bitmap data length: " + bitmapDataLength
+                        + ", expected " + expectedBitmapDataLength);
+            }
+            int magicNumber = headerBuffer.order(ByteOrder.LITTLE_ENDIAN).getInt(LENGTH_SIZE_BYTES);
+            if (magicNumber != MAGIC_NUMBER) {
+                throw new IOException("Invalid magic number: " + magicNumber
+                        + ", expected " + MAGIC_NUMBER);
+            }
+
             int bitmapLength = Math.toIntExact(size - ENVELOPE_SIZE_BYTES);
             HostMemoryBuffer bitmap = HostMemoryBuffer.allocate(bitmapLength);
             try {
+                CRC32 crc = new CRC32();
+                crc.update(header, LENGTH_SIZE_BYTES, MAGIC_NUMBER_SIZE_BYTES);
+                // Use bounded heap staging instead of allocating a byte[] for the entire DV.
                 byte[] staging = new byte[Math.min(STAGING_BUFFER_SIZE_BYTES, bitmapLength)];
                 int remaining = bitmapLength;
                 long bitmapOffset = 0;
@@ -80,11 +110,18 @@ public final class IcebergDeletionVector implements AutoCloseable {
                     int bytesToRead = Math.min(staging.length, remaining);
                     IOUtil.readFully(stream, staging, 0, bytesToRead);
                     bitmap.setBytes(bitmapOffset, staging, 0, bytesToRead);
+                    crc.update(staging, 0, bytesToRead);
                     bitmapOffset += bytesToRead;
                     remaining -= bytesToRead;
                 }
-                // Consume the CRC so a truncated deletion-vector range still fails here.
-                IOUtil.readFully(stream, new byte[Integer.BYTES], 0, Integer.BYTES);
+                byte[] crcBytes = new byte[CRC_SIZE_BYTES];
+                IOUtil.readFully(stream, crcBytes, 0, crcBytes.length);
+                int expectedCrc = ByteBuffer.wrap(crcBytes).getInt();
+                int actualCrc = (int) crc.getValue();
+                if (actualCrc != expectedCrc) {
+                    throw new IOException("Invalid CRC: " + actualCrc
+                            + ", expected " + expectedCrc);
+                }
                 return new IcebergDeletionVector(bitmap, size, cardinality);
             } catch (IOException | RuntimeException | Error e) {
                 bitmap.close();
