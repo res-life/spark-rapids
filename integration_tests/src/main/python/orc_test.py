@@ -1179,7 +1179,10 @@ def test_orc_reader_writer_the_same_timezone(reader_confs, spark_tmp_path, v1_en
 @ignore_order(local=True)
 def test_orc_gpu_write_cpu_read_timestamp_before_epoch(spark_tmp_path):
     gpu_write_path = spark_tmp_path + "/ORC_DATA_GPU"
-    ts_gen = TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc), nullable=True)
+    ts_gen = TimestampGen(
+        start=datetime(1590, 1, 1, tzinfo=timezone.utc),
+        end=datetime(1970, 1, 1, tzinfo=timezone.utc) - timedelta(microseconds=1),
+        nullable=True)
     # Write timestamp on GPU
     with_gpu_session(lambda spark: gen_df(spark, [("c1", ts_gen)]).write.orc(gpu_write_path))
     # Read timestamp on CPU and GPU
