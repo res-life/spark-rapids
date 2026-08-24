@@ -66,6 +66,9 @@ public final class IcebergDeletionVector implements AutoCloseable {
         }
 
         try (SeekableInputStream stream = inputFile.open()) {
+            // Iceberg wraps the portable Roaring bitmap with an 8-byte header and a 4-byte CRC.
+            // cuDF accepts only the bitmap, so copy just that range instead of retaining a slice
+            // of a full-size host buffer. Use bounded heap staging to avoid a large byte[] for DVs.
             stream.seek(offset + BITMAP_OFFSET_BYTES);
             int bitmapLength = Math.toIntExact(size - ENVELOPE_SIZE_BYTES);
             HostMemoryBuffer bitmap = HostMemoryBuffer.allocate(bitmapLength);
@@ -80,6 +83,7 @@ public final class IcebergDeletionVector implements AutoCloseable {
                     bitmapOffset += bytesToRead;
                     remaining -= bytesToRead;
                 }
+                // Consume the CRC so a truncated deletion-vector range still fails here.
                 IOUtil.readFully(stream, new byte[Integer.BYTES], 0, Integer.BYTES);
                 return new IcebergDeletionVector(bitmap, size, cardinality);
             } catch (IOException | RuntimeException | Error e) {

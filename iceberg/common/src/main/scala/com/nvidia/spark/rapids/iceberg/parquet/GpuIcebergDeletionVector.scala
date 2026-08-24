@@ -194,17 +194,9 @@ private class ChunkedDeletionVectorProducer(
   override def hasNext: Boolean = reader.hasNext
 
   override def next: Table = {
-    val rawTable = decodeWithErrorContext {
-      reader.readChunk()
-    }
-    GpuIcebergDeletionVector.processTable(rawTable, readDataSchema, clippedParquetSchema,
-      dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, splits, metrics)
-  }
-
-  private def decodeWithErrorContext[T](decode: => T): T = {
-    try {
+    val rawTable = try {
       NvtxIdWithMetrics(NvtxRegistry.PARQUET_DECODE, metrics(GPU_DECODE_TIME)) {
-        decode
+        reader.readChunk()
       }
     } catch {
       case NonFatal(e) =>
@@ -218,6 +210,8 @@ private class ChunkedDeletionVectorProducer(
         }.getOrElse("")
         throw new IOException(s"Error when processing ${splits.mkString("; ")}$dumpMessage", e)
     }
+    GpuIcebergDeletionVector.processTable(rawTable, readDataSchema, clippedParquetSchema,
+      dateRebaseMode, timestampRebaseMode, isSchemaCaseSensitive, useFieldId, splits, metrics)
   }
 
   override def close(): Unit = {
