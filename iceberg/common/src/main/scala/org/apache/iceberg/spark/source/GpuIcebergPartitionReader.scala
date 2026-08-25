@@ -21,7 +21,7 @@ import scala.collection.JavaConverters._
 import com.nvidia.spark.rapids.GpuMetric
 import com.nvidia.spark.rapids.MapUtil.toMapStrict
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.ShimUtils
+import com.nvidia.spark.rapids.iceberg.{IcebergDeletionVector, ShimUtils}
 import com.nvidia.spark.rapids.iceberg.ShimUtils.locationOf
 import com.nvidia.spark.rapids.iceberg.data.{DefaultDeleteLoader, GpuDeleteFileInfo,
   GpuDeleteFilter}
@@ -52,7 +52,8 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       file -> GpuDeleteFileInfo(scanTask.deletes().asScala.toSeq)
     }
   private lazy val deleteLoader = new DefaultDeleteLoader(rapidsFileIO, inputFiles, conf)
-  private def deletionVectorProvider(file: IcebergPartitionedFile) = {
+  private def deletionVectorProvider(
+      file: IcebergPartitionedFile): Option[IcebergDeletionVector] = {
     deleteInfoMap(file).deletionVector.map { delete =>
       deleteLoader.loadDeletionVector(delete)
     }
