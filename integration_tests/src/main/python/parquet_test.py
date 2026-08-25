@@ -1189,22 +1189,20 @@ _nested_pruning_schemas = [
             [["stRUct", StructGen([["CASE_INSENSITIVE", LongGen()]])]]),
         ]
 # TODO CHECK FOR DECIMAL??
-nested_pruning_params = [
-    _joint_param(data_gen, read_schema, reader_opt_confs[0], "", "true")
-    for data_gen, read_schema in _nested_pruning_schemas
-] + [
-    _joint_param(_nested_pruning_schemas[0][0], _nested_pruning_schemas[0][1], reader_confs,
-                 v1_enabled_list, nested_enabled)
-    for reader_confs in reader_opt_confs
-    for v1_enabled_list in ["", "parquet"]
-    for nested_enabled in ["true", "false"]
-    if not (reader_confs is reader_opt_confs[0] and v1_enabled_list == "" and
-            nested_enabled == "true")
-]
+nested_pruning_options = ["true", "false"]
 
-@pytest.mark.parametrize('data_gen,read_schema,reader_confs,v1_enabled_list,nested_enabled',
-                         nested_pruning_params, ids=idfn)
-def test_nested_pruning_and_case_insensitive(spark_tmp_path, data_gen, read_schema, reader_confs, v1_enabled_list, nested_enabled):
+# Distribute V1/V2 and reader configurations across
+# len(_nested_pruning_schemas) * len(nested_pruning_options) = 18 cases.
+@pytest.mark.parametrize('data_gen,read_schema', _nested_pruning_schemas, ids=idfn)
+@pytest.mark.parametrize('nested_enabled', nested_pruning_options)
+def test_nested_pruning_and_case_insensitive(spark_tmp_path, data_gen, read_schema,
+                                             nested_enabled):
+    case_index = _nested_pruning_schemas.index((data_gen, read_schema)) * 2 + (
+        nested_enabled == "false")
+    v1_enabled_list = ["", "parquet", "parquet", ""][case_index % 4]
+    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    if hasattr(reader_confs, 'marks'):
+        reader_confs = reader_confs.values[0]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
             lambda spark : gen_df(spark, data_gen).write.parquet(data_path),
