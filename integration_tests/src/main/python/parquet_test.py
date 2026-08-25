@@ -195,17 +195,14 @@ def test_parquet_read_avoid_coalesce_incompatible_files(spark_tmp_path, v1_enabl
             .option("recursiveFileLookup", "true").parquet(data_path),
         conf=all_confs)
 
-# Distribute data generators, read functions, and V1/V2 across
-# len(reader_opt_confs) = 13 cases.
+# Distribute read functions and V1/V2 across
+# len(parquet_gens_list) * len(reader_opt_confs) = 26 cases.
+@pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
-def test_parquet_read_round_trip(spark_tmp_path, reader_confs, request):
+def test_parquet_read_round_trip(spark_tmp_path, parquet_gens, reader_confs):
     case_index = reader_opt_confs.index(reader_confs)
-    parquet_gens_param = (
-        parquet_gens_list[-1]
-        if case_index == len(reader_opt_confs) - 1 else parquet_gens_list[0])
-    parquet_gens = _apply_param_marks(parquet_gens_param, request)
     read_func = [read_parquet_df, read_parquet_sql, read_parquet_sql, read_parquet_df][
         case_index % 4]
     v1_enabled_list = ["", "parquet", "", "parquet"][case_index % 4]
