@@ -220,7 +220,8 @@ def test_iceberg_v3_deletion_vector_count_with_name_mapping(
     def setup_table(spark):
         spark.sql(
             f"CREATE TABLE {target_table} (unused INT, a BIGINT, b STRING) "
-            "USING ICEBERG TBLPROPERTIES ('format-version' = '3')")
+            "USING ICEBERG TBLPROPERTIES ("
+            "'format-version' = '3', 'write.delete.mode' = 'merge-on-read')")
         spark.sql(f"ALTER TABLE {target_table} DROP COLUMN unused")
         spark.sql(f"CREATE TABLE {source_table} (a BIGINT, b STRING) USING PARQUET")
         (spark.range(100)
@@ -255,6 +256,8 @@ def test_iceberg_v3_deletion_vector_count_with_name_mapping(
     read_conf = {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        # The plan validator runs before AQE finalizes this aggregate in Spark 4.0.
+        'spark.sql.adaptive.enabled': 'false',
     }
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(f"SELECT count(*) FROM {target_table}"),
