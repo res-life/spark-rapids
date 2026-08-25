@@ -20,8 +20,8 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_row_counts_equal, assert_gpu_fallback_collect, assert_spark_exception
 from conftest import is_iceberg_remote_catalog, is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
-from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
-    _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
+from iceberg import _add_eq_deletes, get_full_table_name, iceberg_unsupported_mark, \
+    _build_tblprops, _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
     ICEBERG_V3_UNSUPPORTED_REASON
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_40x, is_spark_41x, \
@@ -312,8 +312,9 @@ def test_iceberg_v3_read_fallback(spark_tmp_table_factory):
 
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @ignore_order(local=True)
-def test_iceberg_v3_initial_defaults_gpu_read(spark_tmp_table_factory):
+def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
     table_name = get_full_table_name(spark_tmp_table_factory)
     props = _build_tblprops({"format-version": "3"})
     props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
@@ -332,22 +333,67 @@ def test_iceberg_v3_initial_defaults_gpu_read(spark_tmp_table_factory):
         jvm = spark_jvm()
         table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
             spark._jsparkSession, table_name)
-        expressions = jvm.org.apache.iceberg.expressions.Expressions
+        literals = jvm.org.apache.iceberg.expressions.Literal
         types = jvm.org.apache.iceberg.types.Types
         update = table.updateSchema()
+
+        def add_default(name, iceberg_type, value):
+            update.addColumn(name, iceberg_type, literals.of(value).to(iceberg_type))
+
+        # Cover every Iceberg 1.9 primitive type that Spark SQL can query. Iceberg TIME is omitted
+        # because Iceberg's Spark adapter rejects it with "Spark does not support time fields".
         update.addRequiredColumn(
-            "required_added", types.IntegerType.get(), None, expressions.lit(7))
-        update.addColumn("optional_added", types.StringType.get(), expressions.lit("legacy"))
-        update.addColumn("s", "nested_added", types.IntegerType.get(), expressions.lit(11))
+            "required_added", types.IntegerType.get(), None, literals.of(7))
+        update.addColumn("optional_added", types.StringType.get(), literals.of("legacy"))
+        update.addColumn("s", "nested_added", types.IntegerType.get(), literals.of(11))
+        add_default("boolean_added", types.BooleanType.get(), True)
+        add_default("long_added", types.LongType.get(), jvm.java.lang.Long.valueOf(5000000000))
+        add_default("float_added", types.FloatType.get(), jvm.java.lang.Float.valueOf("1.25"))
+        add_default("double_added", types.DoubleType.get(), 2.5)
+        add_default("date_added", types.DateType.get(), "2024-01-02")
+        add_default(
+            "timestamp_added",
+            types.TimestampType.withZone(),
+            "2024-01-02T03:04:05Z")
+        add_default(
+            "binary_added", types.BinaryType.get(),
+            jvm.java.nio.ByteBuffer.wrap(bytearray([1, 2, 3])))
+        add_default(
+            "decimal_added", types.DecimalType.of(9, 2),
+            jvm.java.math.BigDecimal("12345.67"))
+
+        # These types are representable by Iceberg/Spark but are not supported by the GPU
+        # default-materialization path and must cause scan fallback when projected.
+        add_default(
+            "timestamp_ntz_added",
+            types.TimestampType.withoutZone(),
+            "2024-01-02T03:04:05")
+        add_default(
+            "uuid_added", types.UUIDType.get(),
+            "123e4567-e89b-12d3-a456-426614174000")
+        add_default(
+            "fixed_added", types.FixedType.ofLength(3),
+            jvm.java.nio.ByteBuffer.wrap(bytearray([4, 5, 6])))
         update.commit()
         spark.sql(f"REFRESH TABLE {table_name}")
 
     with_cpu_session(setup_table)
-    assert_gpu_and_cpu_are_equal_collect(
+    v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(
-            f"SELECT id, s.present, s.nested_added, required_added, optional_added "
+            f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
+            "boolean_added, long_added, float_added, double_added, date_added, "
+            "timestamp_added, binary_added, decimal_added "
             f"FROM {table_name} ORDER BY id"),
-        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
+        exist_classes="GpuBatchScanExec",
+        conf=v3_conf)
+
+    for unsupported_column in ["timestamp_ntz_added", "uuid_added", "fixed_added"]:
+        assert_gpu_fallback_collect(
+            lambda spark, column=unsupported_column: spark.sql(
+                f"SELECT id, {column} FROM {table_name}"),
+            "BatchScanExec",
+            conf=v3_conf)
 
     # Spark 3.5 rejects omitted output columns before the Iceberg write path sees them. On newer
     # Spark runtimes, exercise write-default handling through unmodified Iceberg/Spark and then
@@ -363,6 +409,55 @@ def test_iceberg_v3_initial_defaults_gpu_read(spark_tmp_table_factory):
                 f"SELECT id, s.present, s.nested_added, required_added, optional_added "
                 f"FROM {table_name} WHERE id = 4").collect())
         assert written_rows == [Row(4, 40, 11, 7, "legacy")]
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="Requires local equality-delete UDF")
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+def test_iceberg_v3_default_on_implicit_equality_delete_field(
+        spark_tmp_table_factory,
+        spark_tmp_path,
+        register_iceberg_add_eq_deletes_udf):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    props = _build_tblprops({"format-version": "3"})
+    props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG PARTITIONED BY (id) "
+            f"TBLPROPERTIES ({props_sql})")
+        spark.sql(f"INSERT INTO {table_name} VALUES (1), (2)")
+
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        timestamp_ntz_type = jvm.org.apache.iceberg.types.Types.TimestampType.withoutZone()
+        default_value = jvm.org.apache.iceberg.expressions.Literal.of(
+            "2024-01-02T03:04:05").to(timestamp_ntz_type)
+        table.updateSchema().addColumn(
+            "_c9",
+            timestamp_ntz_type,
+            default_value).commit()
+        spark.sql(f"REFRESH TABLE {table_name}")
+        spark.sql(
+            f"INSERT INTO {table_name} (id, _c9) "
+            "VALUES (3, TIMESTAMP_NTZ '2025-01-02 03:04:05')")
+
+        # _c9 is intentionally omitted from the query below. The equality-delete file makes it an
+        # implicit required read field, and the old data file requires its initial default.
+        _add_eq_deletes(spark, ["_c9"], 1, table_name, spark_tmp_path)
+
+    with_cpu_session(setup_table)
+    remaining_rows = with_cpu_session(
+        lambda spark: spark.sql(f"SELECT id FROM {table_name} ORDER BY id").collect())
+    assert len(remaining_rows) == 2
+    assert Row(3) in remaining_rows
+    assert_gpu_fallback_collect(
+        lambda spark: spark.sql(f"SELECT id FROM {table_name}"),
+        "BatchScanExec",
+        conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
 
 
 @iceberg
