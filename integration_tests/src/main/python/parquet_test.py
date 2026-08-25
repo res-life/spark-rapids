@@ -42,14 +42,6 @@ def read_parquet_df(data_path):
 def read_parquet_sql(data_path):
     return lambda spark : spark.sql('select * from parquet.`{}`'.format(data_path))
 
-def _apply_param_marks(value, request):
-    """Apply marks from a pytest parameter selected inside a test and return its value."""
-    if hasattr(value, 'values') and hasattr(value, 'marks'):
-        for mark in value.marks:
-            request.node.add_marker(mark)
-        return value.values[0]
-    return value
-
 # Large matrices below parametrize their primary dimensions and distribute secondary dimensions
 # inside each test using a stable case index. This retains every independent input while avoiding
 # repeated interactions between orthogonal axes.
@@ -230,17 +222,14 @@ _resource_bounded_pool_conf_matrix = resource_bounded_multithreaded_reader_conf(
         datetimeRebaseModeInReadKey: 'CORRECTED'
     })
 
-# Distribute data generators across
-# len(_resource_bounded_pool_conf_matrix) = 144 cases.
+# Exercise every data generator group with every resource-bounded reader configuration:
+# len(parquet_gens_list) * len(_resource_bounded_pool_conf_matrix) = 288 cases.
+@pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
 @pytest.mark.parametrize('reader_confs', _resource_bounded_pool_conf_matrix, ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
-def test_parquet_read_multithread_flow_ctrl_round_trip(spark_tmp_path, reader_confs, request):
-    case_index = _resource_bounded_pool_conf_matrix.index(reader_confs)
-    parquet_gens_param = (
-        parquet_gens_list[-1]
-        if case_index == len(_resource_bounded_pool_conf_matrix) - 1 else parquet_gens_list[0])
-    parquet_gens = _apply_param_marks(parquet_gens_param, request)
+def test_parquet_read_multithread_flow_ctrl_round_trip(
+        spark_tmp_path, parquet_gens, reader_confs):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
