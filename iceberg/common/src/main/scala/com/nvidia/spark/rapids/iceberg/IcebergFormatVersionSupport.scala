@@ -96,7 +96,7 @@ object IcebergFormatVersionSupport {
     find(schema.columns().asScala.toSeq, "")
   }
 
-  private[iceberg] def withRequiredFields(
+  def withRequiredFields(
       tableSchema: Schema,
       expectedSchema: Schema,
       requiredFieldIds: Seq[Int]): Schema = {

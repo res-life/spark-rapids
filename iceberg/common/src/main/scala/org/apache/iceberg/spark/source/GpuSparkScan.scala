@@ -21,7 +21,7 @@ import scala.util.{Failure, Success, Try}
 
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.iceberg.{IcebergFormatVersionSupport, ShimUtils}
-import org.apache.iceberg.{FileContent, ScanTaskGroup}
+import org.apache.iceberg.{FileContent, ScanTask, ScanTaskGroup}
 import org.apache.iceberg.spark.GpuSparkReadConf
 import org.apache.iceberg.types.Types
 
@@ -110,6 +110,7 @@ object GpuSparkScan {
           val equalityDeleteFieldIds = GpuSparkScanAccess.taskGroups(meta.wrapped)
             .asScala
             .flatMap(_.tasks().asScala)
+            .map(_.asInstanceOf[ScanTask])
             .flatMap(_.asFileScanTask().deletes().asScala)
             .filter(_.content() == FileContent.EQUALITY_DELETES)
             .flatMap(_.equalityFieldIds().asScala)
