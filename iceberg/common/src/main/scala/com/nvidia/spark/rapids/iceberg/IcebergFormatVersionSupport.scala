@@ -20,7 +20,7 @@ import scala.collection.JavaConverters._
 
 import com.nvidia.spark.rapids.{RapidsConf, RapidsMeta}
 import org.apache.iceberg.{Schema, Table, TableProperties}
-import org.apache.iceberg.types.Types
+import org.apache.iceberg.types.{Types, TypeUtil}
 
 import org.apache.spark.sql.execution.SparkPlan
 
@@ -94,6 +94,24 @@ object IcebergFormatVersionSupport {
     }
 
     find(schema.columns().asScala.toSeq, "")
+  }
+
+  private[iceberg] def withRequiredFields(
+      tableSchema: Schema,
+      expectedSchema: Schema,
+      requiredFieldIds: Seq[Int]): Schema = {
+    val projectedIds = TypeUtil.getProjectedIds(expectedSchema).asScala.map(_.toInt).toSet
+    val missingFields = requiredFieldIds.distinct.filterNot(projectedIds).map { fieldId =>
+      Option(tableSchema.asStruct().field(fieldId)).getOrElse {
+        throw new IllegalArgumentException(s"Cannot find required field for ID $fieldId")
+      }
+    }
+
+    if (missingFields.isEmpty) {
+      expectedSchema
+    } else {
+      new Schema((expectedSchema.columns().asScala ++ missingFields).asJava)
+    }
   }
 
   private def tagMergeRowsAncestor(

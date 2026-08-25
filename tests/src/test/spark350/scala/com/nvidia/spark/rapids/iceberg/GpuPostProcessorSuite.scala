@@ -993,6 +993,35 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(IcebergFormatVersionSupport.unsupportedDefault(supportedSchema).isEmpty)
   }
 
+  test("Equality-delete required fields are included in the unsupported default check") {
+    val projectedField = Types.NestedField.optional(1, "id", Types.LongType.get())
+    val equalityDeleteField = fieldWithDefaults(
+      2,
+      "delete_key",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val unreferencedField = fieldWithDefaults(
+      3,
+      "unreferenced",
+      Types.TimestampType.withoutZone(),
+      required = false,
+      initialDefault = Some(Long.box(0L))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val tableSchema = new Schema(projectedField, equalityDeleteField, unreferencedField)
+    val expectedSchema = new Schema(projectedField)
+
+    val schemaToCheck = IcebergFormatVersionSupport.withRequiredFields(
+      tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+
+    assert(schemaToCheck.columns().asScala.map(_.fieldId()) == Seq(1, 2))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(schemaToCheck)
+      .contains("delete_key" -> "timestamp"))
+  }
+
   test("Present struct children take precedence over defaults for missing children") {
     val structId = 1
     val presentId = 2
