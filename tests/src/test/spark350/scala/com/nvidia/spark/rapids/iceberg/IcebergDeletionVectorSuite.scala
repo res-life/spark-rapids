@@ -42,12 +42,13 @@ import java.util.zip.CRC32
 
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.RapidsConf
 import com.nvidia.spark.rapids.jni.fileio.{RapidsInputFile, SeekableInputStream}
 import com.nvidia.spark.rapids.jni.fileio.RapidsInputFile.CopyRange
 import org.scalatest.funsuite.AnyFunSuite
 
 class IcebergDeletionVectorSuite extends AnyFunSuite {
-  private val MagicNumber = 1681511377
+  private val MagicNumber = 0x6439D3D1
 
   private class ByteArraySeekableInputStream(bytes: Array[Byte]) extends SeekableInputStream {
     private var pos = 0
@@ -130,7 +131,7 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     val inputFile = new ByteArrayInputFile(prefix ++ envelope ++ suffix)
 
     withResource(IcebergDeletionVector.read(
-        inputFile, prefix.length.toLong, envelope.length.toLong, 123L)) { vector =>
+        inputFile, prefix.length.toLong, envelope.length.toLong, 123L, true)) { vector =>
       val actual = new Array[Byte](bitmap.length)
       vector.serializedBitmap().getBytes(actual, 0, 0, actual.length)
       assert(actual.sameElements(bitmap))
@@ -152,7 +153,7 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     assert(envelope.length == 20)
 
     withResource(IcebergDeletionVector.read(
-        new ByteArrayInputFile(envelope), 0L, envelope.length.toLong, 0L)) { vector =>
+        new ByteArrayInputFile(envelope), 0L, envelope.length.toLong, 0L, false)) { vector =>
       assert(vector.serializedBitmap().getLength == java.lang.Long.BYTES)
     }
   }
@@ -162,7 +163,7 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     val truncated = envelope.dropRight(1)
     assertThrows[IOException] {
       IcebergDeletionVector.read(
-        new ByteArrayInputFile(truncated), 0L, envelope.length.toLong, 1L)
+        new ByteArrayInputFile(truncated), 0L, envelope.length.toLong, 1L, false)
     }
   }
 
@@ -178,14 +179,31 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
 
     Seq(
       (invalidLength, "Invalid bitmap data length"),
-      (invalidMagic, "Invalid magic number"),
-      (invalidCrc, "Invalid CRC")
+      (invalidMagic, "Invalid magic number")
     ).foreach { case (bytes, expectedMessage) =>
       val error = intercept[IOException] {
         IcebergDeletionVector.read(
-          new ByteArrayInputFile(bytes), 0L, bytes.length.toLong, 1L)
+          new ByteArrayInputFile(bytes), 0L, bytes.length.toLong, 1L, false)
       }
       assert(error.getMessage.contains(expectedMessage))
     }
+
+    val crcError = intercept[IOException] {
+      IcebergDeletionVector.read(
+        new ByteArrayInputFile(invalidCrc), 0L, invalidCrc.length.toLong, 1L, true)
+    }
+    assert(crcError.getMessage.contains("Invalid CRC"))
+
+    withResource(IcebergDeletionVector.read(
+        new ByteArrayInputFile(invalidCrc), 0L, invalidCrc.length.toLong, 1L, false)) { vector =>
+      assert(vector.serializedBitmap().getLength == invalidCrc.length - 12)
+    }
+  }
+
+  test("deletion-vector CRC validation is disabled by default") {
+    assert(!new RapidsConf(Map.empty[String, String]).validateIcebergDeletionVectorCrc)
+    assert(new RapidsConf(Map(
+      RapidsConf.VALIDATE_ICEBERG_DELETION_VECTOR_CRC.key -> "true"))
+      .validateIcebergDeletionVectorCrc)
   }
 }

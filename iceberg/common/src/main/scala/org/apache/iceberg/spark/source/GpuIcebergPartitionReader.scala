@@ -38,6 +38,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
     private val threadConf: ThreadConf,
     private val metrics: Map[String, GpuMetric],
+    private val validateDeletionVectorCrc: Boolean,
 ) extends PartitionReader[ColumnarBatch] {
   private var inited = false
   
@@ -156,7 +157,8 @@ class GpuIcebergPartitionReader(private val task: GpuSparkInputPartition,
       metrics,
       threadConf,
       task.expectedSchema,
-      nameMapping)
+      nameMapping,
+      validateDeletionVectorCrc)
   }
 
   private def constantsMap(icebergFile: IcebergPartitionedFile): java.util.Map[Integer, _] = {

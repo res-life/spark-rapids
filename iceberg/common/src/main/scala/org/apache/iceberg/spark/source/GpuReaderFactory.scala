@@ -48,6 +48,7 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
   private val poolConfBuilder = ThreadPoolConfBuilder(rapidsConf)
   private val combineThresholdSize = rapidsConf.getMultithreadedCombineThreshold
   private val combineWaitTime = rapidsConf.getMultithreadedCombineWaitTime
+  private val validateDeletionVectorCrc = rapidsConf.validateIcebergDeletionVectorCrc
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] =
     throw new UnsupportedOperationException("GpuReaderFactory does not support createReader()")
@@ -56,7 +57,8 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
     partition match {
       case gpuPartition: GpuSparkInputPartition =>
         val threadConf = calcThreadConf(gpuPartition)
-        new GpuIcebergPartitionReader(gpuPartition, threadConf, metrics)
+        new GpuIcebergPartitionReader(
+          gpuPartition, threadConf, metrics, validateDeletionVectorCrc)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported partition type: ${partition.getClass}")
     }

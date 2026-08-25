@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 import tempfile
 
@@ -25,7 +26,8 @@ from iceberg import rapids_reader_types, \
     iceberg_unsupported_mark, create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
-from data_gen import gen_df, get_datagen_seed, int_gen, long_gen, string_gen
+from data_gen import disable_parquet_field_id_write, gen_df, get_datagen_seed, int_gen, \
+    long_gen, string_gen
 from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -195,6 +197,7 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
 
     read_conf = {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        'spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled': 'true',
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
     }
 
@@ -202,6 +205,61 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
         lambda spark: spark.table(table_name),
         conf=read_conf,
         # Reset the GPU plan-validation config before fixture teardown.
+        is_cpu_first=False)
+
+
+@iceberg
+@pytest.mark.parametrize('reader_type', ['PERFILE', 'MULTITHREADED'])
+@pytest.mark.skipif(is_iceberg_remote_catalog(), reason="add_files requires a local catalog")
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_v3_deletion_vector_count_with_name_mapping(
+        spark_tmp_table_factory, reader_type):
+    target_table = get_full_table_name(spark_tmp_table_factory)
+    source_table = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {target_table} (unused INT, a BIGINT, b STRING) "
+            "USING ICEBERG TBLPROPERTIES ('format-version' = '3')")
+        spark.sql(f"ALTER TABLE {target_table} DROP COLUMN unused")
+        spark.sql(f"CREATE TABLE {source_table} (a BIGINT, b STRING) USING PARQUET")
+        (spark.range(100)
+            .selectExpr("id AS a", "concat('value-', id) AS b")
+            .write
+            .mode('append')
+            .insertInto(source_table))
+        spark.sql(
+            f"CALL spark_catalog.system.add_files("
+            f"table => '{target_table}', source_table => '{source_table}')")
+
+        mapping_json = spark.sql(
+            f"SHOW TBLPROPERTIES {target_table} ('schema.name-mapping.default')"
+        ).first()['value']
+        mapping = json.loads(mapping_json)
+        first_file_field = next(field for field in mapping if 'a' in field['names'])
+        assert first_file_field['field-id'] != 1, \
+            f"Expected field a to differ from fallback ID 1, found {mapping_json}"
+
+        spark.sql(f"DELETE FROM {target_table} WHERE a % 3 = 0")
+        spark.sql(f"REFRESH TABLE {target_table}")
+        delete_files = {
+            (row.content, row.file_format) for row in
+            spark.sql(
+                f"SELECT content, file_format FROM {target_table}.delete_files").collect()
+        }
+        assert delete_files == {(1, 'PUFFIN')}, \
+            f"Expected one deletion vector, found {delete_files}"
+
+    with_cpu_session(setup_table, conf=disable_parquet_field_id_write)
+
+    read_conf = {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+    }
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(f"SELECT count(*) FROM {target_table}"),
+        conf=read_conf,
         is_cpu_first=False)
 
 

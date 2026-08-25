@@ -33,7 +33,7 @@ import java.util.zip.CRC32;
  * owns its host buffer and must be closed after all borrowed references have been released.
  */
 public final class IcebergDeletionVector implements AutoCloseable {
-    private static final int MAGIC_NUMBER = 1681511377;
+    private static final int MAGIC_NUMBER = 0x6439D3D1;
     private static final int LENGTH_SIZE_BYTES = Integer.BYTES;
     private static final int MAGIC_NUMBER_SIZE_BYTES = Integer.BYTES;
     private static final int CRC_SIZE_BYTES = Integer.BYTES;
@@ -60,13 +60,15 @@ public final class IcebergDeletionVector implements AutoCloseable {
      * <p>The range contains the bitmap-data length as a 4-byte big-endian integer, a 4-byte
      * little-endian magic number, the portable Roaring bitmap in little-endian order, and a
      * 4-byte big-endian CRC-32 of the magic number and bitmap. Only the bitmap is copied into the
-     * returned host buffer because that is the representation expected by cuDF.
+     * returned host buffer because that is the representation expected by cuDF. The checksum is
+     * validated only when {@code validateCrc} is true.
      */
     public static IcebergDeletionVector read(
             RapidsInputFile inputFile,
             Long offset,
             Long size,
-            long cardinality) throws IOException {
+            long cardinality,
+            boolean validateCrc) throws IOException {
         if (offset == null || offset < 0) {
             throw new IllegalArgumentException("Invalid deletion vector offset: " + offset);
         }
@@ -98,14 +100,16 @@ public final class IcebergDeletionVector implements AutoCloseable {
             }
 
             int bitmapLength = Math.toIntExact(size - ENVELOPE_SIZE_BYTES);
-            CRC32 crc = new CRC32();
-            crc.update(envelope.asByteBuffer(LENGTH_SIZE_BYTES, expectedBitmapDataLength));
-            int expectedCrc = envelope.asByteBuffer(
-                    size - CRC_SIZE_BYTES, CRC_SIZE_BYTES).order(ByteOrder.BIG_ENDIAN).getInt();
-            int actualCrc = (int) crc.getValue();
-            if (actualCrc != expectedCrc) {
-                throw new IOException("Invalid CRC: " + actualCrc
-                        + ", expected " + expectedCrc);
+            if (validateCrc) {
+                CRC32 crc = new CRC32();
+                crc.update(envelope.asByteBuffer(LENGTH_SIZE_BYTES, expectedBitmapDataLength));
+                int expectedCrc = envelope.asByteBuffer(
+                        size - CRC_SIZE_BYTES, CRC_SIZE_BYTES).order(ByteOrder.BIG_ENDIAN).getInt();
+                int actualCrc = (int) crc.getValue();
+                if (actualCrc != expectedCrc) {
+                    throw new IOException("Invalid CRC: " + actualCrc
+                            + ", expected " + expectedCrc);
+                }
             }
 
             HostMemoryBuffer bitmap = envelope.slice(BITMAP_OFFSET_BYTES, bitmapLength);

@@ -1865,6 +1865,13 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val VALIDATE_ICEBERG_DELETION_VECTOR_CRC =
+    conf("spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled")
+      .doc("When set to true, validates the CRC-32 checksum of each Iceberg deletion vector. " +
+        "This validation performs an additional CPU pass over the deletion-vector data.")
+      .booleanConf
+      .createWithDefault(false)
+
   val ENABLE_ICEBERG_WRITE = conf("spark.rapids.sql.format.iceberg.write.enabled")
     .doc("When set to false disables Iceberg write acceleration")
     .booleanConf
@@ -3827,6 +3834,9 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isIcebergReadEnabled: Boolean = get(ENABLE_ICEBERG_READ)
 
   lazy val isIcebergV3Enabled: Boolean = get(ENABLE_ICEBERG_V3)
+
+  lazy val validateIcebergDeletionVectorCrc: Boolean =
+    get(VALIDATE_ICEBERG_DELETION_VECTOR_CRC)
 
   lazy val isIcebergWriteEnabled: Boolean = get(ENABLE_ICEBERG_WRITE)
 
