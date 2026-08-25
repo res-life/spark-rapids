@@ -197,7 +197,6 @@ def test_iceberg_v3_deletion_vector(spark_tmp_table_factory, reader_type):
 
     read_conf = {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
-        'spark.rapids.sql.format.iceberg.deletionVector.crcCheck.enabled': 'true',
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
     }
 

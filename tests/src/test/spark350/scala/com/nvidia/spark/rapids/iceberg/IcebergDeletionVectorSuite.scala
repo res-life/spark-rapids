@@ -200,10 +200,10 @@ class IcebergDeletionVectorSuite extends AnyFunSuite {
     }
   }
 
-  test("deletion-vector CRC validation is disabled by default") {
-    assert(!new RapidsConf(Map.empty[String, String]).validateIcebergDeletionVectorCrc)
-    assert(new RapidsConf(Map(
-      RapidsConf.VALIDATE_ICEBERG_DELETION_VECTOR_CRC.key -> "true"))
+  test("deletion-vector CRC validation is enabled by default") {
+    assert(new RapidsConf(Map.empty[String, String]).validateIcebergDeletionVectorCrc)
+    assert(!new RapidsConf(Map(
+      RapidsConf.VALIDATE_ICEBERG_DELETION_VECTOR_CRC.key -> "false"))
       .validateIcebergDeletionVectorCrc)
   }
 }
