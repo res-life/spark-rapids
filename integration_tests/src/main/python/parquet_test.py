@@ -568,23 +568,20 @@ parquet_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/132 is fixed replace this with
         # timestamp_gen
         TimestampGen(start=datetime(1900, 1, 1, tzinfo=timezone.utc))] + decimal_gens
+parquet_pred_push_v1_enabled_lists = ["", "parquet"]
 
-parquet_pred_push_params = [
-    _joint_param(parquet_gen, read_parquet_df, reader_opt_confs[0], "")
-    for parquet_gen in parquet_pred_push_gens
-] + [
-    _joint_param(parquet_pred_push_gens[0], read_func, reader_confs, v1_enabled_list)
-    for read_func in [read_parquet_df, read_parquet_sql]
-    for reader_confs in reader_opt_confs
-    for v1_enabled_list in ["", "parquet"]
-    if not (read_func is read_parquet_df and reader_confs is reader_opt_confs[0] and
-            v1_enabled_list == "")
-]
-
-@pytest.mark.parametrize('parquet_gen,read_func,reader_confs,v1_enabled_list',
-                         parquet_pred_push_params, ids=_parquet_param_id)
+# Distribute read functions and reader configurations across
+# len(parquet_pred_push_gens) * len(parquet_pred_push_v1_enabled_lists) = 26 cases.
+@pytest.mark.parametrize('parquet_gen', parquet_pred_push_gens, ids=idfn)
+@pytest.mark.parametrize('v1_enabled_list', parquet_pred_push_v1_enabled_lists)
 @allow_non_gpu(*non_utc_allow)
-def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, read_func, v1_enabled_list, reader_confs):
+def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, v1_enabled_list):
+    case_index = parquet_pred_push_gens.index(parquet_gen) * 2 + (v1_enabled_list == "parquet")
+    read_func = [read_parquet_df, read_parquet_sql, read_parquet_sql, read_parquet_df][
+        case_index % 4]
+    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    if hasattr(reader_confs, 'marks'):
+        reader_confs = reader_confs.values[0]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('a', RepeatSeqGen(parquet_gen, 100)), ('b', parquet_gen)]
     s0 = with_cpu_session(lambda spark: gen_scalar(parquet_gen, force_no_nulls=True))
