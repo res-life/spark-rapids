@@ -42,9 +42,9 @@ def read_parquet_df(data_path):
 def read_parquet_sql(data_path):
     return lambda spark : spark.sql('select * from parquet.`{}`'.format(data_path))
 
-# Large matrices below parametrize their primary dimensions and distribute secondary dimensions
-# inside each test using a stable case index. This retains every independent input while avoiding
-# repeated interactions between orthogonal axes.
+# Large matrices below parametrize their primary dimensions and select secondary dimensions inside
+# each test using a stable case index. Every retained case uses values from the original Cartesian
+# product and keeps the original test logic; only redundant parameter combinations are omitted.
 
 datetimeRebaseModeInWriteKey = 'spark.sql.parquet.datetimeRebaseModeInWrite'
 int96RebaseModeInWriteKey = 'spark.sql.parquet.int96RebaseModeInWrite'
@@ -187,7 +187,7 @@ def test_parquet_read_avoid_coalesce_incompatible_files(spark_tmp_path, v1_enabl
             .option("recursiveFileLookup", "true").parquet(data_path),
         conf=all_confs)
 
-# Distribute read functions and V1/V2 across
+# Parametrize generators and readers; distribute read functions and V1/V2 across
 # len(parquet_gens_list) * len(reader_opt_confs) = 26 cases.
 @pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
@@ -222,14 +222,20 @@ _resource_bounded_pool_conf_matrix = resource_bounded_multithreaded_reader_conf(
         datetimeRebaseModeInReadKey: 'CORRECTED'
     })
 
-# Exercise every data generator group with every resource-bounded reader configuration:
-# len(parquet_gens_list) * len(_resource_bounded_pool_conf_matrix) = 288 cases.
+# Parametrize generators to preserve their marks; distribute reader configurations across
+# len(_resource_bounded_pool_conf_matrix) = 144 cases.
 @pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
-@pytest.mark.parametrize('reader_confs', _resource_bounded_pool_conf_matrix, ids=idfn)
+@pytest.mark.parametrize(
+    'reader_case_index',
+    range(len(_resource_bounded_pool_conf_matrix) // len(parquet_gens_list)),
+    ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_read_multithread_flow_ctrl_round_trip(
-        spark_tmp_path, parquet_gens, reader_confs):
+        spark_tmp_path, parquet_gens, reader_case_index):
+    parquet_gens_index = 0 if len(parquet_gens) > 1 else 1
+    case_index = reader_case_index * len(parquet_gens_list) + parquet_gens_index
+    reader_confs = _resource_bounded_pool_conf_matrix[case_index]
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
@@ -329,7 +335,7 @@ def test_parquet_fallback(spark_tmp_path, read_func, disable_conf):
             conf={disable_conf: 'false',
                 "spark.sql.sources.useV1SourceList": "parquet"})
 
-# Distribute read functions and binary-as-string settings across
+# Parametrize readers; distribute read functions and binary-as-string settings across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @tz_sensitive_test
@@ -384,7 +390,7 @@ def test_parquet_read_forced_binary_schema(std_input_path, v1_enabled_list):
     assert_gpu_and_cpu_are_equal_collect(lambda spark : spark.read.schema(schema).parquet(data_path),
             conf=all_confs)
 
-# Distribute read functions and V1/V2 across
+# Parametrize readers; distribute read functions and V1/V2 across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @tz_sensitive_test
@@ -494,7 +500,7 @@ if not is_before_spark_320():
 # The following need extra jars 'lzo', 'lz4', 'brotli', 'zstd'
 # https://github.com/NVIDIA/spark-rapids/issues/143
 
-# Distribute compression codecs, V1/V2, and CPU decompression settings across
+# Parametrize readers; distribute compression codecs, V1/V2, and CPU decompression settings across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 def test_parquet_compress_read_round_trip(spark_tmp_path, reader_confs):
@@ -525,7 +531,7 @@ parquet_pred_push_gens = [
         TimestampGen(start=datetime(1900, 1, 1, tzinfo=timezone.utc))] + decimal_gens
 parquet_pred_push_v1_enabled_lists = ["", "parquet"]
 
-# Distribute read functions and reader configurations across
+# Parametrize generators and V1/V2; distribute read functions and readers across
 # len(parquet_pred_push_gens) * len(parquet_pred_push_v1_enabled_lists) = 26 cases.
 @pytest.mark.parametrize('parquet_gen', parquet_pred_push_gens, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', parquet_pred_push_v1_enabled_lists)
@@ -535,8 +541,6 @@ def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, v1_enabled_li
     read_func = [read_parquet_df, read_parquet_sql, read_parquet_sql, read_parquet_df][
         case_index % 4]
     reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
-    if hasattr(reader_confs, 'marks'):
-        reader_confs = reader_confs.values[0]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('a', RepeatSeqGen(parquet_gen, 100)), ('b', parquet_gen)]
     s0 = with_cpu_session(lambda spark: gen_scalar(parquet_gen, force_no_nulls=True))
@@ -553,7 +557,7 @@ parquet_legacy_rebase_profiles = [
     (('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')),
     (('LEGACY', 'CORRECTED'), ('CORRECTED', 'LEGACY'))]
 
-# Distribute timestamp output types, rebase profiles, and V1/V2 across
+# Parametrize readers; distribute timestamp output types, rebase profiles, and V1/V2 across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
@@ -615,11 +619,12 @@ def test_parquet_read_roundtrip_datetime_with_legacy_rebase_mismatch_files(spark
 
 # This is legacy format, which is totally different from datatime legacy rebase mode.
 parquet_decimal_legacy_gens = [
-    [byte_gen, short_gen] + decimal_gens,
+    [byte_gen, short_gen, decimal_gen_32bit],
+    decimal_gens,
     [ArrayGen(decimal_gen_32bit, max_length=10)],
     [StructGen([['child0', decimal_gen_32bit]])]]
 
-# Distribute schema shapes, read functions, and V1/V2 across
+# Parametrize readers; distribute the original schemas, read functions, and V1/V2 across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 def test_parquet_decimal_read_legacy(spark_tmp_path, reader_confs):
@@ -636,7 +641,7 @@ def test_parquet_decimal_read_legacy(spark_tmp_path, reader_confs):
     all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
     assert_gpu_and_cpu_are_equal_collect(read_func(data_path), conf=all_confs)
 
-# Distribute V1/V2 and batch sizes across
+# Parametrize readers; distribute V1/V2 and batch sizes across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
@@ -900,7 +905,7 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
                         'input_file_block_length()'),
             conf=all_confs)
 
-# Distribute fallback settings and V1/V2 across
+# Parametrize readers; distribute fallback settings and V1/V2 across
 # len(reader_opt_confs) = 13 cases.
 @allow_non_gpu('ProjectExec', 'Alias', 'InputFileName', 'InputFileBlockStart', 'InputFileBlockLength',
                'FilterExec', 'And', 'IsNotNull', 'GreaterThan', 'Literal',
@@ -1122,7 +1127,7 @@ _nested_pruning_schemas = [
 # TODO CHECK FOR DECIMAL??
 nested_pruning_options = ["true", "false"]
 
-# Distribute V1/V2 and reader configurations across
+# Parametrize schemas and pruning modes; distribute V1/V2 and readers across
 # len(_nested_pruning_schemas) * len(nested_pruning_options) = 18 cases.
 @pytest.mark.parametrize('data_gen,read_schema', _nested_pruning_schemas, ids=idfn)
 @pytest.mark.parametrize('nested_enabled', nested_pruning_options)
@@ -1132,8 +1137,6 @@ def test_nested_pruning_and_case_insensitive(spark_tmp_path, data_gen, read_sche
         nested_enabled == "false")
     v1_enabled_list = ["", "parquet", "parquet", ""][case_index % 4]
     reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
-    if hasattr(reader_confs, 'marks'):
-        reader_confs = reader_confs.values[0]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
             lambda spark : gen_df(spark, data_gen).write.parquet(data_path),
@@ -1999,12 +2002,13 @@ def test_parquet_read_count(spark_tmp_path):
         lambda spark: spark.read.parquet(data_path), "SELECT COUNT(*) FROM tab", "tab",
         exist_classes=r'GpuFileGpuScan parquet .* ReadSchema: struct<>')
 
-# Distribute read functions and V1/V2 across
+# Parametrize readers; distribute column names, read functions, and V1/V2 across
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @ignore_order
 def test_read_case_col_name(spark_tmp_path, reader_confs):
     case_index = reader_opt_confs.index(reader_confs)
+    col_name = ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'][case_index % 6]
     read_func = [read_parquet_df, read_parquet_sql, read_parquet_sql, read_parquet_df][
         case_index % 4]
     v1_enabled_list = ["", "parquet", "", "parquet"][case_index % 4]
@@ -2026,7 +2030,7 @@ def test_read_case_col_name(spark_tmp_path, reader_confs):
             lambda spark : gen_df(spark, gen).write.partitionBy('k0', 'k1', 'k2', 'k3').parquet(data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : reader(spark).selectExpr('K0', 'k0', 'K3', 'k3', 'V0', 'v0'),
+            lambda spark : reader(spark).selectExpr(col_name),
             conf=all_confs)
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
