@@ -2002,13 +2002,12 @@ def test_parquet_read_count(spark_tmp_path):
         lambda spark: spark.read.parquet(data_path), "SELECT COUNT(*) FROM tab", "tab",
         exist_classes=r'GpuFileGpuScan parquet .* ReadSchema: struct<>')
 
-# Parametrize readers; distribute column names, read functions, and V1/V2 across
+# Parametrize readers; combine all column-name variants and distribute read functions and V1/V2
 # len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @ignore_order
 def test_read_case_col_name(spark_tmp_path, reader_confs):
     case_index = reader_opt_confs.index(reader_confs)
-    col_name = ['K0', 'k0', 'K3', 'k3', 'V0', 'v0'][case_index % 6]
     read_func = [read_parquet_df, read_parquet_sql, read_parquet_sql, read_parquet_df][
         case_index % 4]
     v1_enabled_list = ["", "parquet", "", "parquet"][case_index % 4]
@@ -2030,7 +2029,7 @@ def test_read_case_col_name(spark_tmp_path, reader_confs):
             lambda spark : gen_df(spark, gen).write.partitionBy('k0', 'k1', 'k2', 'k3').parquet(data_path))
 
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : reader(spark).selectExpr(col_name),
+            lambda spark : reader(spark).selectExpr('K0', 'k0', 'K3', 'k3', 'V0', 'v0'),
             conf=all_confs)
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
