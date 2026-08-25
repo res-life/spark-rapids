@@ -195,6 +195,8 @@ def test_parquet_read_avoid_coalesce_incompatible_files(spark_tmp_path, v1_enabl
             .option("recursiveFileLookup", "true").parquet(data_path),
         conf=all_confs)
 
+# Distribute data generators, read functions, and V1/V2 across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
@@ -231,6 +233,8 @@ _resource_bounded_pool_conf_matrix = resource_bounded_multithreaded_reader_conf(
         datetimeRebaseModeInReadKey: 'CORRECTED'
     })
 
+# Distribute data generators across
+# len(_resource_bounded_pool_conf_matrix) = 144 cases.
 @pytest.mark.parametrize('reader_confs', _resource_bounded_pool_conf_matrix, ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
@@ -339,6 +343,8 @@ def test_parquet_fallback(spark_tmp_path, read_func, disable_conf):
             conf={disable_conf: 'false',
                 "spark.sql.sources.useV1SourceList": "parquet"})
 
+# Distribute read functions and binary-as-string settings across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @tz_sensitive_test
 def test_parquet_read_round_trip_binary(std_input_path, reader_confs):
@@ -392,6 +398,8 @@ def test_parquet_read_forced_binary_schema(std_input_path, v1_enabled_list):
     assert_gpu_and_cpu_are_equal_collect(lambda spark : spark.read.schema(schema).parquet(data_path),
             conf=all_confs)
 
+# Distribute read functions and V1/V2 across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @tz_sensitive_test
 def test_parquet_read_round_trip_binary_as_string(std_input_path, reader_confs):
@@ -500,6 +508,8 @@ if not is_before_spark_320():
 # The following need extra jars 'lzo', 'lz4', 'brotli', 'zstd'
 # https://github.com/NVIDIA/spark-rapids/issues/143
 
+# Distribute compression codecs, V1/V2, and CPU decompression settings across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 def test_parquet_compress_read_round_trip(spark_tmp_path, reader_confs):
     case_index = reader_opt_confs.index(reader_confs)
@@ -557,6 +567,8 @@ parquet_legacy_rebase_profiles = [
     (('CORRECTED', 'LEGACY'), ('LEGACY', 'CORRECTED')),
     (('LEGACY', 'CORRECTED'), ('CORRECTED', 'LEGACY'))]
 
+# Distribute timestamp output types, rebase profiles, and V1/V2 across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 def test_parquet_read_roundtrip_datetime_with_legacy_rebase(spark_tmp_path, reader_confs):
@@ -621,6 +633,8 @@ parquet_decimal_legacy_gens = [
     [ArrayGen(decimal_gen_32bit, max_length=10)],
     [StructGen([['child0', decimal_gen_32bit]])]]
 
+# Distribute schema shapes, read functions, and V1/V2 across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 def test_parquet_decimal_read_legacy(spark_tmp_path, reader_confs):
     case_index = reader_opt_confs.index(reader_confs)
@@ -636,6 +650,8 @@ def test_parquet_decimal_read_legacy(spark_tmp_path, reader_confs):
     all_confs = copy_and_update(reader_confs, {'spark.sql.sources.useV1SourceList': v1_enabled_list})
     assert_gpu_and_cpu_are_equal_collect(read_func(data_path), conf=all_confs)
 
+# Distribute V1/V2 and batch sizes across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.skipif(is_not_utc(), reason="LEGACY datetime rebase mode is only supported for UTC timezone")
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 def test_parquet_simple_partitioned_read(spark_tmp_path, reader_confs):
@@ -898,6 +914,8 @@ def test_parquet_input_meta(spark_tmp_path, v1_enabled_list, reader_confs):
                         'input_file_block_length()'),
             conf=all_confs)
 
+# Distribute fallback settings and V1/V2 across
+# len(reader_opt_confs) = 13 cases.
 @allow_non_gpu('ProjectExec', 'Alias', 'InputFileName', 'InputFileBlockStart', 'InputFileBlockLength',
                'FilterExec', 'And', 'IsNotNull', 'GreaterThan', 'Literal',
                'FileSourceScanExec', 'ColumnarToRowExec',
@@ -1995,6 +2013,8 @@ def test_parquet_read_count(spark_tmp_path):
         lambda spark: spark.read.parquet(data_path), "SELECT COUNT(*) FROM tab", "tab",
         exist_classes=r'GpuFileGpuScan parquet .* ReadSchema: struct<>')
 
+# Distribute read functions and V1/V2 across
+# len(reader_opt_confs) = 13 cases.
 @pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
 @ignore_order
 def test_read_case_col_name(spark_tmp_path, reader_confs):
