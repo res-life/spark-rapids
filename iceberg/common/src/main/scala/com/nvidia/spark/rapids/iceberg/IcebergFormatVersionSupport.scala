@@ -29,7 +29,7 @@ object IcebergFormatVersionSupport {
   private val MaxSupportedFormatVersion = 2
   private val SupportedDefaultTypeIds = Set(
     "BOOLEAN", "INTEGER", "LONG", "FLOAT", "DOUBLE", "DATE", "TIMESTAMP",
-    "STRING", "UUID", "FIXED", "BINARY", "DECIMAL")
+    "STRING", "BINARY", "DECIMAL")
 
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
     tagForFormatVersion(table, table.schema(), meta)

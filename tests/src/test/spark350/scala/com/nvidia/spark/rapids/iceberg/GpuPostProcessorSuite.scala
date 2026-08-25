@@ -28,7 +28,8 @@
 spark-rapids-shim-json-lines ***/
 package com.nvidia.spark.rapids.iceberg
 
-import java.util.{HashMap => JHashMap}
+import java.nio.ByteBuffer
+import java.util.{HashMap => JHashMap, UUID}
 
 import scala.collection.JavaConverters._
 
@@ -983,6 +984,23 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       initialDefault = Some(Long.box(0L))).getOrElse {
       cancel("Iceberg runtime does not expose v3 field defaults")
     }
+    val uuidField = fieldWithDefaults(
+      5,
+      "uuid_value",
+      Types.UUIDType.get(),
+      required = false,
+      initialDefault = Some(UUID.fromString("123e4567-e89b-12d3-a456-426614174000"))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val fixedType = Types.FixedType.ofLength(2)
+    val fixedField = fieldWithDefaults(
+      6,
+      "fixed_value",
+      fixedType,
+      required = false,
+      initialDefault = Some(ByteBuffer.wrap(Array[Byte](1, 2)))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
 
     val unsupportedSchema = new Schema(Types.NestedField.optional(
       1, "payload", Types.StructType.of(timestampNtzField)))
@@ -991,6 +1009,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedSchema)
       .contains("payload.created_at" -> "timestamp"))
     assert(IcebergFormatVersionSupport.unsupportedDefault(supportedSchema).isEmpty)
+    assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(uuidField))
+      .contains("uuid_value" -> Types.UUIDType.get().toString))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(fixedField))
+      .contains("fixed_value" -> fixedType.toString))
   }
 
   test("Equality-delete required fields are included in the unsupported default check") {
