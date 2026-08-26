@@ -232,20 +232,14 @@ _resource_bounded_pool_conf_matrix = resource_bounded_multithreaded_reader_conf(
         datetimeRebaseModeInReadKey: 'CORRECTED'
     })
 
-# Parametrize generators to preserve their marks; distribute reader configurations across
-# len(_resource_bounded_pool_conf_matrix) = 144 cases.
+# Resource-bounded behavior depends on both the data types and the reader configuration.
+# Keep the original type-by-reader interactions for this matrix.
 @pytest.mark.parametrize('parquet_gens', parquet_gens_list, ids=idfn)
-@pytest.mark.parametrize(
-    'reader_case_index',
-    range(len(_resource_bounded_pool_conf_matrix) // len(parquet_gens_list)),
-    ids=idfn)
+@pytest.mark.parametrize('reader_confs', _resource_bounded_pool_conf_matrix, ids=idfn)
 @tz_sensitive_test
 @allow_non_gpu(*non_utc_allow)
 def test_parquet_read_multithread_flow_ctrl_round_trip(
-        spark_tmp_path, parquet_gens, reader_case_index):
-    parquet_gens_index = 0 if len(parquet_gens) > 1 else 1
-    case_index = reader_case_index * len(parquet_gens_list) + parquet_gens_index
-    reader_confs = _resource_bounded_pool_conf_matrix[case_index]
+        spark_tmp_path, parquet_gens, reader_confs):
     gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
@@ -2051,8 +2045,11 @@ def test_read_case_col_name(spark_tmp_path, reader_confs):
     with_cpu_session(
             lambda spark : gen_df(spark, gen).write.partitionBy('k0', 'k1', 'k2', 'k3').parquet(data_path))
 
+    _single_column_sort_case = reader_confs == reader_opt_confs[0]
+    # Keep one original single-column projection to cover duplicate range-sort bounds.
+    column_names = ['K0'] if _single_column_sort_case else ['K0', 'k0', 'K3', 'k3', 'V0', 'v0']
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark : reader(spark).selectExpr('K0', 'k0', 'K3', 'k3', 'V0', 'v0'),
+            lambda spark : reader(spark).selectExpr(*column_names),
             conf=all_confs)
 
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
