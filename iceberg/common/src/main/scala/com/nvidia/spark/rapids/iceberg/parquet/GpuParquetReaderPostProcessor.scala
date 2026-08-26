@@ -887,21 +887,21 @@ class GpuParquetReaderPostProcessor(
         // getColumnarBatch() returns a batch with refcounts incremented.
         // We MUST close it to balance the refcounts, even if an exception occurs.
         withResource(scb.getColumnarBatch()) { batch =>
-          currentNumRows = batch.numRows()
-          cacheNativeRowPositions(batch)
-
-          // Execute actions on batch (rootAction must be ProcessStruct here since
-          // PassThrough is handled by canPassThroughBatch early return)
-          val (fieldActions, inputIndices) = rootAction match {
-            case ProcessStruct(actions, indices) => (actions, indices)
-            case _ => throw new IllegalStateException(
-              s"Root action must be ProcessStruct, but got: ${rootAction.getClass.getSimpleName}")
-          }
-
-          // Root-level columns are not wrapped in a single struct column, so we cannot execute
-          // ProcessStruct directly here. Instead we run each field action against the matching
-          // batch column (or None for generated fields) and assemble the output batch ourselves.
           try {
+            currentNumRows = batch.numRows()
+            cacheNativeRowPositions(batch)
+
+            // Execute actions on batch (rootAction must be ProcessStruct here since
+            // PassThrough is handled by canPassThroughBatch early return)
+            val (fieldActions, inputIndices) = rootAction match {
+              case ProcessStruct(actions, indices) => (actions, indices)
+              case _ => throw new IllegalStateException(
+                s"Root action must be ProcessStruct, but got: ${rootAction.getClass.getSimpleName}")
+            }
+
+            // Root-level columns are not wrapped in a single struct column, so we cannot execute
+            // ProcessStruct directly here. Instead we run each field action against the matching
+            // batch column (or None for generated fields) and assemble the output batch ourselves.
             val columns: Seq[ColumnVector] =
               fieldActions.zip(inputIndices).zipWithIndex.safeMap {
               case ((action, inputIndex), idx) =>
