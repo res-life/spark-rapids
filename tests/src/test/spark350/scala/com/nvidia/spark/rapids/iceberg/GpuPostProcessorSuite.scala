@@ -1283,7 +1283,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test("Physical row IDs survive when first_row_id is unavailable") {
+  test("Physical row IDs are null when first_row_id is unavailable") {
     import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
     import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
     import com.nvidia.spark.rapids.GpuColumnVector
@@ -1309,9 +1309,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
 
     withResource(processor.process(new ColumnarBatch(Array(rowIds), 3))) { output =>
       withResource(output.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { actual =>
-        assert(actual.getBase.getLong(0) == 10L)
-        assert(actual.getBase.isNull(1))
-        assert(actual.getBase.getLong(2) == 12L)
+        assert((0 until 3).forall(i => actual.getBase.isNull(i)))
       }
     }
   }

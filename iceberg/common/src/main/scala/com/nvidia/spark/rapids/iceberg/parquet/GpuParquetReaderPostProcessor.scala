@@ -181,10 +181,7 @@ private[iceberg] case class InheritRowId(fieldId: Int) extends ColumnAction {
     }
 
     firstRowId match {
-      case None => ctx.column match {
-        case Some(col) => col.incRefCount()
-        case None => GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
-      }
+      case None => GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
       case Some(base) =>
         withResource(ctx.processor.getRowPositions(ctx.numRows)) { positions =>
           ctx.processor.checkRowIdRange(base)
