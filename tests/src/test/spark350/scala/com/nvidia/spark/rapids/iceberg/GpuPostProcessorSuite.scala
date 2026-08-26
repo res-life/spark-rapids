@@ -1167,6 +1167,37 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("native deletion-vector row index supplies inherited row IDs") {
+    assume(ShimUtils.supportsRowLineageInheritance(),
+      "The selected Iceberg runtime does not support row lineage inheritance")
+    val rowIdFieldId = ShimUtils.rowIdFieldId()
+    val parquetSchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(rowIdFieldId, "_row_id", Types.LongType.get()))
+    val constants = new JHashMap[Integer, Any]()
+    constants.put(rowIdFieldId, 1000L)
+    val (parquetInfo, shadedSchema) = createParquetInfo(parquetSchema, rowCount = 6)
+    val processor = new GpuParquetReaderPostProcessor(
+      parquetInfo,
+      constants,
+      expectedSchema,
+      GpuIcebergParquetReader.withNativeRowIndex(shadedSchema),
+      Map.empty)
+
+    val rowPositions = closeOnExcept(CudfColumnVector.fromLongs(0L, 2L, 5L)) { column =>
+      GpuColumnVector.from(column, LongType)
+    }
+    val inputBatch = new ColumnarBatch(Array(rowPositions), 3)
+
+    withResource(processor.process(inputBatch)) { outputBatch =>
+      assert(outputBatch.numRows() == 3)
+      assert(outputBatch.numCols() == 1)
+      withResource(outputBatch.column(0).asInstanceOf[GpuColumnVector].copyToHost()) { host =>
+        assert((0 until 3).map(i => host.getBase.getLong(i)) == Seq(1000L, 1002L, 1005L))
+      }
+    }
+  }
+
   test("native deletion-vector row index is dropped through the root action tree") {
     val dataFieldId = 1
     val dataField = ShadedTypes

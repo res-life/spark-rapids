@@ -745,6 +745,15 @@ class GpuParquetReaderPostProcessor(
   }
 
   private[iceberg] def checkRowIdRange(firstRowId: Long): Unit = {
+    if (currentMaxRowPosition < 0 && currentRowPositions != null &&
+        currentRowPositions.getRowCount > 0) {
+      // Native row indices are emitted in file order, so the last retained row has the maximum
+      // position even when deletion vectors introduce gaps.
+      currentMaxRowPosition = withResource(
+        currentRowPositions.getScalarElement(currentRowPositions.getRowCount.toInt - 1)) {
+        _.getLong
+      }
+    }
     if (currentMaxRowPosition >= 0) {
       try {
         Math.addExact(firstRowId, currentMaxRowPosition)
@@ -757,6 +766,23 @@ class GpuParquetReaderPostProcessor(
 
   // Convert shaded parquet schema to Iceberg schema for comparison
   private lazy val fileIcebergSchema: Schema = ParquetSchemaUtil.convert(shadedFileReadSchema)
+
+  // The deletion-vector reader prepends the file-global row index to every batch and mirrors it
+  // in shadedFileReadSchema. Reuse that column for inherited `_row_id`; deleted rows make locally
+  // generated consecutive positions incorrect.
+  private lazy val nativeRowPositionInputIndex: Option[Int] = {
+    val index = fileIcebergSchema.columns().asScala
+      .indexWhere(_.fieldId() == MetadataColumns.ROW_POSITION.fieldId())
+    if (index >= 0) Some(index) else None
+  }
+
+  private def cacheNativeRowPositions(batch: ColumnarBatch): Unit = {
+    nativeRowPositionInputIndex.foreach { index =>
+      require(index < batch.numCols(),
+        s"Native row-position input index $index exceeds batch column count ${batch.numCols()}")
+      currentRowPositions = batch.column(index).asInstanceOf[GpuColumnVector].getBase.incRefCount()
+    }
+  }
 
   // Pre-compute action tree by visiting expected schema with file schema as partner
   private lazy val rootAction: ColumnAction = buildActionTimeMetric.ns {
@@ -862,6 +888,7 @@ class GpuParquetReaderPostProcessor(
         // We MUST close it to balance the refcounts, even if an exception occurs.
         withResource(scb.getColumnarBatch()) { batch =>
           currentNumRows = batch.numRows()
+          cacheNativeRowPositions(batch)
 
           // Execute actions on batch (rootAction must be ProcessStruct here since
           // PassThrough is handled by canPassThroughBatch early return)
