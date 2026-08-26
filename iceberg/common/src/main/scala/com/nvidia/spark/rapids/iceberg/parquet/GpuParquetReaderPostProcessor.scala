@@ -501,6 +501,7 @@ private class ActionBuildingVisitor(
     // Check if all PassThrough AND indices are sequential - can simplify to PassThrough
     // Note: must have at least one field and all must come from input to pass through
     val canPassThrough = actions.nonEmpty && 
+      expectedFields.size == partner.asStructType().fields().size() &&
       actions.forall(_ == PassThrough) &&
       inputIndices.forall(_.isDefined) &&
       inputIndices.zipWithIndex.forall { case (optIdx, i) => optIdx.contains(i) }
