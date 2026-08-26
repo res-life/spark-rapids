@@ -25,7 +25,9 @@ from iceberg import rapids_reader_types, \
     representative_eq_column_combinations, eq_reader_canary_pairs, \
     iceberg_unsupported_mark, create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, \
-    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
+    supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON, \
+    supports_iceberg_row_lineage_inheritance, \
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON
 from data_gen import disable_parquet_field_id_write, gen_df, get_datagen_seed, int_gen, \
     long_gen, string_gen
 from marks import iceberg, ignore_order, validate_execs_in_gpu_plan
@@ -207,6 +209,64 @@ def test_iceberg_v3_deletion_vector(
 
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.table(table_name),
+        conf=read_conf,
+        # Reset the GPU plan-validation config before fixture teardown.
+        is_cpu_first=False)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.parametrize(
+    'reader_type,use_chunked_reader',
+    [pytest.param(reader_type, True, id=reader_type) for reader_type in rapids_reader_types] +
+    [pytest.param('PERFILE', False, id='PERFILE-one-shot')])
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+@validate_execs_in_gpu_plan('GpuBatchScanExec')
+def test_iceberg_v3_deletion_vector_row_lineage(
+        spark_tmp_table_factory, reader_type, use_chunked_reader):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup_table(spark):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version' = '3', "
+            "'write.delete.mode' = 'merge-on-read')")
+        spark.range(0, 6).coalesce(1).writeTo(table_name).append()
+        spark.sql(f"DELETE FROM {table_name} WHERE id IN (1, 3, 4)")
+        spark.sql(f"REFRESH TABLE {table_name}")
+
+        delete_files = {
+            (row.content, row.file_format) for row in
+            spark.sql(
+                f"SELECT content, file_format FROM {table_name}.delete_files").collect()
+        }
+        expected_delete_files = {(1, 'PUFFIN')}
+        assert delete_files == expected_delete_files, \
+            f"Expected only deletion vectors {expected_delete_files}, found {delete_files}"
+
+        rows = {
+            row.id: row for row in spark.sql(
+                f"SELECT id, _pos, _row_id, _last_updated_sequence_number "
+                f"FROM {table_name}").collect()
+        }
+        assert set(rows) == {0, 2, 5}
+        for row_id in rows:
+            assert rows[row_id]["_pos"] == row_id
+            assert rows[row_id]["_row_id"] == row_id
+            assert rows[row_id]["_last_updated_sequence_number"] == 1
+
+    with_cpu_session(setup_table)
+
+    read_conf = {
+        'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+        'spark.rapids.sql.format.parquet.reader.type': reader_type,
+        'spark.rapids.sql.reader.chunked': use_chunked_reader,
+    }
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table_name}"),
         conf=read_conf,
         # Reset the GPU plan-validation config before fixture teardown.
         is_cpu_first=False)
