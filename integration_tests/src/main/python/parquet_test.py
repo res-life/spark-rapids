@@ -143,6 +143,16 @@ reader_opt_confs_no_native = [original_parquet_file_reader_conf, multithreaded_p
                     combining_multithreaded_parquet_file_reader_deprecated_conf_ordered]
 
 reader_opt_confs = reader_opt_confs_native + reader_opt_confs_no_native
+reader_opt_conf_indices_by_category = [
+    [0, 7],                 # PERFILE
+    [1, 8],                 # MULTITHREADED without combining
+    [2, 3, 4, 5, 6, 9, 10],  # COALESCING
+    [11, 12]]               # MULTITHREADED with ordered combining
+reader_opt_conf_category_ids = [
+    'PERFILE',
+    'MULTITHREADED',
+    'COALESCING',
+    'MULTITHREADED_COMBINE_ORDERED']
 
 @pytest.mark.parametrize('parquet_gens', [[byte_gen, short_gen, int_gen, long_gen]], ids=idfn)
 @pytest.mark.parametrize('read_func', [read_parquet_df])
@@ -500,14 +510,19 @@ if not is_before_spark_320():
 # The following need extra jars 'lzo', 'lz4', 'brotli', 'zstd'
 # https://github.com/NVIDIA/spark-rapids/issues/143
 
-# Parametrize readers; distribute compression codecs, V1/V2, and CPU decompression settings across
-# len(reader_opt_confs) = 13 cases.
-@pytest.mark.parametrize('reader_confs', reader_opt_confs, ids=idfn)
-def test_parquet_compress_read_round_trip(spark_tmp_path, reader_confs):
-    case_index = reader_opt_confs.index(reader_confs)
-    compress = parquet_compress_options[case_index % len(parquet_compress_options)]
-    v1_enabled_list = ["", "parquet", "", "parquet"][case_index % 4]
-    cpu_decompress = [True, False, False, True][case_index % 4]
+# Cover every compression codec with every reader category while distributing V1/V2,
+# CPU decompression, and the reader configurations within each category.
+@pytest.mark.parametrize('compress', parquet_compress_options)
+@pytest.mark.parametrize('reader_category_index',
+                         range(len(reader_opt_conf_indices_by_category)),
+                         ids=reader_opt_conf_category_ids)
+def test_parquet_compress_read_round_trip(spark_tmp_path, compress, reader_category_index):
+    compress_index = parquet_compress_options.index(compress)
+    v1_enabled_list = ["", "parquet"][(compress_index + reader_category_index) % 2]
+    cpu_decompress = [True, False][
+        (compress_index + reader_category_index // 2) % 2]
+    reader_conf_indices = reader_opt_conf_indices_by_category[reader_category_index]
+    reader_confs = reader_opt_confs[reader_conf_indices[compress_index % len(reader_conf_indices)]]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
             lambda spark : binary_op_df(spark, long_gen).write.parquet(data_path),
@@ -529,18 +544,21 @@ parquet_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/132 is fixed replace this with
         # timestamp_gen
         TimestampGen(start=datetime(1900, 1, 1, tzinfo=timezone.utc))] + decimal_gens
-parquet_pred_push_v1_enabled_lists = ["", "parquet"]
-
-# Parametrize generators and V1/V2; distribute read functions and readers across
-# len(parquet_pred_push_gens) * len(parquet_pred_push_v1_enabled_lists) = 26 cases.
+# Cover every predicate type with every reader category while distributing V1/V2,
+# read functions, and the reader configurations within each category.
 @pytest.mark.parametrize('parquet_gen', parquet_pred_push_gens, ids=idfn)
-@pytest.mark.parametrize('v1_enabled_list', parquet_pred_push_v1_enabled_lists)
+@pytest.mark.parametrize('reader_category_index',
+                         range(len(reader_opt_conf_indices_by_category)),
+                         ids=reader_opt_conf_category_ids)
 @allow_non_gpu(*non_utc_allow)
-def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, v1_enabled_list):
-    case_index = parquet_pred_push_gens.index(parquet_gen) * 2 + (v1_enabled_list == "parquet")
+def test_parquet_pred_push_round_trip(spark_tmp_path, parquet_gen, reader_category_index):
+    type_index = parquet_pred_push_gens.index(parquet_gen)
+    variant_index = (type_index + reader_category_index) % 4
+    v1_enabled_list = ["", "parquet", "", "parquet"][variant_index]
     read_func = [read_parquet_df, read_parquet_sql, read_parquet_sql, read_parquet_df][
-        case_index % 4]
-    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+        variant_index]
+    reader_conf_indices = reader_opt_conf_indices_by_category[reader_category_index]
+    reader_confs = reader_opt_confs[reader_conf_indices[type_index % len(reader_conf_indices)]]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     gen_list = [('a', RepeatSeqGen(parquet_gen, 100)), ('b', parquet_gen)]
     s0 = with_cpu_session(lambda spark: gen_scalar(parquet_gen, force_no_nulls=True))
@@ -1127,16 +1145,21 @@ _nested_pruning_schemas = [
 # TODO CHECK FOR DECIMAL??
 nested_pruning_options = ["true", "false"]
 
-# Parametrize schemas and pruning modes; distribute V1/V2 and readers across
-# len(_nested_pruning_schemas) * len(nested_pruning_options) = 18 cases.
+# Cover every schema and pruning mode with every reader category while distributing V1/V2
+# and the reader configurations within each category.
 @pytest.mark.parametrize('data_gen,read_schema', _nested_pruning_schemas, ids=idfn)
 @pytest.mark.parametrize('nested_enabled', nested_pruning_options)
+@pytest.mark.parametrize('reader_category_index',
+                         range(len(reader_opt_conf_indices_by_category)),
+                         ids=reader_opt_conf_category_ids)
 def test_nested_pruning_and_case_insensitive(spark_tmp_path, data_gen, read_schema,
-                                             nested_enabled):
-    case_index = _nested_pruning_schemas.index((data_gen, read_schema)) * 2 + (
+                                             nested_enabled, reader_category_index):
+    schema_mode_index = _nested_pruning_schemas.index((data_gen, read_schema)) * 2 + (
         nested_enabled == "false")
-    v1_enabled_list = ["", "parquet", "parquet", ""][case_index % 4]
-    reader_confs = reader_opt_confs[case_index % len(reader_opt_confs)]
+    v1_enabled_list = ["", "parquet"][(schema_mode_index + reader_category_index) % 2]
+    reader_conf_indices = reader_opt_conf_indices_by_category[reader_category_index]
+    reader_confs = reader_opt_confs[
+        reader_conf_indices[schema_mode_index % len(reader_conf_indices)]]
     data_path = spark_tmp_path + '/PARQUET_DATA'
     with_cpu_session(
             lambda spark : gen_df(spark, data_gen).write.parquet(data_path),
