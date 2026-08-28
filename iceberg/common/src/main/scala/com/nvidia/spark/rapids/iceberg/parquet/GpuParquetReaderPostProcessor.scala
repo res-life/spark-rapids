@@ -172,8 +172,9 @@ private[iceberg] case object FetchRowPosition extends ColumnAction {
 }
 
 /** Materialize or inherit Iceberg's `_row_id` metadata column. */
-private[iceberg] case class InheritRowId(fieldId: Int) extends ColumnAction {
+private[iceberg] case object InheritRowId extends ColumnAction {
   override def execute(ctx: ColumnActionContext): CudfColumnVector = {
+    val fieldId = ShimUtils.rowIdFieldId()
     val firstRowId = Option(ctx.processor.idToConstant.get(fieldId)).map {
       case number: Number => number.longValue()
       case value => throw new IllegalStateException(
@@ -197,7 +198,7 @@ private[iceberg] case class InheritRowId(fieldId: Int) extends ColumnAction {
     }
   }
 
-  override def display(indent: Int): String = " " * indent + s"InheritRowId(fieldId=$fieldId)"
+  override def display(indent: Int): String = " " * indent + "InheritRowId"
 }
 
 /** Fill null lineage sequence numbers from the data file's sequence number. */
@@ -389,7 +390,7 @@ private[iceberg] object MissingFieldActionBuilder {
       idToConstant: JMap[Integer, _]): ColumnAction = {
     // Row-lineage metadata needs per-row inheritance rather than ordinary constants.
     if (fieldId == ShimUtils.rowIdFieldId()) {
-      return InheritRowId(fieldId)
+      return InheritRowId
     }
     if (fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
       return InheritLastUpdatedSequenceNumber(fieldId)
@@ -584,7 +585,7 @@ private class ActionBuildingVisitor(
     // Lineage columns may be physically present but contain nulls that must inherit
     // file-level values, so they can never use the ordinary PassThrough path.
     if (fieldId == ShimUtils.rowIdFieldId()) {
-      return InheritRowId(fieldId)
+      return InheritRowId
     }
     if (fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
       return InheritLastUpdatedSequenceNumber(fieldId)
