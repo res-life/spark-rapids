@@ -388,11 +388,10 @@ private[iceberg] object MissingFieldActionBuilder {
       isFieldOptional: Boolean,
       idToConstant: JMap[Integer, _]): ColumnAction = {
     // Row-lineage metadata needs per-row inheritance rather than ordinary constants.
-    if (ShimUtils.supportsRowLineageInheritance() && fieldId == ShimUtils.rowIdFieldId()) {
+    if (fieldId == ShimUtils.rowIdFieldId()) {
       return InheritRowId(fieldId)
     }
-    if (ShimUtils.supportsRowLineageInheritance() &&
-        fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
+    if (fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
       return InheritLastUpdatedSequenceNumber(fieldId)
     }
 
@@ -584,11 +583,10 @@ private class ActionBuildingVisitor(
 
     // Lineage columns may be physically present but contain nulls that must inherit
     // file-level values, so they can never use the ordinary PassThrough path.
-    if (ShimUtils.supportsRowLineageInheritance() && fieldId == ShimUtils.rowIdFieldId()) {
+    if (fieldId == ShimUtils.rowIdFieldId()) {
       return InheritRowId(fieldId)
     }
-    if (ShimUtils.supportsRowLineageInheritance() &&
-        fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
+    if (fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()) {
       return InheritLastUpdatedSequenceNumber(fieldId)
     }
 
@@ -806,9 +804,8 @@ class GpuParquetReaderPostProcessor(
     idToConstant.keySet().asScala.filter { fieldId =>
       expectedSchema.idToName().containsKey(fieldId) &&
         (!fileIcebergSchema.idToName().containsKey(fieldId) ||
-          (ShimUtils.supportsRowLineageInheritance() &&
-            (fieldId == ShimUtils.rowIdFieldId() ||
-              fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId())))
+          (fieldId == ShimUtils.rowIdFieldId() ||
+            fieldId == ShimUtils.lastUpdatedSequenceNumberFieldId()))
     }.toSet
 
   private def hasMatchingConstant(

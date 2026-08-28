@@ -44,6 +44,11 @@ import java.util.Map;
  * <p>Version detection is centralized in {@link IcebergProvider#shimPackage()}.
  */
 public class ShimUtils {
+    // Reserved field IDs defined by the Iceberg specification. Older Iceberg runtimes do not
+    // expose the corresponding MetadataColumns fields, so keep the stable IDs in common code.
+    private static final int ROW_ID_FIELD_ID = 2147483540;
+    private static final int LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID = 2147483539;
+
     private static final IcebergShimUtils IMPL = loadImpl();
 
     private static IcebergShimUtils loadImpl() {
@@ -64,16 +69,12 @@ public class ShimUtils {
         return IMPL.formatVersion(table);
     }
 
-    public static boolean supportsRowLineageInheritance() {
-        return IMPL.supportsRowLineageInheritance();
-    }
-
     public static int rowIdFieldId() {
-        return IMPL.rowIdFieldId();
+        return ROW_ID_FIELD_ID;
     }
 
     public static int lastUpdatedSequenceNumberFieldId() {
-        return IMPL.lastUpdatedSequenceNumberFieldId();
+        return LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID;
     }
 
     public static boolean isDeletionVector(DeleteFile deleteFile) {

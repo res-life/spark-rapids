@@ -58,23 +58,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public boolean supportsRowLineageInheritance() {
-        return false;
-    }
-
-    @Override
-    public int rowIdFieldId() {
-        throw new UnsupportedOperationException(
-                "Iceberg 1.6 does not support row lineage inheritance");
-    }
-
-    @Override
-    public int lastUpdatedSequenceNumberFieldId() {
-        throw new UnsupportedOperationException(
-                "Iceberg 1.6 does not support row lineage inheritance");
-    }
-
-    @Override
     public String locationOf(ContentFile<?> f) {
         return f.path().toString();
     }

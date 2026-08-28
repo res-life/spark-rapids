@@ -49,21 +49,6 @@ public class ShimUtilsImpl implements IcebergShimUtils {
     }
 
     @Override
-    public boolean supportsRowLineageInheritance() {
-        return true;
-    }
-
-    @Override
-    public int rowIdFieldId() {
-        return MetadataColumns.ROW_ID.fieldId();
-    }
-
-    @Override
-    public int lastUpdatedSequenceNumberFieldId() {
-        return MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.fieldId();
-    }
-
-    @Override
     public String locationOf(ContentFile<?> f) {
         return f.location();
     }

@@ -77,8 +77,7 @@ class GpuReaderFactory(private val metrics: Map[String, GpuMetric],
       partition.expectedSchema.findField(MetadataColumns.FILE_PATH.fieldId()) != null
     val hasRowPositionMetadata =
       partition.expectedSchema.findField(MetadataColumns.ROW_POSITION.fieldId()) != null ||
-        (ShimUtils.supportsRowLineageInheritance() &&
-          partition.expectedSchema.findField(ShimUtils.rowIdFieldId()) != null)
+        partition.expectedSchema.findField(ShimUtils.rowIdFieldId()) != null
 
     val allParquet = scans.forall(_.file.format == FileFormat.PARQUET)
 
