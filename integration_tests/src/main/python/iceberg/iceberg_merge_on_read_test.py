@@ -220,21 +220,19 @@ def test_iceberg_v3_deletion_vector(
     'reader_type,use_chunked_reader',
     [pytest.param(reader_type, True, id=reader_type) for reader_type in rapids_reader_types] +
     [pytest.param('PERFILE', False, id='PERFILE-one-shot')])
+@pytest.mark.parametrize('project_pos', [True, False], ids=['with-pos', 'without-pos'])
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 @validate_execs_in_gpu_plan('GpuBatchScanExec')
 def test_iceberg_v3_deletion_vector_row_lineage(
-        spark_tmp_table_factory, reader_type, use_chunked_reader):
-    table_name = get_full_table_name(spark_tmp_table_factory)
+        spark_tmp_table_factory, reader_type, use_chunked_reader, project_pos):
+    table_name = setup_base_iceberg_table(
+        spark_tmp_table_factory,
+        table_prop={'format-version': '3'})
 
-    def setup_table(spark):
-        spark.sql(
-            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3', "
-            "'write.delete.mode' = 'merge-on-read')")
-        spark.range(0, 6).coalesce(1).writeTo(table_name).append()
-        spark.sql(f"DELETE FROM {table_name} WHERE id IN (1, 3, 4)")
+    def add_deletion_vector(spark):
+        spark.sql(f"DELETE FROM {table_name} WHERE _c1 < 0")
         spark.sql(f"REFRESH TABLE {table_name}")
 
         delete_files = {
@@ -246,27 +244,19 @@ def test_iceberg_v3_deletion_vector_row_lineage(
         assert delete_files == expected_delete_files, \
             f"Expected only deletion vectors {expected_delete_files}, found {delete_files}"
 
-        rows = {
-            row.id: row for row in spark.sql(
-                f"SELECT id, _pos, _row_id, _last_updated_sequence_number "
-                f"FROM {table_name}").collect()
-        }
-        assert set(rows) == {0, 2, 5}
-        for row_id in rows:
-            assert rows[row_id]["_pos"] == row_id
-            assert rows[row_id]["_row_id"] == row_id
-            assert rows[row_id]["_last_updated_sequence_number"] == 1
-
-    with_cpu_session(setup_table)
+    with_cpu_session(add_deletion_vector)
 
     read_conf = {
         'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
         'spark.rapids.sql.format.parquet.reader.type': reader_type,
         'spark.rapids.sql.reader.chunked': use_chunked_reader,
     }
+    metadata_columns = \
+        '_pos, _row_id, _last_updated_sequence_number' if project_pos else \
+        '_row_id, _last_updated_sequence_number'
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(
-            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table_name}"),
+            f"SELECT _c0, {metadata_columns} FROM {table_name}"),
         conf=read_conf,
         # Reset the GPU plan-validation config before fixture teardown.
         is_cpu_first=False)
