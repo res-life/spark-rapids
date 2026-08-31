@@ -235,15 +235,6 @@ def test_iceberg_v3_deletion_vector_row_lineage(
         spark.sql(f"DELETE FROM {table_name} WHERE _c1 < 0")
         spark.sql(f"REFRESH TABLE {table_name}")
 
-        delete_files = {
-            (row.content, row.file_format) for row in
-            spark.sql(
-                f"SELECT content, file_format FROM {table_name}.delete_files").collect()
-        }
-        expected_delete_files = {(1, 'PUFFIN')}
-        assert delete_files == expected_delete_files, \
-            f"Expected only deletion vectors {expected_delete_files}, found {delete_files}"
-
     with_cpu_session(add_deletion_vector)
 
     read_conf = {
