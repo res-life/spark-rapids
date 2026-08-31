@@ -18,7 +18,7 @@ import logging
 from types import MappingProxyType
 from typing import Callable, List, Dict, Optional
 
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import SparkSession, DataFrame, functions as f
 from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
@@ -68,13 +68,16 @@ rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 
 def row_lineage_df(
         spark, start=0, length=DEFAULT_DATA_GEN_LENGTH, with_value=False, value_start=None):
-    id_values = list(range(start, start + length))
-    gens = [('id', RepeatSeqGen(id_values, data_type=LongType()))]
+    gens = [('id', UniqueLongGen())]
     if with_value:
         value_start = start if value_start is None else value_start
-        value_values = list(range(value_start, value_start + length))
-        gens.append(('v', RepeatSeqGen(value_values, data_type=LongType())))
-    return gen_df(spark, gens, length=length, num_slices=1)
+        gens.append(('v', UniqueLongGen()))
+
+    df = gen_df(spark, gens, length=length, num_slices=1)
+    columns = [(f.abs(f.col('id')) - 1 + start).alias('id')]
+    if with_value:
+        columns.append((f.abs(f.col('v')) - 1 + value_start).alias('v'))
+    return df.select(*columns)
 
 # Anchor list used by the single partition-transform coverage test
 # (iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage).
