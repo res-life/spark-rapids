@@ -22,7 +22,8 @@ from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance, \
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, ROW_LINEAGE_DATA_LENGTH, \
+    row_lineage_df
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
     is_spark_40x, is_spark_41x, spark_version, with_cpu_session, with_gpu_session
@@ -48,20 +49,8 @@ iceberg_gens_list = [
 
 rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
 _NO_FANOUT = _BASE_TBLPROPS_SQL
-_ROW_LINEAGE_DATA_LENGTH = 2048
 
 pytestmark = iceberg_unsupported_mark
-
-
-def _row_lineage_df(
-        spark, start=0, length=_ROW_LINEAGE_DATA_LENGTH, with_value=False, value_start=None):
-    id_values = list(range(start, start + length))
-    gens = [('id', RepeatSeqGen(id_values, data_type=LongType()))]
-    if with_value:
-        value_start = start if value_start is None else value_start
-        value_values = list(range(value_start, value_start + length))
-        gens.append(('v', RepeatSeqGen(value_values, data_type=LongType())))
-    return gen_df(spark, gens, length=length, num_slices=1)
 
 
 def _is_spark_patch_at_least(version, minimum):
@@ -424,7 +413,7 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
         # the upgrade assigns lineage to both existing and newly-added files.
         spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
                   f"TBLPROPERTIES ('format-version' = '2')")
-        _row_lineage_df(spark).writeTo(full_table).append()
+        row_lineage_df(spark).writeTo(full_table).append()
         v2_snapshot_id = spark.sql(
             f"SELECT snapshot_id FROM {full_table}.snapshots ORDER BY committed_at DESC") \
             .head()[0]
@@ -435,7 +424,7 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
             "'read.split.target-size' = '4096', "
             "'read.split.open-file-cost' = '0')")
 
-        _row_lineage_df(spark, start=_ROW_LINEAGE_DATA_LENGTH).writeTo(full_table).append()
+        row_lineage_df(spark, start=ROW_LINEAGE_DATA_LENGTH).writeTo(full_table).append()
         return v2_snapshot_id
 
     v2_snapshot_id = with_cpu_session(setup_iceberg_table)
@@ -459,99 +448,6 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-@pytest.mark.parametrize("reader_type", rapids_reader_types)
-def test_iceberg_v3_row_lineage_update(spark_tmp_table_factory, reader_type):
-    full_table = get_full_table_name(spark_tmp_table_factory)
-
-    def setup_iceberg_table(spark):
-        spark.sql(
-            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3', 'write.update.mode' = 'copy-on-write')")
-        _row_lineage_df(spark, with_value=True).writeTo(full_table).append()
-        spark.sql(f"UPDATE {full_table} SET v = v + 1 WHERE id % 2 = 1")
-
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, v, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": reader_type
-        })
-
-
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.skipif(
-    not supports_iceberg_row_lineage_inheritance,
-    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-@pytest.mark.parametrize("reader_type", rapids_reader_types)
-def test_iceberg_v3_row_lineage_delete_leading_rows(spark_tmp_table_factory, reader_type):
-    full_table = get_full_table_name(spark_tmp_table_factory)
-
-    def setup_iceberg_table(spark):
-        spark.sql(
-            f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3', 'write.delete.mode' = 'copy-on-write')")
-        # Consume row ID 0 in sequence 1 and delete it in sequence 2. The next append then
-        # assigns row IDs starting at 1 in sequence 3 to one data file.
-        _row_lineage_df(spark, length=1).writeTo(full_table).append()
-        spark.sql(f"DELETE FROM {full_table} WHERE id = 0")
-        _row_lineage_df(spark, start=1).writeTo(full_table).append()
-        spark.sql(f"DELETE FROM {full_table} WHERE id < {_ROW_LINEAGE_DATA_LENGTH // 2}")
-
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": reader_type
-        })
-
-
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.skipif(
-    not supports_iceberg_row_lineage_inheritance,
-    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-@pytest.mark.parametrize("reader_type", rapids_reader_types)
-def test_iceberg_v3_row_lineage_merge_update_insert(
-        spark_tmp_table_factory, reader_type):
-    full_table = get_full_table_name(spark_tmp_table_factory)
-    source_view = spark_tmp_table_factory.get()
-
-    def setup_iceberg_table(spark):
-        spark.sql(
-            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3', 'write.merge.mode' = 'copy-on-write')")
-        _row_lineage_df(spark, with_value=True).writeTo(full_table).append()
-        _row_lineage_df(
-            spark,
-            start=_ROW_LINEAGE_DATA_LENGTH // 2,
-            with_value=True,
-            value_start=10_000).createOrReplaceTempView(source_view)
-
-        spark.sql(
-            f"MERGE INTO {full_table} t USING {source_view} s ON t.id = s.id "
-            "WHEN MATCHED THEN UPDATE SET v = s.v "
-            "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)")
-
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": reader_type
-        })
-
-
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.skipif(
-    not supports_iceberg_row_lineage_inheritance,
-    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
     full_table = get_full_table_name(spark_tmp_table_factory)
 
@@ -559,9 +455,9 @@ def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
         spark.sql(
             f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
             "TBLPROPERTIES ('format-version' = '3')")
-        half_length = _ROW_LINEAGE_DATA_LENGTH // 2
-        _row_lineage_df(spark, length=half_length).writeTo(full_table).append()
-        _row_lineage_df(spark, start=half_length, length=half_length) \
+        half_length = ROW_LINEAGE_DATA_LENGTH // 2
+        row_lineage_df(spark, length=half_length).writeTo(full_table).append()
+        row_lineage_df(spark, start=half_length, length=half_length) \
             .writeTo(full_table).append()
         assert spark.sql(f"SELECT count(*) FROM {full_table}.data_files").head()[0] > 1
 
@@ -579,37 +475,6 @@ def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
             "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
         })
 
-
-@iceberg
-@ignore_order(local=True)
-@pytest.mark.skipif(
-    not supports_iceberg_row_lineage_inheritance,
-    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-def test_iceberg_v3_row_lineage_insert_overwrite(spark_tmp_table_factory):
-    full_table = get_full_table_name(spark_tmp_table_factory)
-    source_view = spark_tmp_table_factory.get()
-
-    def setup_iceberg_table(spark):
-        spark.sql(
-            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3')")
-        _row_lineage_df(spark, with_value=True).writeTo(full_table).append()
-        overwrite_df = _row_lineage_df(
-            spark,
-            start=_ROW_LINEAGE_DATA_LENGTH,
-            with_value=True)
-        overwrite_df.createOrReplaceTempView(source_view)
-        spark.sql(
-            f"INSERT OVERWRITE {full_table} SELECT * FROM {source_view}")
-
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
-        })
 
 @iceberg
 @ignore_order(local=True) # Iceberg plans with a thread pool and is not deterministic in file ordering

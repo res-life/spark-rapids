@@ -64,6 +64,18 @@ iceberg_base_table_cols = list(iceberg_table_gen.keys())
 iceberg_gens_list = [iceberg_table_gen[col] for col in iceberg_base_table_cols]
 
 rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
+ROW_LINEAGE_DATA_LENGTH = 2048
+
+
+def row_lineage_df(
+        spark, start=0, length=ROW_LINEAGE_DATA_LENGTH, with_value=False, value_start=None):
+    id_values = list(range(start, start + length))
+    gens = [('id', RepeatSeqGen(id_values, data_type=LongType()))]
+    if with_value:
+        value_start = start if value_start is None else value_start
+        value_values = list(range(value_start, value_start + length))
+        gens.append(('v', RepeatSeqGen(value_values, data_type=LongType())))
+    return gen_df(spark, gens, length=length, num_slices=1)
 
 # Anchor list used by the single partition-transform coverage test
 # (iceberg_append_test.py::test_insert_into_partitioned_table_full_coverage).
