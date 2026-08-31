@@ -31,7 +31,8 @@ CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
 MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
-# Jenkins enables this when the PR title contains [fast-ut]. Keep local/manual runs serial by default.
+# Premerge Jenkins enables this unless the PR title contains [no-fast-ut].
+# Keep local/manual runs serial by default.
 PARALLEL_UT=${PARALLEL_UT:-false}
 PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
 
