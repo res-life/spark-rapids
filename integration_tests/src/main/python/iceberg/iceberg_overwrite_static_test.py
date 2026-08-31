@@ -19,15 +19,14 @@ from pyspark.sql import functions as F
 from asserts import assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect, \
     assert_gpu_fallback_collect
 from conftest import is_iceberg_remote_catalog
-from data_gen import gen_df, copy_and_update, StringGen
+from data_gen import DEFAULT_DATA_GEN_LENGTH, StringGen, copy_and_update, gen_df
 from iceberg import create_iceberg_table, \
     iceberg_base_table_cols, iceberg_gens_list, \
     get_full_table_name, iceberg_full_gens_list, iceberg_nested_write_gens_list, \
     iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops, \
     overwrite_static_partition_transforms, supports_iceberg_v3, \
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance, \
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, ROW_LINEAGE_DATA_LENGTH, \
-    row_lineage_df
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -135,7 +134,7 @@ def test_iceberg_v3_row_lineage_insert_overwrite(spark_tmp_table_factory):
         row_lineage_df(spark, with_value=True).writeTo(full_table).append()
         overwrite_df = row_lineage_df(
             spark,
-            start=ROW_LINEAGE_DATA_LENGTH,
+            start=DEFAULT_DATA_GEN_LENGTH,
             with_value=True)
         overwrite_df.createOrReplaceTempView(source_view)
         spark.sql(

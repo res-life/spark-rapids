@@ -64,11 +64,10 @@ iceberg_base_table_cols = list(iceberg_table_gen.keys())
 iceberg_gens_list = [iceberg_table_gen[col] for col in iceberg_base_table_cols]
 
 rapids_reader_types = ['PERFILE', 'MULTITHREADED', 'COALESCING']
-ROW_LINEAGE_DATA_LENGTH = 2048
 
 
 def row_lineage_df(
-        spark, start=0, length=ROW_LINEAGE_DATA_LENGTH, with_value=False, value_start=None):
+        spark, start=0, length=DEFAULT_DATA_GEN_LENGTH, with_value=False, value_start=None):
     id_values = list(range(start, start + length))
     gens = [('id', RepeatSeqGen(id_values, data_type=LongType()))]
     if with_value:

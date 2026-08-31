@@ -24,7 +24,7 @@ from iceberg import (create_iceberg_table, get_full_table_name, iceberg_write_en
                      supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON,
                      supports_iceberg_row_lineage_inheritance,
                      ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
-                     ROW_LINEAGE_DATA_LENGTH, row_lineage_df, rapids_reader_types)
+                     row_lineage_df, rapids_reader_types)
 from marks import allow_non_gpu, allow_non_gpu_conditional, iceberg, ignore_order, datagen_overrides
 from spark_session import is_spark_400_or_later, with_gpu_session, with_cpu_session
 
@@ -245,7 +245,7 @@ def test_iceberg_v3_row_lineage_merge_update_insert(
         row_lineage_df(spark, with_value=True).writeTo(full_table).append()
         row_lineage_df(
             spark,
-            start=ROW_LINEAGE_DATA_LENGTH // 2,
+            start=DEFAULT_DATA_GEN_LENGTH // 2,
             with_value=True,
             value_start=10_000).createOrReplaceTempView(source_view)
 

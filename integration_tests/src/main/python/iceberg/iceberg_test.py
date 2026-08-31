@@ -22,8 +22,7 @@ from data_gen import *
 from iceberg import get_full_table_name, iceberg_unsupported_mark, _build_tblprops, \
     _BASE_TBLPROPS_SQL, create_iceberg_table, supports_iceberg_v3, \
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance, \
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, ROW_LINEAGE_DATA_LENGTH, \
-    row_lineage_df
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df
 from marks import allow_non_gpu, iceberg, ignore_order
 from spark_session import is_databricks_runtime, is_spark_35x, is_spark_400_or_later, \
     is_spark_40x, is_spark_41x, spark_version, with_cpu_session, with_gpu_session
@@ -424,7 +423,7 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
             "'read.split.target-size' = '4096', "
             "'read.split.open-file-cost' = '0')")
 
-        row_lineage_df(spark, start=ROW_LINEAGE_DATA_LENGTH).writeTo(full_table).append()
+        row_lineage_df(spark, start=DEFAULT_DATA_GEN_LENGTH).writeTo(full_table).append()
         return v2_snapshot_id
 
     v2_snapshot_id = with_cpu_session(setup_iceberg_table)
@@ -455,7 +454,7 @@ def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
         spark.sql(
             f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
             "TBLPROPERTIES ('format-version' = '3')")
-        half_length = ROW_LINEAGE_DATA_LENGTH // 2
+        half_length = DEFAULT_DATA_GEN_LENGTH // 2
         row_lineage_df(spark, length=half_length).writeTo(full_table).append()
         row_lineage_df(spark, start=half_length, length=half_length) \
             .writeTo(full_table).append()
