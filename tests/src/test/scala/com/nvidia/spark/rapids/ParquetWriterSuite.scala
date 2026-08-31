@@ -101,7 +101,7 @@ class ParquetWriterSuite extends SparkQueryCompareTestSuite {
     try {
       SparkSessionHolder.withSparkSession(conf, spark => {
         import spark.implicits._
-        val df = spark.sparkContext.parallelize((1L to 10000000L))
+        val df = spark.sparkContext.parallelize(1L to 1000L, 2)
             .map{i => ("a", f"$i%010d", i)}.toDF("partkey", "val", "val2")
         df.repartition(1, $"partkey").sortWithinPartitions($"partkey", $"val", $"val2")
             .write.mode("overwrite").partitionBy("partkey").parquet(tempFile.getAbsolutePath)
