@@ -187,7 +187,6 @@ Calculate part|Calculating hash partition assignments
 RunningWindow|Computing running window aggregation
 GpuGenerateExec|Executing generate operation on GPU
 Join gather|Gathering join results
-waitForCPU|Waiting for CPU batch in hybrid execution
 parquet get blocks with filter|Retrieving Parquet blocks after applying filters
 dynamic sort heuristic|Applying dynamic sort heuristic for aggregation
 shuffle concat load batch|Concatenating and loading batch in shuffle operation

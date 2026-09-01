@@ -149,11 +149,6 @@ mvn_verify() {
         TZ=$tz ./integration_tests/run_pyspark_from_build.sh -m tz_sensitive_test
     done
 
-    # test Hybrid feature
-    source "${WORKSPACE}/jenkins/hybrid_execution.sh"
-    if hybrid_prepare ; then
-        LOAD_HYBRID_BACKEND=1 ./integration_tests/run_pyspark_from_build.sh -m hybrid_test
-    fi
 }
 
 rapids_shuffle_smoke_test() {

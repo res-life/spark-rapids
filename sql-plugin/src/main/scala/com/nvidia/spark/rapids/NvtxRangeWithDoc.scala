@@ -672,10 +672,6 @@ object NvtxRegistry {
   val GPU_RANGE: NvtxId = NvtxId("GpuRange", NvtxColor.DARK_GREEN,
     "Generating range of values on GPU")
 
-  // Hybrid CPU/GPU operations
-  val WAIT_FOR_CPU: NvtxId = NvtxId("waitForCPU", NvtxColor.RED,
-    "Waiting for CPU batch in hybrid execution")
-
   val GPU_ACQUIRE_C2C: NvtxId = NvtxId("gpuAcquireC2C", NvtxColor.GREEN,
     "Acquiring GPU for coalesce-to-coalesce operation")
 
@@ -866,7 +862,6 @@ object NvtxRegistry {
     register(DISK_SPILL)
     register(DEVICE_SPILL)
     register(GPU_RANGE)
-    register(WAIT_FOR_CPU)
     register(GPU_ACQUIRE_C2C)
     register(PINNED_H2D)
     register(PAGEABLE_H2D)
