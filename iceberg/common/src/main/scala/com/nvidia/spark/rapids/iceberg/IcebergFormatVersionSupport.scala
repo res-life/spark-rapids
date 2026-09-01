@@ -85,8 +85,8 @@ object IcebergFormatVersionSupport {
           Some(path -> fieldType.toString)
         } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
           Some(path -> fieldType.toString)
-        } else if (fieldType.isStructType) {
-          find(fieldType.asStructType().fields().asScala.toSeq, path)
+        } else if (fieldType.isNestedType) {
+          find(fieldType.asNestedType().fields().asScala.toSeq, path)
         } else {
           None
         }

@@ -1004,10 +1004,25 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
 
     val unsupportedSchema = new Schema(Types.NestedField.optional(
       1, "payload", Types.StructType.of(timestampNtzField)))
+    val unsupportedListSchema = new Schema(Types.NestedField.optional(
+      1, "events", Types.ListType.ofOptional(
+        2, Types.StructType.of(timestampNtzField))))
+    val unsupportedMapKeySchema = new Schema(Types.NestedField.optional(
+      1, "lookup", Types.MapType.ofOptional(
+        2, 4, Types.StructType.of(timestampNtzField), Types.StringType.get())))
+    val unsupportedMapValueSchema = new Schema(Types.NestedField.optional(
+      1, "lookup", Types.MapType.ofOptional(
+        2, 4, Types.StringType.get(), Types.StructType.of(timestampNtzField))))
     val supportedSchema = new Schema(timestampField)
 
     assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedSchema)
       .contains("payload.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedListSchema)
+      .contains("events.element.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedMapKeySchema)
+      .contains("lookup.key.created_at" -> "timestamp"))
+    assert(IcebergFormatVersionSupport.unsupportedDefault(unsupportedMapValueSchema)
+      .contains("lookup.value.created_at" -> "timestamp"))
     assert(IcebergFormatVersionSupport.unsupportedDefault(supportedSchema).isEmpty)
     assert(IcebergFormatVersionSupport.unsupportedDefault(new Schema(uuidField))
       .contains("uuid_value" -> Types.UUIDType.get().toString))
