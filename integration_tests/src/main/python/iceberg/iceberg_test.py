@@ -395,14 +395,14 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
             "BatchScanExec",
             conf=v3_conf)
 
-    # Spark 3.5 rejects omitted output columns before the Iceberg write path sees them. On newer
-    # Spark runtimes, exercise write-default handling through unmodified Iceberg/Spark and then
-    # validate the GPU-written row from a CPU session.
+    # Spark requires required output columns even when Iceberg defines a default. On runtimes newer
+    # than Spark 3.5, provide the required field while omitting optional defaults to exercise
+    # write-default handling through unmodified Iceberg/Spark.
     if not is_spark_35x():
         with_gpu_session(
             lambda spark: spark.sql(
-                f"INSERT INTO {table_name} (id, s) VALUES "
-                "(4, named_struct('present', 40L, 'nested_added', 11))").collect(),
+                f"INSERT INTO {table_name} (id, s, required_added) VALUES "
+                "(4, named_struct('present', 40L, 'nested_added', 11), 7)").collect(),
             conf={"spark.rapids.sql.format.iceberg.v3.enabled": "true"})
         written_rows = with_cpu_session(
             lambda spark: spark.sql(
