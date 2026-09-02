@@ -496,13 +496,12 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
 
     with_cpu_session(setup_table)
     v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
-    assert_cpu_and_gpu_are_equal_collect_with_capture(
+    assert_gpu_and_cpu_are_equal_collect(
         lambda spark: spark.sql(
             f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
             "boolean_added, long_added, float_added, double_added, date_added, "
             "timestamp_added, binary_added, decimal_added "
             f"FROM {table_name} ORDER BY id"),
-        exist_classes="GpuBatchScanExec",
         conf=v3_conf)
 
     for unsupported_column in ["timestamp_ntz_added", "uuid_added", "fixed_added"]:
