@@ -19,7 +19,6 @@ package org.apache.iceberg.spark
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
-import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.iceberg.{MetadataColumns, Schema}
 import org.apache.iceberg.types.{Type, Types, TypeUtil}
 
@@ -43,6 +42,22 @@ object GpuTypeToSparkType {
     "rapids.parquet.map.value.field.id"
   private[iceberg] val MAP_VALUE_NESTED_IDS_METADATA_KEY =
     "rapids.parquet.map.value.nested.ids"
+
+  private def defaultToSpark(
+      field: Types.NestedField,
+      literalMethodName: String,
+      valueMethodName: String): Option[Any] = {
+    try {
+      val fieldClass = classOf[Types.NestedField]
+      val literalMethod = fieldClass.getMethod(literalMethodName)
+      val valueMethod = fieldClass.getMethod(valueMethodName)
+      Option(literalMethod.invoke(field)).map { _ =>
+        SparkUtil.internalToSpark(field.`type`(), valueMethod.invoke(field))
+      }
+    } catch {
+      case _: NoSuchMethodException => None
+    }
+  }
 
   def toSparkType(schema: Schema): StructType = {
     TypeUtil.visit(schema, new GpuTypeToSparkType).asInstanceOf[StructType]
@@ -141,14 +156,14 @@ class GpuTypeToSparkType extends TypeToSparkType {
           nestedJson.foreach(json =>
             metadataBuilder.withMetadata(Metadata.fromJson(json)))
 
-          if (ShimUtils.hasWriteDefault(field)) {
-            val value = ShimUtils.writeDefaultToSpark(field)
+          GpuTypeToSparkType.defaultToSpark(
+              field, "writeDefaultLiteral", "writeDefault").foreach { value =>
             metadataBuilder.putString(
               GpuTypeToSparkType.CURRENT_DEFAULT_COLUMN_METADATA_KEY,
               Literal.create(value, fieldResult).sql)
           }
-          if (ShimUtils.hasInitialDefault(field)) {
-            val value = ShimUtils.initialDefaultToSpark(field)
+          GpuTypeToSparkType.defaultToSpark(
+              field, "initialDefaultLiteral", "initialDefault").foreach { value =>
             metadataBuilder.putString(
               GpuTypeToSparkType.EXISTS_DEFAULT_COLUMN_METADATA_KEY,
               Literal.create(value, fieldResult).sql)
