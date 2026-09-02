@@ -19,7 +19,7 @@ from pyspark.sql.types import ArrayType, BinaryType
 
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_collect)
-from conftest import is_iceberg_remote_catalog
+from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import gen_df, copy_and_update, RepeatSeqGen
 from iceberg import (create_iceberg_table,
                      iceberg_base_table_cols,
@@ -30,7 +30,8 @@ from iceberg import (create_iceberg_table,
                      ICEBERG_V3_UNSUPPORTED_REASON,
                      supports_iceberg_row_lineage_inheritance,
                      ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-from marks import iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional, datagen_overrides
+from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
+                   datagen_overrides)
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
 
 pytestmark = [
@@ -146,15 +147,29 @@ def test_ctas_v3_row_lineage(spark_tmp_table_factory):
         "spark.rapids.sql.format.iceberg.v3.enabled": "true"
     })
 
-    with_gpu_session(
-        lambda spark: _execute_ctas(
-            spark,
-            table_name,
-            spark_tmp_table_factory,
-            lambda sp: sp.range(3),
-            {"format-version": "3"},
-            ret=False),
-        conf=conf)
+    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+    callback.startCapture()
+    try:
+        with_gpu_session(
+            lambda spark: _execute_ctas(
+                spark,
+                table_name,
+                spark_tmp_table_factory,
+                lambda sp: sp.range(3),
+                {"format-version": "3"},
+                ret=False),
+            conf=conf)
+        captured_plans = callback.getResultsWithTimeout(10000)
+        assert any(
+            callback.contains(plan, "GpuAtomicCreateTableAsSelectExec")
+            for plan in captured_plans
+        ), "GpuAtomicCreateTableAsSelectExec is not found in the captured CTAS plans"
+        assert not any(
+            callback.didFallBack(plan, "AtomicCreateTableAsSelectExec")
+            for plan in captured_plans
+        ), "Captured CTAS plan contains CPU AtomicCreateTableAsSelectExec"
+    finally:
+        callback.endCapture()
 
     rows = with_cpu_session(
         lambda spark: spark.sql(
