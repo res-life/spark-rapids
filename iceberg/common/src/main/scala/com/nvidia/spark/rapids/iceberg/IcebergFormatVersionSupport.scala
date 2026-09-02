@@ -102,7 +102,7 @@ object IcebergFormatVersionSupport {
       requiredFieldIds: Seq[Int]): Schema = {
     val projectedIds = TypeUtil.getProjectedIds(expectedSchema).asScala.map(_.toInt).toSet
     val missingFields = requiredFieldIds.distinct.filterNot(projectedIds).map { fieldId =>
-      Option(tableSchema.asStruct().field(fieldId)).getOrElse {
+      Option(tableSchema.findField(fieldId)).getOrElse {
         throw new IllegalArgumentException(s"Cannot find required field for ID $fieldId")
       }
     }
