@@ -31,7 +31,9 @@ CUDA_CLASSIFIER=${CUDA_CLASSIFIER:-'cuda12'}
 CLASSIFIER=${CLASSIFIER:-"$CUDA_CLASSIFIER"} # default as CUDA_CLASSIFIER for compatibility
 MVN_SETTINGS=${MVN_SETTINGS:-"jenkins/settings.xml"}
 MVN=${MVN:-"mvn -s $MVN_SETTINGS -Dmaven.wagon.http.retryHandler.count=3"}
-# Premerge Jenkins enables this. Keep local/manual runs serial by default.
+if [[ -z "${PARALLEL_UT:-}" ]]; then
+    echo "NOTE: premerge CI runs unit tests in parallel; this run is serial. Set PARALLEL_UT=true to match CI."
+fi
 PARALLEL_UT=${PARALLEL_UT:-false}
 PARALLEL_UT_FORK_COUNT=${PARALLEL_UT_FORK_COUNT:-}
 
