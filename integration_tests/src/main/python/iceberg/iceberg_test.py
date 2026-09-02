@@ -516,7 +516,7 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
     # than Spark 3.5, verify that unmodified Spark/Iceberg rejects an omitted optional default.
     if not is_spark_35x():
         assert_spark_exception(
-            lambda: with_gpu_session(
+            lambda: with_cpu_session(
                 lambda spark: spark.sql(
                     f"INSERT INTO {table_name} (id, s, required_added) VALUES "
                     "(4, named_struct('present', 40L, 'nested_added', 11), 7)").collect(),
