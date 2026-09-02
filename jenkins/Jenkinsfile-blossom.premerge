@@ -109,7 +109,7 @@ pipeline {
                     }
 
                     def title = githubHelper.getIssue().title.toLowerCase()
-                    env.PARALLEL_UT = title.contains('[no-fast-ut]') ? 'false' : 'true'
+                    env.PARALLEL_UT = 'true'
                     echo "Parallel unit tests enabled for premerge: ${env.PARALLEL_UT}"
                     env.REDUCED_IT = (title ==~ /.*\[reduced-it\].*/).toString()
                     if (title ==~ /.*\[skip ci\].*/) {
