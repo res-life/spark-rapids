@@ -512,16 +512,20 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
             "BatchScanExec",
             conf=v3_conf)
 
-    # Spark requires every output column even when Iceberg defines a default. On runtimes newer
-    # than Spark 3.5, verify that unmodified Spark/Iceberg rejects an omitted optional default.
+    # On runtimes newer than Spark 3.5, verify that unmodified Spark/Iceberg applies an omitted
+    # optional write default.
     if not is_spark_35x():
-        assert_spark_exception(
-            lambda: with_cpu_session(
-                lambda spark: spark.sql(
-                    f"INSERT INTO {table_name} (id, s, required_added) VALUES "
-                    "(4, named_struct('present', 40L, 'nested_added', 11), 7)").collect(),
-                conf=v3_conf),
-            "Cannot find data for the output column `optional_added`")
+        with_cpu_session(
+            lambda spark: spark.sql(
+                f"INSERT INTO {table_name} (id, s, required_added) VALUES "
+                "(4, named_struct('present', 40L, 'nested_added', 11), 7)").collect(),
+            conf=v3_conf)
+        written_rows = with_cpu_session(
+            lambda spark: spark.sql(
+                f"SELECT id, s.present, s.nested_added, required_added, optional_added "
+                f"FROM {table_name} WHERE id = 4").collect(),
+            conf=v3_conf)
+        assert written_rows == [Row(4, 40, 11, 7, "legacy")]
 
 
 @iceberg
