@@ -52,7 +52,9 @@ object GpuTypeToSparkType {
       val literalMethod = fieldClass.getMethod(literalMethodName)
       val valueMethod = fieldClass.getMethod(valueMethodName)
       Option(literalMethod.invoke(field)).map { _ =>
-        SparkUtil.internalToSpark(field.`type`(), valueMethod.invoke(field))
+        val converter = Class.forName("org.apache.iceberg.spark.SparkUtil")
+          .getMethod("internalToSpark", classOf[Type], classOf[Object])
+        converter.invoke(null, field.`type`(), valueMethod.invoke(field))
       }
     } catch {
       case _: NoSuchMethodException => None
