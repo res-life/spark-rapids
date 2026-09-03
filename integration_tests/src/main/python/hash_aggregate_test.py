@@ -680,6 +680,7 @@ _pivot_gens_with_decimals = _init_list + [
 @incompat
 @pytest.mark.parametrize('data_gen', _pivot_gens_with_decimals, ids=idfn)
 @pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.skip(reason='https://github.com/NVIDIA/cudf-spark/issues/15872')
 def test_hash_grpby_pivot(data_gen, conf):
     # disable ANSI mode to avoid overflow in some cases of SUM
     assert_gpu_and_cpu_are_equal_collect(
@@ -726,6 +727,7 @@ def test_hash_grpby_pivot_collation_fallback(collation):
 @incompat
 @pytest.mark.parametrize('data_gen', _init_list, ids=idfn)
 @pytest.mark.parametrize('conf', get_params(_confs, params_markers_for_confs), ids=idfn)
+@pytest.mark.skip(reason='https://github.com/NVIDIA/cudf-spark/issues/15872')
 def test_hash_multiple_grpby_pivot(data_gen, conf):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
@@ -2027,7 +2029,17 @@ def test_reduction_with_max_by_same(data_gen):
         lambda spark: unary_op_df(spark, data_gen).selectExpr(
             "min_by(a, a)", "max_by(a, a)"))
 
-@pytest.mark.parametrize('data_gen', all_gen + _nested_gens, ids=idfn)
+@pytest.mark.parametrize(
+    'data_gen', all_gen + [
+        pytest.param(
+            DayTimeIntervalGen(),
+            marks=[
+                pytest.mark.xfail(
+                    reason='https://github.com/NVIDIA/cudf-spark/issues/15776',
+                    strict=True),
+                validate_execs_in_gpu_plan('GpuHashAggregateExec')
+            ])
+    ] + _nested_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
 def test_count(data_gen):
     assert_gpu_and_cpu_are_equal_collect(
@@ -2038,6 +2050,16 @@ def test_count(data_gen):
             'count()',
             'count(1)'),
         conf = {'spark.sql.legacy.allowParameterlessCount': 'true'})
+
+@pytest.mark.xfail(
+    reason='https://github.com/NVIDIA/cudf-spark/issues/15776', strict=True)
+@validate_execs_in_gpu_plan('GpuHashAggregateExec')
+def test_count_year_month_interval():
+    assert_gpu_and_cpu_are_equal_collect(
+        lambda spark: spark.range(4).selectExpr(
+            "INTERVAL '0-1' YEAR TO MONTH * "
+            "CASE WHEN id % 2 = 0 THEN 1 END AS a")
+        .selectExpr("count(a)"))
 
 @pytest.mark.parametrize('data_gen', all_basic_gens, ids=idfn)
 @allow_non_gpu(*non_utc_allow)
