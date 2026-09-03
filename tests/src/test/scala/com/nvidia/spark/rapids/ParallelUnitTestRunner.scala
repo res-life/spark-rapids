@@ -44,7 +44,6 @@ object ParallelUnitTestRunner {
 
   private val UNRESOLVED_PROPERTY = "${"
   private val PARALLEL_GPU_ALLOCATION_RATIO = 0.8
-  private val PARQUET_WRITER_SUITE = "com.nvidia.spark.rapids.ParquetWriterSuite"
   private val DPP_SUITES = Seq(
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOff",
     "org.apache.spark.sql.rapids.suites.RapidsDynamicPartitionPruningV1SuiteAEOn")
@@ -52,6 +51,8 @@ object ParallelUnitTestRunner {
   private val SPARK_WAREHOUSE_PREFIX = "spark-warehouse"
   private val WORKER_MODE = "worker"
   private val PROTOCOL_PREFIX = "__RAPIDS_PARALLEL_UT__"
+  private val ONE_TEST_FAILED_SUMMARY = "*** 1 TEST FAILED ***"
+  private val ANSI_COLOR_ESCAPE = "\u001b\\[[0-9;]*m".r
   private val WORKER_EXIT_TIMEOUT_SECONDS = 10L
   private val WORKER_DESTROY_TIMEOUT_SECONDS = 10L
   private val WATCHDOG_POLL_SECONDS = 15L
@@ -93,6 +94,7 @@ object ParallelUnitTestRunner {
     val suiteTimeoutSeconds = propertyDouble(
       config.getOrElse("suiteTimeoutSeconds", ""), DEFAULT_SUITE_TIMEOUT_SECONDS.toDouble).toLong
     val testFailureIgnore = propertyValue(config("testFailureIgnore"), "false").toBoolean
+    val expectedFailureOutputPrefix = config.getOrElse("expectedFailureOutputPrefix", "")
     val configuredSparkConfs = propertySeparatedList(config("sparkConfs"), ';')
     val sparkConfs = if (configuredSparkConfs.isEmpty) {
       Seq(None)
@@ -106,7 +108,8 @@ object ParallelUnitTestRunner {
     val discovered = allSuites.filter(matchesWildcard(_, wildcardSuites))
     if (discovered.isEmpty) {
       // Match the serial scalatest plugin: a filter that selects no suites is a successful no-op.
-      println(s"No suites matched wildcardSuites=${wildcardSuites.mkString(",")}; nothing to run")
+      ConsoleOutput.writeLine(
+        s"No suites matched wildcardSuites=${wildcardSuites.mkString(",")}; nothing to run")
       return
     }
     val suiteTasks = orderSuites(discovered)
@@ -121,14 +124,18 @@ object ParallelUnitTestRunner {
         maxAllocationFraction,
         minAllocationFraction)
 
-    println(s"Running ${discovered.size} suites with at most $workerCount concurrent processes")
+    ConsoleOutput.writeLine(
+      s"Running ${discovered.size} suites with at most $workerCount concurrent processes")
     suiteBatches.filter(_.tasks.size > 1).foreach { batch =>
-      println(s"  serial suite batch: ${batch.tasks.map(_.suite).mkString(", ")}")
+      ConsoleOutput.writeLine(s"  serial suite batch: ${batch.tasks.map(_.suite).mkString(", ")}")
     }
-    println(s"  worker pool: ${suiteBatches.size} batches across $workerCount persistent forks")
+    ConsoleOutput.writeLine(
+      s"  worker pool: ${suiteBatches.size} batches across $workerCount persistent forks")
 
     val failures = sparkConfs.zipWithIndex.flatMap { case (sparkConf, runIndex) =>
-      sparkConf.foreach(conf => println(s"Parallel test wave ${runIndex + 1}: SPARK_CONF=$conf"))
+      sparkConf.foreach { conf =>
+        ConsoleOutput.writeLine(s"Parallel test wave ${runIndex + 1}: SPARK_CONF=$conf")
+      }
       val runId = runIndex + 1
       runWave(
         runId,
@@ -144,13 +151,14 @@ object ParallelUnitTestRunner {
         perForkAllocation,
         perForkMaxAllocation,
         perForkMinAllocation,
+        expectedFailureOutputPrefix,
         suiteTimeoutSeconds)
     }
 
     if (failures.nonEmpty) {
       val message = failures.mkString("Parallel unit tests failed: ", ", ", "")
       if (testFailureIgnore) {
-        System.err.println(message)
+        ConsoleOutput.writeErrorLine(message)
       } else {
         throw new IllegalStateException(message)
       }
@@ -171,6 +179,7 @@ object ParallelUnitTestRunner {
       allocationFraction: Double,
       maxAllocationFraction: Double,
       minAllocationFraction: Double,
+      expectedFailureOutputPrefix: String,
       suiteTimeoutSeconds: Long): Seq[String] = {
     val failures = new ConcurrentLinkedQueue[String]()
 
@@ -193,6 +202,7 @@ object ParallelUnitTestRunner {
           allocationFraction,
           maxAllocationFraction,
           minAllocationFraction,
+          expectedFailureOutputPrefix,
           suiteTimeoutSeconds)
       }
       thread.start()
@@ -230,6 +240,7 @@ object ParallelUnitTestRunner {
       allocationFraction: Double,
       maxAllocationFraction: Double,
       minAllocationFraction: Double,
+      expectedFailureOutputPrefix: String,
       suiteTimeoutSeconds: Long): Unit = {
     val tmpDir = reportsDir.resolve(s"tmp-wave-$runId-worker-$workerId")
     Files.createDirectories(tmpDir)
@@ -257,8 +268,10 @@ object ParallelUnitTestRunner {
     var process: Process = null
     try {
       process = processBuilder.start()
-      val errorThread = streamLines(s"wave-$runId-worker-$workerId",
-        new BufferedReader(new InputStreamReader(process.getErrorStream)))
+      val errorThread = streamLines(
+        s"wave-$runId-worker-$workerId",
+        new BufferedReader(new InputStreamReader(process.getErrorStream)),
+        expectedFailureOutputPrefix)
       val writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream))
       val reader = new BufferedReader(new InputStreamReader(process.getInputStream))
       // A hung suite would otherwise block this thread in readLine() until the CI job timeout;
@@ -285,7 +298,7 @@ object ParallelUnitTestRunner {
             currentTask.set(Some(activeTask))
             suiteDeadlineNanos.set(
               System.nanoTime() + TimeUnit.SECONDS.toNanos(suiteTimeoutSeconds))
-            println(s"[wave-$runId-worker-$workerId] START ${task.suite}")
+            ConsoleOutput.writeLine(s"[wave-$runId-worker-$workerId] START ${task.suite}")
             writer.write(s"RUN\t${task.id}\t${activeTask.resultToken}\t${task.suite}\n")
             writer.flush()
             true
@@ -318,7 +331,8 @@ object ParallelUnitTestRunner {
             case Some((activeTask, succeeded))
                 if claimSuiteResult(suiteDeadlineNanos) =>
               if (succeeded) {
-                println(s"[wave-$runId-worker-$workerId] PASS ${activeTask.task.suite}")
+                ConsoleOutput.writeLine(
+                  s"[wave-$runId-worker-$workerId] PASS ${activeTask.task.suite}")
               } else {
                 failures.add(
                   s"wave-$runId ${activeTask.task.suite} failed in worker-$workerId")
@@ -328,16 +342,19 @@ object ParallelUnitTestRunner {
                 running = sendNextTask()
               }
             case _ =>
-              println(s"[wave-$runId-worker-$workerId] $line")
+              ConsoleOutput.writeLine(s"[wave-$runId-worker-$workerId] " +
+                prefixExpectedFailureSummary(line, expectedFailureOutputPrefix))
           }
         } else {
-          println(s"[wave-$runId-worker-$workerId] $line")
+          ConsoleOutput.writeLine(s"[wave-$runId-worker-$workerId] " +
+            prefixExpectedFailureSummary(line, expectedFailureOutputPrefix))
         }
         if (running) {
           line = reader.readLine()
         }
       }
-      val outputThread = streamLines(s"wave-$runId-worker-$workerId", reader)
+      val outputThread = streamLines(
+        s"wave-$runId-worker-$workerId", reader, expectedFailureOutputPrefix)
       val (exited, terminated) = stopWorkerProcess(process, runId, workerId)
       outputThread.join(TimeUnit.SECONDS.toMillis(WORKER_DESTROY_TIMEOUT_SECONDS))
       errorThread.join(TimeUnit.SECONDS.toMillis(WORKER_DESTROY_TIMEOUT_SECONDS))
@@ -373,7 +390,7 @@ object ParallelUnitTestRunner {
             process.destroyForcibly()
           }
         } finally {
-          System.err.println(s"wave-$runId worker-$workerId hit a fatal error")
+          ConsoleOutput.writeErrorLine(s"wave-$runId worker-$workerId hit a fatal error")
           t.printStackTrace(System.err)
           throw t
         }
@@ -395,7 +412,7 @@ object ParallelUnitTestRunner {
           val deadline = deadlineNanos.get()
           if (claimSuiteTimeout(deadlineNanos, deadline, System.nanoTime())) {
             val suite = currentSuite().getOrElse("<unknown suite>")
-            System.err.println(s"wave-$runId worker-$workerId: $suite exceeded " +
+            ConsoleOutput.writeErrorLine(s"wave-$runId worker-$workerId: $suite exceeded " +
                 s"$suiteTimeoutSeconds seconds; capturing a thread dump and killing the worker")
             failures.add(s"wave-$runId $suite exceeded the ${suiteTimeoutSeconds}s suite " +
                 s"timeout in worker-$workerId")
@@ -448,12 +465,13 @@ object ParallelUnitTestRunner {
         dumper.waitFor(10, TimeUnit.SECONDS)
       }
       val dump = new String(Files.readAllBytes(dumpFile), StandardCharsets.UTF_8)
-      println(s"[$label] thread dump of the hung test JVM (also saved to $dumpFile):")
-      print(dump)
+      ConsoleOutput.writeLine(
+        s"[$label] thread dump of the hung test JVM (also saved to $dumpFile):")
+      ConsoleOutput.write(dump)
       System.out.flush()
     } catch {
       case NonFatal(t) =>
-        System.err.println(s"[$label] failed to capture a thread dump: ${t.getMessage}")
+        ConsoleOutput.writeErrorLine(s"[$label] failed to capture a thread dump: ${t.getMessage}")
     }
   }
 
@@ -467,7 +485,7 @@ object ParallelUnitTestRunner {
     val terminated = if (exited) {
       true
     } else {
-      System.err.println(s"wave-$runId worker-$workerId did not exit within " +
+      ConsoleOutput.writeErrorLine(s"wave-$runId worker-$workerId did not exit within " +
           s"$exitTimeoutSeconds seconds; terminating it")
       process.destroy()
       if (process.waitFor(destroyTimeoutSeconds, TimeUnit.SECONDS)) {
@@ -545,7 +563,7 @@ object ParallelUnitTestRunner {
             succeeded = false
         }
       }
-      println(s"$PROTOCOL_PREFIX\tRESULT\t$taskId\t$resultToken\t$succeeded")
+      ConsoleOutput.writeLine(s"$PROTOCOL_PREFIX\tRESULT\t$taskId\t$resultToken\t$succeeded")
       System.out.flush()
       line = reader.readLine()
     }
@@ -561,6 +579,11 @@ object ParallelUnitTestRunner {
         t.printStackTrace(System.out)
         false
     }
+  }
+
+  private[rapids] def prefixExpectedFailureSummary(line: String, prefix: String): String = {
+    val plainLine = ANSI_COLOR_ESCAPE.replaceAllIn(line, "")
+    if (prefix.nonEmpty && plainLine == ONE_TEST_FAILED_SUMMARY) s"$prefix$line" else line
   }
 
   private def initializeSparkFunctionRegistry(): Unit = {
@@ -597,7 +620,7 @@ object ParallelUnitTestRunner {
       }
     }
     cleanup(cleanupSparkSessionAndContext())
-    cleanup(clearCachedBatchSerializer())
+    cleanup(TestUtils.clearCachedBatchSerializer())
     cleanup {
       warehouseDirs ++= Option(tmpDir.toFile.listFiles()).getOrElse(Array.empty[File])
           .filter(file => file.isDirectory && file.getName.startsWith(SPARK_WAREHOUSE_PREFIX))
@@ -624,25 +647,6 @@ object ParallelUnitTestRunner {
   } finally {
     SparkSession.clearActiveSession()
     SparkSession.clearDefaultSession()
-  }
-
-  /**
-   * Reset Spark's JVM-global cached CachedBatchSerializer between suites.
-   *
-   * The first time any suite builds a cached relation, Spark's InMemoryRelation caches the
-   * serializer named by spark.sql.cache.serializer in a JVM-global field and reuses it for the
-   * lifetime of the JVM, ignoring the configuration of later sessions. In a persistent worker a
-   * suite that runs without the RAPIDS serializer would pin Spark's default serializer, so a later
-   * suite such as RapidsCachedTableSuite would observe a serializer that no longer matches its own
-   * spark.sql.cache.serializer and fail ("Cache serializer failed to load!"). Clearing the cache
-   * between suites lets each suite rebuild the serializer from its own configuration.
-   *
-   * Called reflectively because InMemoryRelation.clearSerializer is not part of the public API.
-   */
-  private def clearCachedBatchSerializer(): Unit = {
-    val module = Class.forName("org.apache.spark.sql.execution.columnar.InMemoryRelation$")
-        .getField("MODULE$").get(null)
-    module.getClass.getMethod("clearSerializer").invoke(module)
   }
 
   private def poolWorkerCommand(
@@ -732,12 +736,16 @@ object ParallelUnitTestRunner {
     runnerArgs
   }
 
-  private def streamLines(label: String, reader: BufferedReader): Thread = {
+  private def streamLines(
+      label: String,
+      reader: BufferedReader,
+      expectedFailureOutputPrefix: String): Thread = {
     val thread = new Thread(s"parallel-unit-test-output-$label") {
       override def run(): Unit = try {
         var line = reader.readLine()
         while (line != null) {
-          println(s"[$label] $line")
+          ConsoleOutput.writeLine(s"[$label] " +
+            prefixExpectedFailureSummary(line, expectedFailureOutputPrefix))
           line = reader.readLine()
         }
       } catch {
@@ -755,10 +763,9 @@ object ParallelUnitTestRunner {
 
   private[rapids] def createSuiteBatches(tasks: Seq[SuiteTask]): Seq[SuiteBatch] = {
     val taskBySuite = tasks.map(task => task.suite -> task).toMap
-    // Submit these first so the long Parquet suite gets one worker while both DPP suites are
-    // pinned to another worker and execute serially. Each worker rejoins the general queue after
-    // completing its special batch.
-    val specialBatches = Seq(Seq(PARQUET_WRITER_SUITE), DPP_SUITES).flatMap { suites =>
+    // Pin both DPP suites to one worker so they execute serially. The worker rejoins the general
+    // queue after completing the special batch.
+    val specialBatches = Seq(DPP_SUITES).flatMap { suites =>
       val batchTasks = suites.flatMap(taskBySuite.get)
       if (batchTasks.nonEmpty) Some(SuiteBatch(batchTasks)) else None
     }
