@@ -672,15 +672,6 @@ object NvtxRegistry {
   val GPU_RANGE: NvtxId = NvtxId("GpuRange", NvtxColor.DARK_GREEN,
     "Generating range of values on GPU")
 
-  val GPU_ACQUIRE_C2C: NvtxId = NvtxId("gpuAcquireC2C", NvtxColor.GREEN,
-    "Acquiring GPU for coalesce-to-coalesce operation")
-
-  val PINNED_H2D: NvtxId = NvtxId("pinnedH2D", NvtxColor.DARK_GREEN,
-    "Copying from pinned host memory to device")
-
-  val PAGEABLE_H2D: NvtxId = NvtxId("PageableH2D", NvtxColor.GREEN,
-    "Copying from pageable host memory to device")
-
   def init(): Unit = {
     register(ACQUIRE_GPU)
     register(RELEASE_GPU)
@@ -862,9 +853,6 @@ object NvtxRegistry {
     register(DISK_SPILL)
     register(DEVICE_SPILL)
     register(GPU_RANGE)
-    register(GPU_ACQUIRE_C2C)
-    register(PINNED_H2D)
-    register(PAGEABLE_H2D)
   }
 }
 
