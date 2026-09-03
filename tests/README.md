@@ -39,8 +39,10 @@ which corresponds to `-z` or `-t` options in the
 ### Parallel Unit Tests
 
 Premerge runs the Scala unit tests in parallel, using
-`ParallelUnitTestRunner` to run suites in separate worker JVMs. Local runs are serial unless
-parallel execution is enabled explicitly:
+`ParallelUnitTestRunner` to run suites in separate worker JVMs. Add `[serial ut]` or `[serial-ut]`
+to the PR title to run them serially when debugging a concurrency-only failure, reading a linear
+ScalaTest log, or verifying a fix. Local runs are serial unless parallel execution is enabled
+explicitly:
 
 ```bash
 mvn package -pl tests -am -Drapids.parallelUnitTests=true -DparallelForkCount=4
