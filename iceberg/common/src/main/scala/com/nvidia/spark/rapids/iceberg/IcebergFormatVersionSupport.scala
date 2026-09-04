@@ -101,11 +101,26 @@ object IcebergFormatVersionSupport {
       expectedSchema: Schema,
       requiredFieldIds: Seq[Int]): Schema = {
     val projectedIds = TypeUtil.getProjectedIds(expectedSchema).asScala.map(_.toInt).toSet
-    val missingFields = requiredFieldIds.distinct.filterNot(projectedIds).map { fieldId =>
-      Option(tableSchema.findField(fieldId)).getOrElse {
+    val requiredFields = requiredFieldIds.distinct.map { fieldId =>
+      val field = Option(tableSchema.findField(fieldId)).getOrElse {
         throw new IllegalArgumentException(s"Cannot find required field for ID $fieldId")
       }
+
+      // Iceberg permits an equality-delete field to be a primitive nested in a struct. However,
+      // GpuDeleteFilter builds both its equality-delete schema and its probe expressions from the
+      // top-level columns in the table and required schemas. Adding a nested leaf as a top-level
+      // column here would make the planning check pass, but GpuDeleteFilter would later fail to
+      // resolve the field ID or bind it to the wrong input column. Validate every equality field,
+      // including fields already projected by the query, and fall back until GpuDeleteFilter can
+      // preserve and extract the complete nested path.
+      if (tableSchema.asStruct().field(fieldId) == null) {
+        throw new UnsupportedOperationException(
+          s"Nested equality-delete field '${field.name()}' with ID $fieldId is not supported " +
+            "on GPU")
+      }
+      field
     }
+    val missingFields = requiredFields.filterNot(field => projectedIds.contains(field.fieldId()))
 
     if (missingFields.isEmpty) {
       expectedSchema

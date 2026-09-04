@@ -1067,7 +1067,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       .contains("delete_key" -> "timestamp"))
   }
 
-  test("Nested equality-delete required fields are found by ID") {
+  test("Nested equality-delete required fields fall back whether projected or implicit") {
     val projectedField = Types.NestedField.optional(1, "id", Types.LongType.get())
     val equalityDeleteField = fieldWithDefaults(
       3,
@@ -1088,13 +1088,18 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     val payloadField = Types.NestedField.optional(
       2, "payload", Types.StructType.of(equalityDeleteField))
     val tableSchema = new Schema(projectedField, payloadField, unreferencedField)
-    val expectedSchema = new Schema(projectedField)
 
-    val schemaToCheck = IcebergFormatVersionSupport.withRequiredFields(
-      tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+    Seq(
+      new Schema(projectedField),
+      new Schema(projectedField, payloadField)).foreach { expectedSchema =>
+      val error = intercept[UnsupportedOperationException] {
+        IcebergFormatVersionSupport.withRequiredFields(
+          tableSchema, expectedSchema, Seq(equalityDeleteField.fieldId()))
+      }
 
-    assert(schemaToCheck.columns().asScala.map(_.fieldId()) == Seq(1, 3))
-    assert(IcebergFormatVersionSupport.unsupportedDefault(schemaToCheck).isEmpty)
+      assert(error.getMessage.contains(
+        "Nested equality-delete field 'delete_key' with ID 3 is not supported on GPU"))
+    }
   }
 
   test("Present struct children take precedence over defaults for missing children") {
