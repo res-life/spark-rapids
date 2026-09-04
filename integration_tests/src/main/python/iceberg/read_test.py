@@ -26,12 +26,7 @@ from spark_session import is_spark_35x, with_cpu_session, with_gpu_session
 pytestmark = iceberg_unsupported_mark
 
 
-@iceberg
-@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
-@ignore_order(local=True)
-def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
-    table_name = get_full_table_name(spark_tmp_table_factory)
+def _setup_iceberg_v3_defaults_table(table_name):
     props = _build_tblprops({"format-version": "3"})
     props_sql = ", ".join(f"'{key}' = '{value}'" for key, value in props.items())
 
@@ -94,21 +89,32 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
         spark.sql(f"REFRESH TABLE {table_name}")
 
     with_cpu_session(setup_table)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    _setup_iceberg_v3_defaults_table(table_name)
     v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+    query = (
+        f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
+        "boolean_added, long_added, float_added, double_added, date_added, "
+        "timestamp_added, binary_added, decimal_added "
+        f"FROM {table_name} ORDER BY id")
     assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, s.present, s.nested_added, required_added, optional_added, "
-            "boolean_added, long_added, float_added, double_added, date_added, "
-            "timestamp_added, binary_added, decimal_added "
-            f"FROM {table_name} ORDER BY id"),
+        lambda spark: spark.sql(query),
         conf=v3_conf)
 
-    for unsupported_column in ["timestamp_ntz_added", "uuid_added", "fixed_added"]:
-        assert_gpu_fallback_collect(
-            lambda spark, column=unsupported_column: spark.sql(
-                f"SELECT id, {column} FROM {table_name}"),
-            "BatchScanExec",
-            conf=v3_conf)
+    def assert_gpu_scan(spark):
+        df = spark.sql(query)
+        df.collect()
+        spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
+            df._jdf, "GpuBatchScanExec")
+
+    with_gpu_session(assert_gpu_scan, conf=v3_conf)
 
     # On runtimes newer than Spark 3.5, verify that unmodified Spark/Iceberg applies an omitted
     # optional write default.
@@ -124,6 +130,23 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
                 f"FROM {table_name} WHERE id = 4").collect(),
             conf=v3_conf)
         assert written_rows == [Row(4, 40, 11, 7, "legacy")]
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
+@ignore_order(local=True)
+def test_iceberg_v3_unsupported_initial_defaults_fallback(spark_tmp_table_factory):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    _setup_iceberg_v3_defaults_table(table_name)
+    v3_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
+
+    for unsupported_column in ["timestamp_ntz_added", "uuid_added", "fixed_added"]:
+        assert_gpu_fallback_collect(
+            lambda spark, column=unsupported_column: spark.sql(
+                f"SELECT id, {column} FROM {table_name}"),
+            "BatchScanExec",
+            conf=v3_conf)
 
 
 @iceberg
@@ -154,9 +177,14 @@ def test_iceberg_v3_write_default_gpu_write_cpu_read(spark_tmp_table_factory):
         "spark.rapids.sql.format.iceberg.v3.enabled": "true",
         "spark.sql.adaptive.enabled": "false",
     })
-    with_gpu_session(
-        lambda spark: spark.sql(f"INSERT INTO {table_name} (id) VALUES (4)").collect(),
-        conf=conf)
+
+    def write_with_gpu(spark):
+        df = spark.sql(f"INSERT INTO {table_name} (id) VALUES (4)")
+        df.collect()
+        command_plan = df._jdf.queryExecution().executedPlan().commandPhysicalPlan()
+        assert command_plan.getClass().getSimpleName() == "GpuAppendDataExec", command_plan
+
+    with_gpu_session(write_with_gpu, conf=conf)
 
     written_rows = with_cpu_session(
         lambda spark: spark.sql(
