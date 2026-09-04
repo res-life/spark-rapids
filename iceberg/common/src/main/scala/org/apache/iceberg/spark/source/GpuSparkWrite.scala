@@ -26,7 +26,8 @@ import com.nvidia.spark.rapids.Arm.closeOnExcept
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
-import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
+import com.nvidia.spark.rapids.iceberg.{GpuIcebergSpecPartitioner, IcebergFormatVersionSupport,
+  ShimUtils}
 import com.nvidia.spark.rapids.shims.parquet.ParquetFieldIdShims
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -110,7 +111,8 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // the GPU path uses Spark's Parquet infrastructure which requires field IDs in the
     // StructType metadata. Without them, Iceberg's ParquetMetrics cannot extract file-level
     // statistics, causing StrictMetricsEvaluator to fail during overwrite validation.
-    val dsSchema = GpuTypeToSparkType.toSparkType(writeSchema)
+    val dsSchema =
+      GpuTypeToSparkType.toSparkType(writeSchema, ShimUtils.defaultValueAccessor())
     val useFanout = GpuSparkWriteAccess.useFanoutWriter(cpu)
     val writeProps = GpuSparkWriteAccess.writeProperties(cpu)
 

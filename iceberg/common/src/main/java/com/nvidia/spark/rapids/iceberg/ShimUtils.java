@@ -86,6 +86,10 @@ public class ShimUtils {
         return IMPL.writeDefaultToSpark(field);
     }
 
+    public static IcebergDefaultValueAccessor defaultValueAccessor() {
+        return IMPL;
+    }
+
     public static int rowIdFieldId() {
         return ROW_ID_FIELD_ID;
     }

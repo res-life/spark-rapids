@@ -70,7 +70,8 @@ class GpuIcebergPartitionerSuite extends AnyFunSuite with BeforeAndAfterAll with
       Types.NestedField.required(4, "d", Types.IntegerType.get),
     )
 
-    val sparkType = GpuTypeToSparkType.toSparkType(icebergSchema)
+    val sparkType =
+      GpuTypeToSparkType.toSparkType(icebergSchema, ShimUtils.defaultValueAccessor())
     val sparkFieldTypes = sparkType.fields.map(_.dataType)
 
     val icebergPartitionSpec = PartitionSpec.builderFor(icebergSchema)

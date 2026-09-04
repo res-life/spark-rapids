@@ -122,9 +122,9 @@ class GpuDeleteFilter(
 
   private lazy val filterOutputSparkDataTypes: Array[DataType] = isDeleteColIdx match {
     case Some(_) =>
-      toSparkType(requiredSchema).fields.map(_.dataType)
+      toSparkType(requiredSchema, ShimUtils.defaultValueAccessor()).fields.map(_.dataType)
     case None =>
-      val originalSparkTypes = toSparkType(requiredSchema)
+      val originalSparkTypes = toSparkType(requiredSchema, ShimUtils.defaultValueAccessor())
       val ret = new Array[DataType](originalSparkTypes.fields.length + 1)
       for (i <- originalSparkTypes.fields.indices) {
         ret(i) = originalSparkTypes.fields(i).dataType
@@ -271,7 +271,7 @@ class GpuDeleteFilter(
       return None
     }
 
-    val posDeleteSparkType = toSparkType(POS_DELETE_SCHEMA)
+    val posDeleteSparkType = toSparkType(POS_DELETE_SCHEMA, ShimUtils.defaultValueAccessor())
     val posDeletes = deleteLoader.loadDeletes(posDeleteFiles,
       POS_DELETE_SCHEMA,
       posDeleteSparkType.fields.map(_.dataType))
@@ -320,7 +320,7 @@ class GpuDeleteFilter(
   private def loadEqDeleteContext(eqDeletes: Seq[DeleteFile],
       eqIds: Seq[Int]): DeleteFilterContext = {
     val schema = eqDeleteSchema(eqIds)
-    val sparkType = toSparkType(schema)
+    val sparkType = toSparkType(schema, ShimUtils.defaultValueAccessor())
     val sparkTypes = sparkType.fields.map(_.dataType)
     val buildSide = deleteLoader.loadDeletes(eqDeletes, schema, sparkTypes)
     val buildKeys = eqIds
