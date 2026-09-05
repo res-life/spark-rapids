@@ -19,10 +19,11 @@ package com.nvidia.spark.rapids.iceberg.parquet
 import java.util.{List => JList, Map => JMap, Objects, Optional}
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.Stack
+import scala.collection.mutable.{ArrayBuffer, Stack}
 
 import ai.rapids.cudf.{BinaryOp, ColumnVector => CudfColumnVector, ColumnView, DType}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.AutoClosableArrayBuffer
 import com.nvidia.spark.rapids.CastOptions
 import com.nvidia.spark.rapids.GpuCast
 import com.nvidia.spark.rapids.GpuColumnVector
@@ -184,15 +185,10 @@ private[iceberg] case object InheritRowId extends ColumnAction {
     firstRowId match {
       case None => GpuColumnVector.columnVectorFromNull(ctx.numRows, LongType)
       case Some(base) =>
-        withResource(ctx.processor.getRowPositions(ctx.numRows)) { positions =>
-          ctx.processor.checkRowIdRange(base)
-          withResource(GpuScalar.from(base, LongType)) { scalar =>
-            withResource(positions.binaryOp(BinaryOp.ADD, scalar, DType.INT64)) { inherited =>
-              ctx.column match {
-                case Some(col) => col.replaceNulls(inherited)
-                case None => inherited.incRefCount()
-              }
-            }
+        withResource(ctx.processor.getInheritedRowIds(ctx.numRows, base)) { inherited =>
+          ctx.column match {
+            case Some(col) => col.replaceNulls(inherited)
+            case None => inherited.incRefCount()
           }
         }
     }
@@ -665,6 +661,10 @@ class GpuParquetReaderPostProcessor(
     shadedFileReadSchema: ShadedMessageType,
     metrics: Map[String, com.nvidia.spark.rapids.GpuMetric]
 ) {
+  // Microbenchmarks on an NVIDIA L4 show that sequence + concatenate overtakes the CPU
+  // fromLongs path between 256K and 512K rows when a batch spans multiple position ranges.
+  private val multiRangeGpuMinRows = 512 * 1024
+
   private val icebergBuildActionTimeMetricName = "icebergBuildActionTime"
   private val icebergPostProcessTimeMetricName = "icebergPostProcessTime"
 
@@ -694,49 +694,141 @@ class GpuParquetReaderPostProcessor(
   private var currentRowPositions: CudfColumnVector = _
   private var currentMaxRowPosition = -1L
 
-  private[iceberg] def getRowPositions(numRows: Int): CudfColumnVector = {
-    if (currentRowPositions == null) {
-      val rowPositions = new Array[Long](numRows)
+  private case class RowPositionPlan(
+      ranges: Array[(Long, Int)],
+      nextBlockIndex: Int,
+      nextProcessedRowCount: Long,
+      nextProcessedBlockRowCounts: Long) {
+    def maxPosition: Long = ranges.lastOption
+      .map { case (start, length) => start + length - 1 }
+      .getOrElse(-1L)
+  }
 
-      // Advance state in locals and commit only after fromLongs succeeds. process() restores
-      // the matching snapshot when withRetryNoSplit retries a later allocation.
-      var localBlockIndex = curBlockIndex
-      var localProcessedRowCount = processedRowCount
-      var localProcessedBlockRowCounts = processedBlockRowCounts
+  private def planRowPositions(numRows: Int): RowPositionPlan = {
+    if (numRows == 0) {
+      return RowPositionPlan(
+        Array.empty, curBlockIndex, processedRowCount, processedBlockRowCounts)
+    }
 
-      var curBlockRowCount = parquetInfo.blocks(localBlockIndex).getRowCount
-      var curBlockRowStart = parquetInfo.blocksFirstRowIndices(localBlockIndex)
-      var curBlockRowEnd = curBlockRowStart + curBlockRowCount
-      var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
+    // Predicate filtering can remove row groups, so a batch can contain non-contiguous
+    // file-global positions and may require multiple sequences followed by a concatenate.
+    val positionRanges = new ArrayBuffer[(Long, Int)]
 
-      var i = 0
-      while (i < numRows) {
-        if (curRowPos >= curBlockRowEnd) {
-          localBlockIndex += 1
-          localProcessedBlockRowCounts += curBlockRowCount
-          curRowPos = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+    // Advance state in locals and commit only after position materialization succeeds.
+    // process() restores the matching snapshot when withRetryNoSplit retries a later allocation.
+    var localBlockIndex = curBlockIndex
+    var localProcessedRowCount = processedRowCount
+    var localProcessedBlockRowCounts = processedBlockRowCounts
 
-          curBlockRowCount = parquetInfo.blocks(localBlockIndex).getRowCount
-          curBlockRowStart = parquetInfo.blocksFirstRowIndices(localBlockIndex)
-          curBlockRowEnd = curBlockRowStart + curBlockRowCount
-        }
+    var curBlockRowCount = parquetInfo.blocks(localBlockIndex).getRowCount
+    var curBlockRowStart = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+    var curBlockRowEnd = curBlockRowStart + curBlockRowCount
+    var curRowPos = curBlockRowStart + localProcessedRowCount - localProcessedBlockRowCounts
 
-        rowPositions(i) = curRowPos
-        curRowPos += 1
-        localProcessedRowCount += 1
-        i += 1
+    var remainingRows = numRows
+    while (remainingRows > 0) {
+      while (curRowPos >= curBlockRowEnd) {
+        localBlockIndex += 1
+        localProcessedBlockRowCounts += curBlockRowCount
+        curRowPos = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+
+        curBlockRowCount = parquetInfo.blocks(localBlockIndex).getRowCount
+        curBlockRowStart = parquetInfo.blocksFirstRowIndices(localBlockIndex)
+        curBlockRowEnd = curBlockRowStart + curBlockRowCount
       }
 
-      currentRowPositions = CudfColumnVector.fromLongs(rowPositions: _*)
-      currentMaxRowPosition = if (numRows == 0) -1L else rowPositions(numRows - 1)
-      curBlockIndex = localBlockIndex
-      processedRowCount = localProcessedRowCount
-      processedBlockRowCounts = localProcessedBlockRowCounts
+      val rangeLength = Math.min(remainingRows.toLong, curBlockRowEnd - curRowPos).toInt
+      if (positionRanges.nonEmpty &&
+          positionRanges.last._1 + positionRanges.last._2 == curRowPos) {
+        val (start, length) = positionRanges.last
+        positionRanges(positionRanges.length - 1) = (start, length + rangeLength)
+      } else {
+        positionRanges += ((curRowPos, rangeLength))
+      }
+      curRowPos += rangeLength
+      localProcessedRowCount += rangeLength
+      remainingRows -= rangeLength
+    }
+
+    RowPositionPlan(
+      positionRanges.toArray,
+      localBlockIndex,
+      localProcessedRowCount,
+      localProcessedBlockRowCounts)
+  }
+
+  private def materializePositionPlan(
+      plan: RowPositionPlan,
+      numRows: Int,
+      offset: Long): CudfColumnVector = {
+    def makeSequence(start: Long, length: Int): CudfColumnVector = {
+      withResource(GpuScalar.from(Math.addExact(offset, start), LongType)) { startScalar =>
+        CudfColumnVector.sequence(startScalar, length)
+      }
+    }
+
+    def makeHostPositions(): CudfColumnVector = {
+      val rowPositions = new Array[Long](numRows)
+      var outputIndex = 0
+      plan.ranges.foreach { case (start, length) =>
+        var position = Math.addExact(offset, start)
+        val outputEnd = outputIndex + length
+        while (outputIndex < outputEnd) {
+          rowPositions(outputIndex) = position
+          outputIndex += 1
+          position += 1
+        }
+      }
+      CudfColumnVector.fromLongs(rowPositions: _*)
+    }
+
+    if (plan.ranges.isEmpty) {
+      CudfColumnVector.fromLongs()
+    } else if (plan.ranges.length == 1) {
+      val (start, length) = plan.ranges.head
+      makeSequence(start, length)
+    } else if (numRows < multiRangeGpuMinRows) {
+      // Multiple GPU kernels plus concatenate cost more than the CPU fill/upload path for
+      // small batches. Keep the GPU path for larger batches where it wins decisively.
+      makeHostPositions()
+    } else {
+      withResource(new AutoClosableArrayBuffer[CudfColumnVector]) { sequences =>
+        plan.ranges.foreach { case (start, length) =>
+          sequences.append(makeSequence(start, length))
+        }
+        CudfColumnVector.concatenate(sequences.toArray: _*)
+      }
+    }
+  }
+
+  private def commitPositionPlan(plan: RowPositionPlan): Unit = {
+    curBlockIndex = plan.nextBlockIndex
+    processedRowCount = plan.nextProcessedRowCount
+    processedBlockRowCounts = plan.nextProcessedBlockRowCounts
+  }
+
+  private[iceberg] def getRowPositions(numRows: Int): CudfColumnVector = {
+    if (currentRowPositions == null) {
+      val plan = planRowPositions(numRows)
+      currentRowPositions = materializePositionPlan(plan, numRows, offset = 0L)
+      currentMaxRowPosition = plan.maxPosition
+      commitPositionPlan(plan)
     } else {
       require(currentRowPositions.getRowCount == numRows,
         s"Cached row-position count ${currentRowPositions.getRowCount} did not match $numRows")
     }
     currentRowPositions.incRefCount()
+  }
+
+  private def checkRowIdRange(firstRowId: Long, maxRowPosition: Long): Unit = {
+    if (maxRowPosition >= 0) {
+      try {
+        Math.addExact(firstRowId, maxRowPosition)
+      } catch {
+        case _: ArithmeticException => throw new ArithmeticException(
+          s"Iceberg row ID overflow: first_row_id=$firstRowId, _pos=$maxRowPosition")
+      }
+    }
   }
 
   private[iceberg] def checkRowIdRange(firstRowId: Long): Unit = {
@@ -749,13 +841,32 @@ class GpuParquetReaderPostProcessor(
         _.getLong
       }
     }
-    if (currentMaxRowPosition >= 0) {
-      try {
-        Math.addExact(firstRowId, currentMaxRowPosition)
-      } catch {
-        case _: ArithmeticException => throw new ArithmeticException(
-          s"Iceberg row ID overflow: first_row_id=$firstRowId, _pos=$currentMaxRowPosition")
+    checkRowIdRange(firstRowId, currentMaxRowPosition)
+  }
+
+  private lazy val projectsRowPosition: Boolean =
+    expectedSchema.idToName().containsKey(MetadataColumns.ROW_POSITION.fieldId())
+
+  private[iceberg] def getInheritedRowIds(
+      numRows: Int,
+      firstRowId: Long): CudfColumnVector = {
+    // If `_pos` is also projected, cache and share its vector. A native deletion-vector row
+    // index must also be reused because deleted rows make generated positions incorrect.
+    if (projectsRowPosition || currentRowPositions != null) {
+      withResource(getRowPositions(numRows)) { positions =>
+        checkRowIdRange(firstRowId)
+        withResource(GpuScalar.from(firstRowId, LongType)) { scalar =>
+          positions.binaryOp(BinaryOp.ADD, scalar, DType.INT64)
+        }
       }
+    } else {
+      // The common `_row_id`-only path can generate inherited IDs directly. This avoids a
+      // CPU position array, its host-to-device copy, and a separate GPU addition.
+      val plan = planRowPositions(numRows)
+      checkRowIdRange(firstRowId, plan.maxPosition)
+      val rowIds = materializePositionPlan(plan, numRows, offset = firstRowId)
+      commitPositionPlan(plan)
+      rowIds
     }
   }
 
@@ -865,8 +976,8 @@ class GpuParquetReaderPostProcessor(
     }
 
     postProcessTimeMetric.ns {
-      // Snapshot the _pos counters before withRetryNoSplit. FetchRowPosition.execute commits
-      // its advance to the processor after fromLongs() succeeds, but a later field action in
+      // Snapshot the _pos counters before withRetryNoSplit. Position generation commits its
+      // advance to the processor after materialization succeeds, but a later field action in
       // the same safeMap iteration (UpCast, FillNull, GpuColumnVector.from, ...) can still
       // OOM and cause withRetryNoSplit to rerun this whole block. Without a restore, the
       // retry would see already-advanced counters and produce wrong _pos values.
