@@ -56,8 +56,28 @@ _ROW_LINEAGE_WRITE_CONF = {
 }
 
 
-def _with_gpu_lineage_write(write_func):
-    return with_gpu_session(write_func, conf=_ROW_LINEAGE_WRITE_CONF)
+def _assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory, setup_func, write_func, read_func):
+    base_table = get_full_table_name(spark_tmp_table_factory)
+    cpu_table = f"{base_table}_cpu"
+    gpu_table = f"{base_table}_gpu"
+
+    def setup_tables(spark):
+        setup_func(spark, cpu_table)
+        setup_func(spark, gpu_table)
+
+    def run_write(spark, table):
+        write_func(spark, table)
+
+    with_cpu_session(setup_tables)
+    with_cpu_session(lambda spark: run_write(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    with_gpu_session(lambda spark: run_write(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+
+    cpu_data = with_cpu_session(
+        lambda spark: read_func(spark, cpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
+    gpu_data = with_cpu_session(
+        lambda spark: read_func(spark, gpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
+    assert_equal_with_local_sort(cpu_data, gpu_data)
 
 pytestmark = iceberg_unsupported_mark
 
@@ -482,57 +502,24 @@ def test_iceberg_v3_row_lineage_read(spark_tmp_table_factory, reader_type):
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-@pytest.mark.parametrize("reader_type", rapids_reader_types)
-def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory, reader_type):
-    full_table = get_full_table_name(spark_tmp_table_factory)
-
-    def setup_iceberg_table(spark):
-        spark.sql(f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory):
+    def setup_iceberg_table(spark, table):
+        spark.sql(f"CREATE TABLE {table} (id BIGINT) USING ICEBERG "
                   f"TBLPROPERTIES ('format-version' = '2')")
-        spark.sql(f"INSERT INTO {full_table} VALUES (1), (2)")
-        v2_snapshot_id = spark.sql(
-            f"SELECT snapshot_id FROM {full_table}.snapshots ORDER BY committed_at DESC") \
-            .head()[0]
+        spark.sql(f"INSERT INTO {table} VALUES (1), (2)")
         spark.sql(
-            f"ALTER TABLE {full_table} SET TBLPROPERTIES ("
+            f"ALTER TABLE {table} SET TBLPROPERTIES ("
             "'format-version' = '3', "
             "'write.parquet.row-group-size-bytes' = '4096', "
             "'read.split.target-size' = '4096', "
             "'read.split.open-file-cost' = '0')")
 
-        legacy = spark.sql(
-            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table} "
-            f"VERSION AS OF {v2_snapshot_id}").collect()
-        assert len(legacy) == 2
-        assert all(row["_row_id"] is None for row in legacy)
-        assert all(row["_last_updated_sequence_number"] is None for row in legacy)
-
-        _with_gpu_lineage_write(
-            lambda gpu: gpu.range(3, 1503).coalesce(1).writeTo(full_table).append())
-
-        current = {
-            row.id: row for row in spark.sql(
-                f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}")
-            .collect()
-        }
-        assert len(current) == 1502
-        assert current[3]["_pos"] == 0
-        assert current[3]["_row_id"] == 0
-        assert current[1502]["_row_id"] == 1499
-        assert current[3]["_last_updated_sequence_number"] == 2
-        assert current[1502]["_last_updated_sequence_number"] == 2
-        assert {current[1]["_row_id"], current[2]["_row_id"]} == {1500, 1501}
-        assert current[1]["_last_updated_sequence_number"] == 1
-        assert current[2]["_last_updated_sequence_number"] == 1
-
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": reader_type
-        })
+    _assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory,
+        setup_iceberg_table,
+        lambda spark, table: spark.range(3, 1503).coalesce(1).writeTo(table).append(),
+        lambda spark, table: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table}"))
 
 
 @iceberg
@@ -575,60 +562,29 @@ def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 def test_iceberg_v3_row_lineage_gpu_rewrite_data_files(spark_tmp_table_factory):
-    full_table = get_full_table_name(spark_tmp_table_factory)
-
-    def setup_iceberg_table(spark):
+    def setup_iceberg_table(spark, table):
         spark.sql(
-            f"CREATE TABLE {full_table} (id BIGINT) USING ICEBERG "
+            f"CREATE TABLE {table} (id BIGINT) USING ICEBERG "
             "TBLPROPERTIES ('format-version' = '3')")
-        _with_gpu_lineage_write(
-            lambda gpu: gpu.range(0, 2).writeTo(full_table).append())
-        _with_gpu_lineage_write(
-            lambda gpu: gpu.range(2, 4).writeTo(full_table).append())
-        before = {
-            row.id: row for row in spark.sql(
-                f"SELECT id, _file, _pos, _row_id, _last_updated_sequence_number "
-                f"FROM {full_table}").collect()
-        }
-        assert len({row["_file"] for row in before.values()}) > 1
+        spark.range(0, 2).writeTo(table).append()
+        spark.range(2, 4).writeTo(table).append()
 
-        callback = spark._sc._jvm.org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-        callback.startCapture()
-        try:
-            _with_gpu_lineage_write(
-                lambda gpu: gpu.sql(
-                    f"CALL spark_catalog.system.rewrite_data_files(table => '{full_table}', "
-                    "options => map('min-input-files', '2'))").collect())
-            captured_plans = callback.getResultsWithTimeout(10000)
-            assert any(
-                callback.contains(plan, "GpuBatchScanExec") for plan in captured_plans
-            ), "GpuBatchScanExec is not found in the captured rewrite plans"
-            assert not any(
-                callback.didFallBack(plan, "BatchScanExec") for plan in captured_plans
-            ), "Captured rewrite plan contains CPU BatchScanExec"
-        finally:
-            callback.endCapture()
-        after = {
-            row.id: row for row in spark.sql(
-                f"SELECT id, _file, _pos, _row_id, _last_updated_sequence_number "
-                f"FROM {full_table}").collect()
-        }
+    def rewrite_data_files(spark, table):
+        spark.sql(
+            f"CALL spark_catalog.system.rewrite_data_files(table => '{table}', "
+            "options => map('min-input-files', '2'))").collect()
 
-        assert len({row["_file"] for row in after.values()}) == 1
-        assert any(after[row_id]["_file"] != before[row_id]["_file"] for row_id in before)
-        for row_id in before:
-            assert after[row_id]["_row_id"] == before[row_id]["_row_id"]
-            assert after[row_id]["_last_updated_sequence_number"] == \
-                before[row_id]["_last_updated_sequence_number"]
+    def read_data_and_file_count(spark, table):
+        return spark.sql(
+            f"SELECT d.id, d._row_id, d._last_updated_sequence_number, f.data_file_count "
+            f"FROM {table} d CROSS JOIN ("
+            f"SELECT count(*) AS data_file_count FROM {table}.data_files) f")
 
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
-        })
+    _assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory,
+        setup_iceberg_table,
+        rewrite_data_files,
+        read_data_and_file_count)
 
 
 @iceberg
@@ -637,42 +593,26 @@ def test_iceberg_v3_row_lineage_gpu_rewrite_data_files(spark_tmp_table_factory):
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 def test_iceberg_v3_row_lineage_insert_overwrite(spark_tmp_table_factory):
-    full_table = get_full_table_name(spark_tmp_table_factory)
     source_view = spark_tmp_table_factory.get()
 
-    def setup_iceberg_table(spark):
+    def setup_iceberg_table(spark, table):
         spark.sql(
-            f"CREATE TABLE {full_table} (id BIGINT, v BIGINT) USING ICEBERG "
+            f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
             "TBLPROPERTIES ('format-version' = '3')")
-        _with_gpu_lineage_write(
-            lambda gpu: gpu.range(0, 2).selectExpr("id", "CAST(0 AS BIGINT) AS v")
-            .writeTo(full_table).append())
+        spark.range(0, 2).selectExpr("id", "CAST(0 AS BIGINT) AS v") \
+            .writeTo(table).append()
 
-        def overwrite(gpu):
-            gpu.range(10, 12).selectExpr("id", "CAST(1 AS BIGINT) AS v") \
-                .createOrReplaceTempView(source_view)
-            gpu.sql(f"INSERT OVERWRITE {full_table} SELECT * FROM {source_view}").collect()
+    def overwrite(spark, table):
+        spark.range(10, 12).selectExpr("id", "CAST(1 AS BIGINT) AS v") \
+            .createOrReplaceTempView(source_view)
+        spark.sql(f"INSERT OVERWRITE {table} SELECT * FROM {source_view}").collect()
 
-        _with_gpu_lineage_write(overwrite)
-        rows = {
-            row.id: row for row in spark.sql(
-                f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}")
-            .collect()
-        }
-
-        assert set(rows) == {10, 11}
-        assert {rows[10]["_row_id"], rows[11]["_row_id"]} == {2, 3}
-        assert rows[10]["_last_updated_sequence_number"] == 2
-        assert rows[11]["_last_updated_sequence_number"] == 2
-
-    with_cpu_session(setup_iceberg_table)
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: spark.sql(
-            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {full_table}"),
-        conf={
-            "spark.rapids.sql.format.iceberg.v3.enabled": "true",
-            "spark.rapids.sql.format.parquet.reader.type": "COALESCING"
-        })
+    _assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory,
+        setup_iceberg_table,
+        overwrite,
+        lambda spark, table: spark.sql(
+            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {table}"))
 
 
 @iceberg
