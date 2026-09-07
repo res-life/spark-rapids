@@ -29,7 +29,7 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
 import com.nvidia.spark.rapids.iceberg.{ColumnarBatchWithPartition, GpuIcebergPartitioner,
-  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport}
+  GpuIcebergSpecPartitioner, IcebergFormatVersionSupport, ShimUtils}
 import com.nvidia.spark.rapids.iceberg.utils.GpuStructProjection
 import org.apache.hadoop.mapreduce.Job
 import org.apache.iceberg._
@@ -155,7 +155,7 @@ object GpuSparkPositionDeltaWrite {
   private[source] def dataWriterSparkTypeFor(
       command: Command,
       context: GpuWriteContext): StructType = {
-    toSparkType(dataWriterSchemaFor(command, context))
+    toSparkType(dataWriterSchemaFor(command, context), ShimUtils.writeDefaultAccessor())
   }
 
   def tableOf(deltaWrite: DeltaWrite): Table = {
