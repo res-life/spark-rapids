@@ -17,7 +17,8 @@ from typing import Callable, Dict, Optional
 import pytest
 from pyspark.sql.types import ArrayType, BinaryType
 
-from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
+from asserts import (assert_cpu_and_gpu_are_equal_collect_with_capture,
+                     assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_collect)
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import gen_df, copy_and_update, RepeatSeqGen
@@ -82,7 +83,9 @@ def _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory,
                                 df_gen: Callable,
                                 table_prop: Dict[str, str],
                                 partition_col_sql: Optional[str] = None,
-                                conf: Optional[Dict[str, str]] = None):
+                                conf: Optional[Dict[str, str]] = None,
+                                read_func: Optional[Callable] = None,
+                                gpu_plan_assertion: Optional[Callable] = None):
     if conf is None:
         conf = iceberg_write_enabled_conf
 
@@ -90,17 +93,23 @@ def _assert_gpu_equals_cpu_ctas(spark_tmp_table_factory,
     gpu_table = f"{base_name}_gpu"
     cpu_table = f"{base_name}_cpu"
 
-    def run_gpu_ctas(spark):
-        _execute_ctas(spark, gpu_table, spark_tmp_table_factory,
-                      df_gen, table_prop, partition_col_sql, ret=True)
+    def run_ctas(spark):
+        gpu_enabled = str(spark.conf.get("spark.rapids.sql.enabled", "false")).lower() == "true"
+        target_table = gpu_table if gpu_enabled else cpu_table
+        return _execute_ctas(
+            spark, target_table, spark_tmp_table_factory,
+            df_gen, table_prop, partition_col_sql, ret=True)
 
-    with_gpu_session(run_gpu_ctas, conf=conf)
-    with_cpu_session(lambda spark: _execute_ctas(spark, cpu_table, spark_tmp_table_factory,
-                                                 df_gen, table_prop, partition_col_sql, False),
-                     conf=conf)
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        run_ctas,
+        conf=conf,
+        gpu_plan_assertion=gpu_plan_assertion)
 
-    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table).collect())
-    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table).collect())
+    def read_table(spark, table_name):
+        return spark.table(table_name) if read_func is None else read_func(spark, table_name)
+
+    cpu_data = with_cpu_session(lambda spark: read_table(spark, cpu_table).collect(), conf=conf)
+    gpu_data = with_cpu_session(lambda spark: read_table(spark, gpu_table).collect(), conf=conf)
     assert_equal_with_local_sort(cpu_data, gpu_data)
 
 
@@ -142,45 +151,24 @@ def test_ctas_v3_fallback(spark_tmp_table_factory):
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 @ignore_order(local=True)
 def test_ctas_v3_row_lineage(spark_tmp_table_factory):
-    table_name = get_full_table_name(spark_tmp_table_factory)
     conf = copy_and_update(iceberg_write_enabled_conf, {
         "spark.rapids.sql.format.iceberg.v3.enabled": "true"
     })
 
-    callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
-    callback.startCapture()
-    try:
-        with_gpu_session(
-            lambda spark: _execute_ctas(
-                spark,
-                table_name,
-                spark_tmp_table_factory,
-                lambda sp: sp.range(3),
-                {"format-version": "3"},
-                ret=False),
-            conf=conf)
-        captured_plans = callback.getResultsWithTimeout(10000)
-        assert any(
-            callback.contains(plan, "GpuAtomicCreateTableAsSelectExec")
-            for plan in captured_plans
-        ), "GpuAtomicCreateTableAsSelectExec is not found in the captured CTAS plans"
-        assert not any(
-            callback.didFallBack(plan, "AtomicCreateTableAsSelectExec")
-            for plan in captured_plans
-        ), "Captured CTAS plan contains CPU AtomicCreateTableAsSelectExec"
-    finally:
-        callback.endCapture()
+    def assert_gpu_ctas(plan):
+        callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
+        ctas_plan = callback.extractExecutedPlan(plan)
+        callback.assertContains(ctas_plan, "GpuAtomicCreateTableAsSelectExec")
+        callback.assertNotContain(ctas_plan, "AtomicCreateTableAsSelectExec")
 
-    rows = with_cpu_session(
-        lambda spark: spark.sql(
-            f"SELECT id, _row_id, _last_updated_sequence_number FROM {table_name} "
-            "ORDER BY id").collect())
-    assert [(row["id"], row["_row_id"], row["_last_updated_sequence_number"])
-            for row in rows] == [
-        (0, 0, 1),
-        (1, 1, 1),
-        (2, 2, 1)
-    ]
+    _assert_gpu_equals_cpu_ctas(
+        spark_tmp_table_factory,
+        lambda spark: spark.range(3),
+        {"format-version": "3"},
+        conf=conf,
+        read_func=lambda spark, table: spark.sql(
+            f"SELECT id, _row_id, _last_updated_sequence_number FROM {table}"),
+        gpu_plan_assertion=assert_gpu_ctas)
 
 
 @iceberg
