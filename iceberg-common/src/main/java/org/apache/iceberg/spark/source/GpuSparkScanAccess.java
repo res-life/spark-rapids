@@ -47,8 +47,7 @@ public final class GpuSparkScanAccess {
   }
 
   public static boolean supports(Scan scan) {
-    return scan instanceof SparkBatchQueryScan || scan instanceof SparkCopyOnWriteScan
-        || scan instanceof SparkStagedScan;
+    return scan instanceof SparkBatchQueryScan || scan instanceof SparkCopyOnWriteScan;
   }
 
   public static boolean isBatchQueryScan(Scan scan) {
@@ -57,10 +56,6 @@ public final class GpuSparkScanAccess {
 
   public static boolean isCopyOnWriteScan(Scan scan) {
     return scan instanceof SparkCopyOnWriteScan;
-  }
-
-  public static boolean isStagedScan(Scan scan) {
-    return scan instanceof SparkStagedScan;
   }
 
   public static boolean isMetadataScan(Scan scan) {

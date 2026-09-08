@@ -66,7 +66,6 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
     // - BatchAppend for append operations
     // - DynamicOverwrite for dynamic partition overwrite
     // - CopyOnWriteOperation for row-level copy-on-write operations
-    // - RewriteFiles for rewrite_data_files
     // Since these are private classes, we check the class name to determine which GPU version
     // to use
     val cpuBatch = cpu.toBatch
@@ -77,7 +76,6 @@ class GpuSparkWrite(cpu: Write) extends GpuWrite with RequiresDistributionAndOrd
       case "DynamicOverwrite" => new GpuDynamicOverwrite(this, cpuBatch)
       case "OverwriteByFilter" => new GpuOverwriteByFilter(this, cpuBatch)
       case "CopyOnWriteOperation" => new GpuCopyOnWriteOperation(this, cpuBatch)
-      case "RewriteFiles" => new GpuRewriteFiles(this, cpuBatch)
       case _ =>
         throw new UnsupportedOperationException(
           s"Unsupported Iceberg batch write type: $cpuBatchClassName")
