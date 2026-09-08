@@ -30,7 +30,8 @@ from iceberg import (create_iceberg_table,
                      ctas_partition_transforms, supports_iceberg_v3,
                      ICEBERG_V3_UNSUPPORTED_REASON,
                      supports_iceberg_row_lineage_inheritance,
-                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+                     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON,
+                     row_lineage_df)
 from marks import (iceberg, ignore_order, allow_non_gpu, allow_non_gpu_conditional,
                    datagen_overrides)
 from spark_session import with_gpu_session, with_cpu_session, is_spark_400_or_later
@@ -163,7 +164,7 @@ def test_ctas_v3_row_lineage(spark_tmp_table_factory):
 
     _assert_gpu_equals_cpu_ctas(
         spark_tmp_table_factory,
-        lambda spark: spark.range(3),
+        lambda spark: row_lineage_df(spark),
         {"format-version": "3"},
         conf=conf,
         read_func=lambda spark, table: spark.sql(
