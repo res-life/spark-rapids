@@ -220,7 +220,7 @@ def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(spark_tmp_table_factory)
     do_delete_test(
         spark_tmp_table_factory,
         lambda spark, table: spark.sql(f"DELETE FROM {table} WHERE id < 3"),
-        data_gen_func=lambda spark: spark.range(1, 4).coalesce(1),
+        data_gen_func=lambda spark: row_lineage_df(spark, start=1),
         table_properties={"format-version": "3"},
         conf=iceberg_delete_v3_enabled_conf,
         read_func=lambda spark, table: spark.sql(

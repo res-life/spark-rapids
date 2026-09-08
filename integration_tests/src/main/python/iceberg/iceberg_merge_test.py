@@ -289,12 +289,14 @@ def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory)
                 f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
                 "TBLPROPERTIES ('format-version' = '3', "
                 "'write.merge.mode' = 'copy-on-write')")
-            spark.range(0, 3).selectExpr("id", "CAST(0 AS BIGINT) AS v") \
-                .coalesce(1).writeTo(table).append()
+            row_lineage_df(spark, with_value=True).writeTo(table).append()
 
     def merge(spark, table):
-        spark.range(1, 4, 2).selectExpr("id", "id * 10 AS v") \
-            .createOrReplaceTempView(source_view)
+        row_lineage_df(
+            spark,
+            start=DEFAULT_DATA_GEN_LENGTH // 2,
+            with_value=True,
+            value_start=DEFAULT_DATA_GEN_LENGTH).createOrReplaceTempView(source_view)
         spark.sql(
             f"MERGE INTO {table} t USING {source_view} s ON t.id = s.id "
             "WHEN MATCHED THEN UPDATE SET v = s.v "

@@ -208,8 +208,7 @@ def test_iceberg_v3_row_lineage_gpu_update(spark_tmp_table_factory):
     do_update_test(
         spark_tmp_table_factory,
         lambda spark, table: spark.sql(f"UPDATE {table} SET v = v + 1 WHERE id = 1"),
-        data_gen_func=lambda spark: spark.range(0, 2).selectExpr(
-            "id", "CAST(0 AS BIGINT) AS v").coalesce(1),
+        data_gen_func=lambda spark: row_lineage_df(spark, with_value=True),
         table_properties={"format-version": "3"},
         conf=iceberg_update_v3_enabled_conf,
         read_func=lambda spark, table: spark.sql(

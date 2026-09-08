@@ -506,7 +506,7 @@ def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory):
     def setup_iceberg_table(spark, table):
         spark.sql(f"CREATE TABLE {table} (id BIGINT) USING ICEBERG "
                   f"TBLPROPERTIES ('format-version' = '2')")
-        spark.sql(f"INSERT INTO {table} VALUES (1), (2)")
+        row_lineage_df(spark, start=1).writeTo(table).append()
         spark.sql(
             f"ALTER TABLE {table} SET TBLPROPERTIES ("
             "'format-version' = '3', "
@@ -514,10 +514,14 @@ def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory):
             "'read.split.target-size' = '4096', "
             "'read.split.open-file-cost' = '0')")
 
+    def append_data(spark, table):
+        row_lineage_df(
+            spark, start=DEFAULT_DATA_GEN_LENGTH + 1).writeTo(table).append()
+
     _assert_gpu_and_cpu_lineage_writes_are_equal(
         spark_tmp_table_factory,
         setup_iceberg_table,
-        lambda spark, table: spark.range(3, 1503).coalesce(1).writeTo(table).append(),
+        append_data,
         lambda spark, table: spark.sql(
             f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table}"))
 
@@ -567,12 +571,13 @@ def test_iceberg_v3_row_lineage_insert_overwrite(spark_tmp_table_factory):
         spark.sql(
             f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
             "TBLPROPERTIES ('format-version' = '3')")
-        spark.range(0, 2).selectExpr("id", "CAST(0 AS BIGINT) AS v") \
-            .writeTo(table).append()
+        row_lineage_df(spark, with_value=True).writeTo(table).append()
 
     def overwrite(spark, table):
-        spark.range(10, 12).selectExpr("id", "CAST(1 AS BIGINT) AS v") \
-            .createOrReplaceTempView(source_view)
+        row_lineage_df(
+            spark,
+            start=DEFAULT_DATA_GEN_LENGTH,
+            with_value=True).createOrReplaceTempView(source_view)
         spark.sql(f"INSERT OVERWRITE {table} SELECT * FROM {source_view}").collect()
 
     _assert_gpu_and_cpu_lineage_writes_are_equal(
