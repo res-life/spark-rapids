@@ -29,7 +29,7 @@ spark-rapids-shim-json-lines ***/
 package org.apache.spark.sql.execution.datasources.v2
 
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.GpuWrite
+import com.nvidia.spark.rapids.{GpuDataWriterWithMetadata, GpuWrite}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
@@ -66,11 +66,23 @@ case class GpuReplaceDataWritingSparkTask(
   extends GpuWritingSparkTask[DataWriter[ColumnarBatch]] {
 
   private lazy val rowProjection = GpuProjectingColumnarBatch(projs.rowProjection)
+  private lazy val metadataProjection = projs.metadataProjection.map(GpuProjectingColumnarBatch(_))
+
   override protected def write(
       writer: DataWriter[ColumnarBatch],
       batch: ColumnarBatch): Unit = {
     withResource(rowProjection.project(batch)) { projected =>
-      writer.write(projected)
+      metadataProjection match {
+        case Some(projection) =>
+          withResource(projection.project(batch)) { metadata =>
+            writer match {
+              case metadataWriter: GpuDataWriterWithMetadata =>
+                metadataWriter.writeWithMetadata(metadata, projection.schema, projected)
+              case _ => writer.write(metadata, projected)
+            }
+          }
+        case None => writer.write(projected)
+      }
     }
   }
 }
