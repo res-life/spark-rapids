@@ -32,7 +32,14 @@ object IcebergFormatVersionSupport {
     "STRING", "BINARY", "DECIMAL")
 
   def tagForFormatVersion(table: Table, meta: RapidsMeta[_, _, _]): Unit = {
-    tagForFormatVersion(table, table.schema(), meta)
+    val formatVersion = ShimUtils.formatVersion(table)
+    tagForFormatVersion(formatVersion, meta)
+    if (formatVersion > MaxSupportedFormatVersion && meta.conf.isIcebergV3Enabled) {
+      unsupportedWriteDefault(table.schema()).foreach { case (path, typeName) =>
+        meta.willNotWorkOnGpu(
+          s"Iceberg write default for field '$path' with type $typeName is not supported on GPU")
+      }
+    }
   }
 
   def tagForFormatVersion(
@@ -71,18 +78,27 @@ object IcebergFormatVersionSupport {
   }
 
   private[iceberg] def unsupportedDefault(schema: Schema): Option[(String, String)] = {
+    unsupportedDefault(schema, field => ShimUtils.hasInitialDefault(field))
+  }
+
+  private[iceberg] def unsupportedWriteDefault(schema: Schema): Option[(String, String)] = {
+    unsupportedDefault(schema, field => ShimUtils.hasWriteDefault(field))
+  }
+
+  private def unsupportedDefault(
+      schema: Schema,
+      hasDefault: Types.NestedField => Boolean): Option[(String, String)] = {
     def find(fields: Seq[Types.NestedField], parent: String): Option[(String, String)] = {
       fields.iterator.map { field =>
         val path = if (parent.isEmpty) field.name() else s"$parent.${field.name()}"
-        val hasDefault = ShimUtils.hasInitialDefault(field)
         val fieldType = field.`type`()
 
         val unsupportedTimestampNtz = fieldType == Types.TimestampType.withoutZone()
-        if (hasDefault && fieldType.isPrimitiveType &&
+        if (hasDefault(field) && fieldType.isPrimitiveType &&
             (!SupportedDefaultTypeIds.contains(fieldType.typeId().name()) ||
               unsupportedTimestampNtz)) {
           Some(path -> fieldType.toString)
-        } else if (hasDefault && !fieldType.isPrimitiveType && !fieldType.isStructType) {
+        } else if (hasDefault(field) && !fieldType.isPrimitiveType && !fieldType.isStructType) {
           Some(path -> fieldType.toString)
         } else if (fieldType.isNestedType) {
           find(fieldType.asNestedType().fields().asScala.toSeq, path)
