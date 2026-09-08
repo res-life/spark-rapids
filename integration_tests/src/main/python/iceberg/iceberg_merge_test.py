@@ -289,6 +289,7 @@ def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory)
                 f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
                 "TBLPROPERTIES ('format-version' = '3', "
                 "'write.merge.mode' = 'copy-on-write')")
+            spark.sql(f"ALTER TABLE {table} WRITE ORDERED BY id").collect()
             row_lineage_df(spark, with_value=True).writeTo(table).append()
 
     def merge(spark, table):
@@ -303,13 +304,15 @@ def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory)
             "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)").collect()
 
     with_cpu_session(setup_iceberg_tables)
+    conf = copy_and_update(
+        iceberg_merge_v3_enabled_conf, {"spark.sql.shuffle.partitions": "1"})
     _assert_gpu_and_cpu_merge_writes_are_equal(
         cpu_table,
         gpu_table,
         merge,
         lambda spark, table: spark.sql(
             f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {table}"),
-        iceberg_merge_v3_enabled_conf)
+        conf)
 
 
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")

@@ -44,7 +44,8 @@ def create_iceberg_table_with_data(table_name: str,
                                    partition_col_sql=None,
                                    data_gen_func=None,
                                    table_properties=None,
-                                   update_mode='copy-on-write'):
+                                   update_mode='copy-on-write',
+                                   write_order=None):
     """Helper function to create and populate an Iceberg table for UPDATE tests.
 
     Args:
@@ -72,6 +73,8 @@ def create_iceberg_table_with_data(table_name: str,
 
     # Insert data
     def insert_data(spark):
+        if write_order:
+            spark.sql(f"ALTER TABLE {table_name} WRITE ORDERED BY {write_order}").collect()
         df = data_gen_func(spark)
         df.writeTo(table_name).append()
     
@@ -80,7 +83,7 @@ def create_iceberg_table_with_data(table_name: str,
 def do_update_test(spark_tmp_table_factory, update_sql_func, data_gen_func=None, 
                   partition_col_sql=None, table_properties=None,
                   update_mode='copy-on-write', conf=iceberg_update_cow_enabled_conf,
-                  read_func=None):
+                  read_func=None, write_order=None):
     """
     Helper function to test UPDATE operations by comparing CPU and GPU results.
     
@@ -93,6 +96,7 @@ def do_update_test(spark_tmp_table_factory, update_sql_func, data_gen_func=None,
         update_mode: Update mode - 'copy-on-write' or 'merge-on-read'
         conf: Spark configuration used for UPDATE and result reads
         read_func: Optional function that takes (spark, table_name) and returns a DataFrame
+        write_order: Optional deterministic Iceberg write order
     """
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = f"{base_table_name}_cpu"
@@ -100,9 +104,9 @@ def do_update_test(spark_tmp_table_factory, update_sql_func, data_gen_func=None,
     
     # Create identical tables for CPU and GPU
     create_iceberg_table_with_data(cpu_table_name, partition_col_sql, 
-                                   data_gen_func, table_properties, update_mode)
+                                   data_gen_func, table_properties, update_mode, write_order)
     create_iceberg_table_with_data(gpu_table_name, partition_col_sql, 
-                                   data_gen_func, table_properties, update_mode)
+                                   data_gen_func, table_properties, update_mode, write_order)
     
     # Execute UPDATE on GPU
     def do_gpu_update(spark):
@@ -210,9 +214,11 @@ def test_iceberg_v3_row_lineage_gpu_update(spark_tmp_table_factory):
         lambda spark, table: spark.sql(f"UPDATE {table} SET v = v + 1 WHERE id = 1"),
         data_gen_func=lambda spark: row_lineage_df(spark, with_value=True),
         table_properties={"format-version": "3"},
-        conf=iceberg_update_v3_enabled_conf,
+        conf=copy_and_update(
+            iceberg_update_v3_enabled_conf, {"spark.sql.shuffle.partitions": "1"}),
         read_func=lambda spark, table: spark.sql(
-            f"SELECT id, v, _pos, _row_id, _last_updated_sequence_number FROM {table}"))
+            f"SELECT id, v, _pos, _row_id, _last_updated_sequence_number FROM {table}"),
+        write_order="id")
 
 
 @iceberg
