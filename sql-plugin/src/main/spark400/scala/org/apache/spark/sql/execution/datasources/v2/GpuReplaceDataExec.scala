@@ -28,8 +28,8 @@ spark-rapids-shim-json-lines ***/
 
 package org.apache.spark.sql.execution.datasources.v2
 
-import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.{GpuDataWriterWithMetadata, GpuWrite}
+import com.nvidia.spark.rapids.Arm.withResource
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.GpuProjectingColumnarBatch
@@ -76,6 +76,8 @@ case class GpuReplaceDataWritingSparkTask(
         case Some(projection) =>
           withResource(projection.project(batch)) { metadata =>
             writer match {
+              // Newer Iceberg versions use this bridge to append row-lineage columns, while
+              // older Iceberg versions continue through Spark's metadata-aware writer path.
               case metadataWriter: GpuDataWriterWithMetadata =>
                 metadataWriter.writeWithMetadata(metadata, projection.schema, projected)
               case _ => writer.write(metadata, projected)
