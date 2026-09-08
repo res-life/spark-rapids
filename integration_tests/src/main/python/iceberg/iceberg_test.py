@@ -557,38 +557,6 @@ def test_iceberg_v3_row_lineage_rewrite_data_files(spark_tmp_table_factory):
 
 @iceberg
 @ignore_order(local=True)
-@allow_non_gpu("CallExec")
-@pytest.mark.skipif(
-    not supports_iceberg_row_lineage_inheritance,
-    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-def test_iceberg_v3_row_lineage_gpu_rewrite_data_files(spark_tmp_table_factory):
-    def setup_iceberg_table(spark, table):
-        spark.sql(
-            f"CREATE TABLE {table} (id BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3')")
-        spark.range(0, 2).writeTo(table).append()
-        spark.range(2, 4).writeTo(table).append()
-
-    def rewrite_data_files(spark, table):
-        spark.sql(
-            f"CALL spark_catalog.system.rewrite_data_files(table => '{table}', "
-            "options => map('min-input-files', '2'))").collect()
-
-    def read_data_and_file_count(spark, table):
-        return spark.sql(
-            f"SELECT d.id, d._row_id, d._last_updated_sequence_number, f.data_file_count "
-            f"FROM {table} d CROSS JOIN ("
-            f"SELECT count(*) AS data_file_count FROM {table}.data_files) f")
-
-    _assert_gpu_and_cpu_lineage_writes_are_equal(
-        spark_tmp_table_factory,
-        setup_iceberg_table,
-        rewrite_data_files,
-        read_data_and_file_count)
-
-
-@iceberg
-@ignore_order(local=True)
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)

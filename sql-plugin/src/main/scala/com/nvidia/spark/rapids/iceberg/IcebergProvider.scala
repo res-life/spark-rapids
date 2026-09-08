@@ -51,8 +51,6 @@ trait IcebergProbe {
 object IcebergProvider {
   val cpuBatchQueryScanClassName: String = "org.apache.iceberg.spark.source.SparkBatchQueryScan"
   val cpuCopyOnWriteScanClassName: String = "org.apache.iceberg.spark.source.SparkCopyOnWriteScan"
-  val cpuStagedScanClassName: String = "org.apache.iceberg.spark.source.SparkStagedScan"
-
   private lazy val probe: IcebergProbe =
     ShimLoaderTemp.newIcebergProbe()
 
