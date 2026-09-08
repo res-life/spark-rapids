@@ -22,7 +22,7 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success}
 
 import com.nvidia.spark.rapids._
-import com.nvidia.spark.rapids.Arm.closeOnExcept
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
 import com.nvidia.spark.rapids.SpillPriorities.ACTIVE_ON_DECK_PRIORITY
 import com.nvidia.spark.rapids.fileio.iceberg.IcebergFileIO
@@ -48,7 +48,7 @@ import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectE
 import org.apache.spark.sql.rapids.GpuWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.util.SerializableConfiguration
 
 
@@ -412,13 +412,55 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
   }
 }
 
+private trait GpuDataWriterWithRowLineage extends GpuDataWriterWithMetadata {
+  protected def dataSparkType: StructType
+
+  def write(record: ColumnarBatch): Unit
+
+  override def writeWithMetadata(
+      metadata: ColumnarBatch,
+      metadataSchema: StructType,
+      record: ColumnarBatch): Unit = {
+    val missingColumnCount = dataSparkType.length - record.numCols()
+    if (missingColumnCount == 0) {
+      write(record)
+    } else {
+      require(metadata.numRows() == record.numRows(),
+        s"Metadata row count ${metadata.numRows()} does not match record row count " +
+          s"${record.numRows()}")
+      require(missingColumnCount == GpuDataWriterWithRowLineage.lineageColumnNames.length,
+        s"Expected ${GpuDataWriterWithRowLineage.lineageColumnNames.length} row lineage " +
+          s"columns but record is missing $missingColumnCount columns")
+
+      val lineageColumns = closeOnExcept(new Array[ColumnVector](missingColumnCount)) { columns =>
+        GpuDataWriterWithRowLineage.lineageColumnNames.zipWithIndex.foreach {
+          case (name, index) =>
+            val ordinal = metadataSchema.fieldIndex(name)
+            columns(index) = metadata.column(ordinal).asInstanceOf[GpuColumnVector].incRefCount()
+        }
+        columns
+      }
+
+      withResource(new ColumnarBatch(lineageColumns, metadata.numRows())) { lineage =>
+        write(GpuColumnVector.combineColumns(record, lineage))
+      }
+    }
+  }
+}
+
+private object GpuDataWriterWithRowLineage {
+  val lineageColumnNames: Seq[String] = Seq("_row_id", "_last_updated_sequence_number")
+}
+
 class GpuUnpartitionedDataWriter(
   val fileWriterFactory: GpuSparkFileWriterFactory,
   val fileFactory: OutputFileFactory,
   val io: FileIO,
   val spec: PartitionSpec,
   val targetFileSize: Long)
-  extends DataWriter[ColumnarBatch] {
+  extends DataWriter[ColumnarBatch] with GpuDataWriterWithRowLineage {
+  override protected def dataSparkType: StructType = fileWriterFactory.dataSparkType
+
   private val delegate = new GpuRollingDataWriter(
     fileWriterFactory,
     fileFactory,
@@ -460,10 +502,10 @@ class GpuPartitionedDataWriter(
   val io: FileIO,
   val spec: PartitionSpec,
   val dataSchema: Schema,
-  val dataSparkType: StructType,
+  override val dataSparkType: StructType,
   val targetFileSize: Long,
   val fanoutEnabled: Boolean,
-) extends DataWriter[ColumnarBatch] {
+) extends DataWriter[ColumnarBatch] with GpuDataWriterWithRowLineage {
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {
