@@ -14,12 +14,13 @@
 
 import pytest
 
-from asserts import assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
+from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
+    assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from conftest import spark_jvm
 from iceberg import _build_tblprops, get_full_table_name, iceberg_unsupported_mark, \
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import with_cpu_session, with_gpu_session
+from spark_session import with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -91,7 +92,6 @@ def _setup_iceberg_v3_defaults_table(table_name):
 
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@allow_non_gpu("BatchScanExec", "ColumnarToRowExec")
 @ignore_order(local=True)
 def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -102,17 +102,11 @@ def test_iceberg_v3_initial_defaults_all_types(spark_tmp_table_factory):
         "boolean_added, long_added, float_added, double_added, date_added, "
         "timestamp_added, binary_added, decimal_added "
         f"FROM {table_name} ORDER BY id")
-    assert_gpu_and_cpu_are_equal_collect(
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
         lambda spark: spark.sql(query),
+        exist_classes="GpuBatchScanExec",
         conf=v3_conf)
 
-    def assert_gpu_scan(spark):
-        df = spark.sql(query)
-        df.collect()
-        spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback.assertContains(
-            df._jdf, "GpuBatchScanExec")
-
-    with_gpu_session(assert_gpu_scan, conf=v3_conf)
 
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
