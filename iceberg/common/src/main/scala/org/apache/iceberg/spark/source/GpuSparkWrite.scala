@@ -416,7 +416,7 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
   }
 }
 
-private trait GpuDataWriterWithRowLineage extends GpuDataWriterWithMetadata {
+trait GpuDataWriterWithRowLineage extends GpuDataWriterWithMetadata {
   protected def dataSparkType: StructType
 
   def write(record: ColumnarBatch): Unit
@@ -452,7 +452,7 @@ private trait GpuDataWriterWithRowLineage extends GpuDataWriterWithMetadata {
   }
 }
 
-private object GpuDataWriterWithRowLineage {
+object GpuDataWriterWithRowLineage {
   val lineageColumnNames: Seq[String] = Seq("_row_id", "_last_updated_sequence_number")
 }
 
