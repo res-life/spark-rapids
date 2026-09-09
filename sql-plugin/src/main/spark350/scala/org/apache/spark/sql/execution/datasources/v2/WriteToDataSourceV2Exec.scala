@@ -358,6 +358,13 @@ trait GpuWritingSparkTask[W <: DataWriter[ColumnarBatch]] extends Logging with S
 
   protected def write(writer: W, row: ColumnarBatch): Unit
 
+  protected def createWriter(
+      writerFactory: DataWriterFactory,
+      partitionId: Int,
+      taskId: Long): W = {
+    writerFactory.createWriter(partitionId, taskId).asInstanceOf[W]
+  }
+
   def run(
     writerFactory: DataWriterFactory,
     context: TaskContext,
@@ -369,7 +376,7 @@ trait GpuWritingSparkTask[W <: DataWriter[ColumnarBatch]] extends Logging with S
     val partId = context.partitionId()
     val taskId = context.taskAttemptId()
     val attemptId = context.attemptNumber()
-    val dataWriter = writerFactory.createWriter(partId, taskId).asInstanceOf[W]
+    val dataWriter = createWriter(writerFactory, partId, taskId)
 
     var count = 0L
     // write the data and commit this writer.
