@@ -17,6 +17,7 @@ import pytest
 from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
     assert_gpu_and_cpu_are_equal_collect, assert_gpu_fallback_collect
 from conftest import spark_jvm
+from data_gen import LongGen, StructGen, UniqueLongGen, gen_df
 from iceberg import _build_tblprops, get_full_table_name, iceberg_unsupported_mark, \
     supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from marks import allow_non_gpu, iceberg, ignore_order
@@ -34,11 +35,11 @@ def _setup_iceberg_v3_defaults_table(table_name):
             f"CREATE TABLE {table_name} "
             "(id BIGINT, s STRUCT<present: BIGINT>) USING ICEBERG "
             f"TBLPROPERTIES ({props_sql})")
-        spark.sql(
-            f"INSERT INTO {table_name} VALUES "
-            "(1, named_struct('present', 10L)), "
-            "(2, named_struct('present', 20L)), "
-            "(3, CAST(NULL AS STRUCT<present: BIGINT>))")
+        gen_df(
+            spark,
+            [("id", UniqueLongGen()),
+             ("s", StructGen([("present", LongGen())]))],
+            length=32).coalesce(1).writeTo(table_name).append()
 
         jvm = spark_jvm()
         table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
