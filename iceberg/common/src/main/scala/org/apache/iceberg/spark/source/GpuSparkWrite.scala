@@ -374,11 +374,18 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
   val outputWriterFactory: ColumnarOutputWriterFactory,
   val statsTracker: GpuWriteJobStatsTracker,
   val hadoopConf: SerializableConfiguration
-) extends DataWriterFactory {
+) extends GpuDataWriterFactory {
 
   private lazy val fileIO: IcebergFileIO = new IcebergFileIO(tableBroadcast.value.io())
 
   override def createWriter(partitionId: Int, taskId: Long): DataWriter[InternalRow] = {
+    createWriter(partitionId, taskId, null)
+  }
+
+  override def createWriter(
+      partitionId: Int,
+      taskId: Long,
+      metadataSchema: StructType): DataWriter[InternalRow] = {
     val table = tableBroadcast.value
     val spec = table.specs().get(outputSpecId)
     val io = table.io()
@@ -402,24 +409,25 @@ class GpuWriterFactory(val tableBroadcast: Broadcast[Table],
       fileIO)
 
     if (spec.isUnpartitioned) {
-      new GpuUnpartitionedDataWriter(writerFactory, outputFileFactory, io, spec, targetFileSize)
+      new GpuUnpartitionedDataWriter(
+        writerFactory, outputFileFactory, io, spec, targetFileSize, metadataSchema)
         .asInstanceOf[DataWriter[InternalRow]]
     } else {
       new GpuPartitionedDataWriter(writerFactory, outputFileFactory, io, spec, writeSchema,
-        dsSchema, targetFileSize, useFanout)
+        dsSchema, targetFileSize, useFanout, metadataSchema)
         .asInstanceOf[DataWriter[InternalRow]]
     }
   }
 }
 
-trait GpuDataWriterWithRowLineage extends GpuDataWriterWithMetadata {
+trait GpuDataWriterWithRowLineage extends GpuDataWriter {
   protected def dataSparkType: StructType
+  protected def metadataSchema: StructType
 
-  def write(record: ColumnarBatch): Unit
+  override def write(record: ColumnarBatch): Unit
 
-  override def writeWithMetadata(
+  override def write(
       metadata: ColumnarBatch,
-      metadataSchema: StructType,
       record: ColumnarBatch): Unit = {
     val missingColumnCount = dataSparkType.length - record.numCols()
     if (missingColumnCount == 0) {
@@ -457,8 +465,9 @@ class GpuUnpartitionedDataWriter(
   val fileFactory: OutputFileFactory,
   val io: FileIO,
   val spec: PartitionSpec,
-  val targetFileSize: Long)
-  extends DataWriter[ColumnarBatch] with GpuDataWriterWithRowLineage {
+  val targetFileSize: Long,
+  override protected val metadataSchema: StructType)
+  extends GpuDataWriterWithRowLineage {
   override protected def dataSparkType: StructType = fileWriterFactory.dataSparkType
 
   private val delegate = new GpuRollingDataWriter(
@@ -505,7 +514,8 @@ class GpuPartitionedDataWriter(
   override val dataSparkType: StructType,
   val targetFileSize: Long,
   val fanoutEnabled: Boolean,
-) extends DataWriter[ColumnarBatch] with GpuDataWriterWithRowLineage {
+  override protected val metadataSchema: StructType,
+) extends GpuDataWriterWithRowLineage {
 
   private val delegate: PartitioningWriter[SpillableColumnarBatch, DataWriteResult] =
     if (fanoutEnabled) {
