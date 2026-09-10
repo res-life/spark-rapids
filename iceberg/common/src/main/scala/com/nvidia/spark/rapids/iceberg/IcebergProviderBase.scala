@@ -43,6 +43,7 @@ abstract class IcebergProviderBase extends IcebergProvider {
       IcebergProvider.cpuBatchQueryScanClassName)
     val cpuCopyOnWriteScanClass = ShimReflectionUtils.loadClass(
       IcebergProvider.cpuCopyOnWriteScanClassName)
+
     Seq(
       new ScanRule[Scan](
         (a, conf, p, r) => new ScanMeta[Scan](a, conf, p, r) {
