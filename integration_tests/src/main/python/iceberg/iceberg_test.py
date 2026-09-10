@@ -69,6 +69,11 @@ def _assert_gpu_and_cpu_lineage_writes_are_equal(
     def run_write(spark, table):
         write_func(spark, table)
 
+    def next_row_id(spark, table):
+        iceberg_table = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        return iceberg_table.operations().current().nextRowId()
+
     with_cpu_session(setup_tables)
     with_cpu_session(lambda spark: run_write(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
     with_gpu_session(lambda spark: run_write(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
@@ -78,6 +83,11 @@ def _assert_gpu_and_cpu_lineage_writes_are_equal(
     gpu_data = with_cpu_session(
         lambda spark: read_func(spark, gpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
     assert_equal_with_local_sort(cpu_data, gpu_data)
+    cpu_next_row_id = with_cpu_session(
+        lambda spark: next_row_id(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    gpu_next_row_id = with_cpu_session(
+        lambda spark: next_row_id(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    assert cpu_next_row_id == gpu_next_row_id
 
 pytestmark = iceberg_unsupported_mark
 
