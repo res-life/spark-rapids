@@ -184,6 +184,11 @@ public final class GpuSparkWriteAccess {
     return new SparkPositionDeltaWrite.DeltaTaskCommit(result);
   }
 
+  /** Deletes uncommitted task files through Iceberg's package-private cleanup helper. */
+  public static void deleteTaskFiles(FileIO io, List<? extends ContentFile<?>> files) {
+    SparkCleanupUtil.deleteTaskFiles(io, files);
+  }
+
   private static SparkWrite sparkWrite(Write write) {
     return (SparkWrite) write;
   }
