@@ -56,10 +56,6 @@ public final class GpuSparkWriteAccess {
     return SparkWrite.class.getName();
   }
 
-  public static void deleteTaskFiles(FileIO io, List<? extends ContentFile<?>> files) {
-    SparkCleanupUtil.deleteTaskFiles(io, files);
-  }
-
   public static Table table(Write write) {
     return readField(sparkWrite(write), "table", Table.class);
   }
