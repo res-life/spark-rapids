@@ -428,6 +428,9 @@ trait GpuDataWriterWithRowLineage extends GpuDataWriter {
   protected def dataSparkType: StructType
   protected def metadataSchema: StructType
 
+  private lazy val lineageColumnOrdinals =
+    GpuDataWriterWithRowLineage.lineageColumnNames.map(metadataSchema.fieldIndex)
+
   override def write(record: ColumnarBatch): Unit
 
   override def write(
@@ -445,9 +448,8 @@ trait GpuDataWriterWithRowLineage extends GpuDataWriter {
           s"columns but record is missing $missingColumnCount columns")
 
       val lineageColumns = closeOnExcept(new Array[ColumnVector](missingColumnCount)) { columns =>
-        GpuDataWriterWithRowLineage.lineageColumnNames.zipWithIndex.foreach {
-          case (name, index) =>
-            val ordinal = metadataSchema.fieldIndex(name)
+        lineageColumnOrdinals.zipWithIndex.foreach {
+          case (ordinal, index) =>
             columns(index) = metadata.column(ordinal).asInstanceOf[GpuColumnVector].incRefCount()
         }
         columns
