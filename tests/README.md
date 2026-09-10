@@ -97,9 +97,16 @@ mvn package -pl tests -am -Drapids.parallelUnitTests=true -DparallelForkCount=4
 
 - `-Dsuffixes` and `-Dtests` are not supported; the runner fails fast. Use
   `-DwildcardSuites`, which matches fully qualified suite-name prefixes.
+- Before starting workers, the runner detects free GPU memory and reserves 1 GiB for headroom.
+  It budgets 4 GiB per worker and uses the smallest of the resulting memory limit,
+  `parallelForkCount`, four workers, and the number of suite batches. For example, 9 GiB free
+  permits two workers and 17 GiB permits four. One worker still runs all selected suites
+  sequentially; less than 5 GiB free fails before any worker starts.
 - The GPU is shared. Each worker gets
-  `rapids.test.gpu.allocFraction * 0.8 / parallelForkCount`; with the defaults, four workers each
-  get 20% of the GPU memory pool instead of the 100% available to serial execution.
+  `rapids.test.gpu.allocFraction * 0.8 / workerCount`, using the actual worker count. The default
+  minimum pool fraction is also scaled by the startup free-to-total GPU memory ratio so memory
+  already occupied by other processes does not inflate the minimum. The 4 GiB budget controls
+  scheduling; suites that explicitly configure their own pools retain those settings.
 - Each suite has a watchdog controlled by `-DparallelSuiteTimeout`, which defaults to 1800 seconds.
   On timeout, the runner captures a `jstack`, kills the worker, and fails the run.
 - The `RapidsDynamicPartitionPruningV1SuiteAEOff` and
