@@ -363,6 +363,11 @@ run_delta_lake_tests() {
 }
 
 run_iceberg_tests() {
+  # Spark's test-only plan validation rejects intermediate plans from some Iceberg row-level
+  # rewrites. Disable it only for the subprocesses launched by this function.
+  local SPARK_TESTING_ENABLED=0
+  export SPARK_TESTING_ENABLED
+
   # get the major/minor version of Spark
   ICEBERG_SPARK_VER=$(echo "$SPARK_VER" | cut -d. -f1,2)
   # get the patch version of Spark
