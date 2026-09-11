@@ -363,8 +363,14 @@ run_delta_lake_tests() {
 }
 
 run_iceberg_tests() {
-  # Spark's test-only plan validation rejects intermediate plans from some Iceberg row-level
-  # rewrites. Disable it only for the subprocesses launched by this function.
+  # Spark 3.5 validates every optimizer rule's output when the spark.testing JVM property is
+  # present. Iceberg V3 COW rewrites temporarily produce an unresolved ReplaceData plan while
+  # GroupBasedRowLevelOperationScanPlanning rewrites row-lineage columns, so the test-only
+  # validation fails CPU setup before physical planning. Because spark.testing is presence-based
+  # (even false enables it) and cannot be disabled through SparkSession configuration, omit it
+  # from every Iceberg test subprocess.
+  # See https://github.com/NVIDIA/cudf-spark/issues/15680
+  # and https://github.com/NVIDIA/cudf-spark/issues/15950.
   local SPARK_TESTING_ENABLED=0
   export SPARK_TESTING_ENABLED
 
