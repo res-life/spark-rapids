@@ -21,6 +21,7 @@ import java.util.Locale
 import scala.collection.JavaConverters._
 import scala.util.{Failure, Success}
 
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids._
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableSeq
@@ -47,7 +48,7 @@ import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources.v2.{AtomicCreateTableAsSelectExec, AtomicReplaceTableAsSelectExec}
 import org.apache.spark.sql.rapids.GpuWriteJobStatsTracker
 import org.apache.spark.sql.rapids.shims.SparkSessionUtils
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
 import org.apache.spark.util.SerializableConfiguration
 
@@ -424,42 +425,72 @@ trait GpuDataWriterWithRowLineage extends GpuDataWriter {
   protected def dataSparkType: StructType
   protected def metadataSchema: StructType
 
-  private lazy val lineageColumnOrdinals =
-    GpuDataWriterWithRowLineage.lineageColumnNames.map(metadataSchema.fieldIndex)
-
   override def write(record: ColumnarBatch): Unit
 
   override def write(
       metadata: ColumnarBatch,
       record: ColumnarBatch): Unit = {
-    val missingColumnCount = dataSparkType.length - record.numCols()
-    if (missingColumnCount == 0) {
-      write(record)
-    } else {
-      require(metadata.numRows() == record.numRows(),
-        s"Metadata row count ${metadata.numRows()} does not match record row count " +
-          s"${record.numRows()}")
-      require(missingColumnCount == GpuDataWriterWithRowLineage.lineageColumnNames.length,
-        s"Expected ${GpuDataWriterWithRowLineage.lineageColumnNames.length} row lineage " +
-          s"columns but record is missing $missingColumnCount columns")
-
-      val lineageColumns = closeOnExcept(new Array[ColumnVector](missingColumnCount)) { columns =>
-        lineageColumnOrdinals.zipWithIndex.foreach {
-          case (ordinal, index) =>
-            columns(index) = metadata.column(ordinal).asInstanceOf[GpuColumnVector].incRefCount()
-        }
-        columns
-      }
-
-      withResource(new ColumnarBatch(lineageColumns, metadata.numRows())) { lineage =>
-        write(GpuColumnVector.combineColumns(record, lineage))
-      }
-    }
+    write(GpuDataWriterWithRowLineage.appendLineage(
+      record, metadata, dataSparkType, metadataSchema))
   }
 }
 
 object GpuDataWriterWithRowLineage {
   val lineageColumnNames: Seq[String] = Seq("_row_id", "_last_updated_sequence_number")
+
+  /** Returns an owned physical row batch without consuming the record or metadata batches. */
+  def appendLineage(
+      record: ColumnarBatch,
+      metadata: ColumnarBatch,
+      dataSparkType: StructType,
+      metadataSchema: StructType,
+      reinsertMask: CudfColumnVector = null): ColumnarBatch = {
+    if (reinsertMask != null) {
+      require(reinsertMask.getRowCount == record.numRows(),
+        "Reinsert mask row count does not match record row count")
+    }
+    val missingColumnCount = dataSparkType.length - record.numCols()
+    if (missingColumnCount == 0) {
+      GpuColumnVector.combineColumns(record)
+    } else {
+      require(missingColumnCount == lineageColumnNames.length,
+        s"Expected ${lineageColumnNames.length} row lineage " +
+          s"columns but record is missing $missingColumnCount columns")
+      require(dataSparkType.takeRight(missingColumnCount).map(_.name).toSeq == lineageColumnNames,
+        "Expected row lineage columns at the end of the write schema")
+      if (metadata != null) {
+        require(metadata.numRows() == record.numRows(),
+          s"Metadata row count ${metadata.numRows()} does not match record row count " +
+            s"${record.numRows()}")
+      }
+
+      val lineageColumns = closeOnExcept(new Array[ColumnVector](missingColumnCount)) { columns =>
+        lineageColumnNames.zipWithIndex.foreach { case (name, index) =>
+          columns(index) = if (metadata == null) {
+            // Newly inserted rows inherit both lineage values from the Iceberg commit.
+            GpuColumnVector.fromNull(record.numRows(), LongType)
+          } else {
+            val column = metadata.column(metadataSchema.fieldIndex(name))
+              .asInstanceOf[GpuColumnVector]
+            if (reinsertMask == null) {
+              column.incRefCount()
+            } else {
+              // INSERT rows inherit lineage even when their metadata projection has values.
+              withResource(GpuScalar.from(null, LongType)) { nullValue =>
+                GpuColumnVector.from(
+                  reinsertMask.ifElse(column.getBase, nullValue), LongType)
+              }
+            }
+          }
+        }
+        columns
+      }
+
+      withResource(new ColumnarBatch(lineageColumns, record.numRows())) { lineage =>
+        GpuColumnVector.combineColumns(record, lineage)
+      }
+    }
+  }
 }
 
 class GpuUnpartitionedDataWriter(
