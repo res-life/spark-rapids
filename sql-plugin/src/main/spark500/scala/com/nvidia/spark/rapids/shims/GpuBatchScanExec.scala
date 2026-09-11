@@ -94,7 +94,7 @@ case class GpuBatchScanExec(
       runtimeFilters,
       table,
       output,
-      outputPartitioning,
+      reportedKeyedPartitioning,
       inputPartitions)
 
   override lazy val readerFactory: PartitionReaderFactory =
