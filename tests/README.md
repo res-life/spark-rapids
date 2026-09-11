@@ -95,6 +95,9 @@ explicitly:
 mvn package -pl tests -am -Drapids.parallelUnitTests=true -DparallelForkCount=4
 ```
 
+- Parallel unit tests currently support at most four concurrent worker JVMs. Setting
+  `parallelForkCount` higher than four does not increase concurrency. Further UT and IT
+  parallelism tuning is tracked in [#15344](https://github.com/NVIDIA/cudf-spark/issues/15344).
 - `-Dsuffixes` and `-Dtests` are not supported; the runner fails fast. Use
   `-DwildcardSuites`, which matches fully qualified suite-name prefixes.
 - Before starting workers, the runner detects free GPU memory and reserves 1 GiB for headroom.
