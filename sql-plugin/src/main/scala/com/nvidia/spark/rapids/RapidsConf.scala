@@ -770,6 +770,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val RANGE_SHUFFLE_INPUT_BATCHING_ENABLED =
+    conf("spark.rapids.sql.rangeShuffle.inputBatching.enabled")
+      .doc("Enables experimental one-input-batch-at-a-time consumption for GPU range shuffles " +
+        "to bound the amount of decoded input retained before partitioning.")
+      .internal()
+      .booleanConf
+      .createWithDefault(false)
+
   val EXPORT_COLUMNAR_RDD = conf("spark.rapids.sql.exportColumnarRdd")
     .doc("Spark has no simply way to export columnar RDD data.  This turns on special " +
       "processing/tagging that allows the RDD to be picked back apart into a Columnar RDD.")
@@ -2165,52 +2173,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
-  val HYBRID_PARQUET_READER = conf("spark.rapids.sql.hybrid.parquet.enabled")
-    .doc("Use HybridScan to read Parquet data using CPUs. The underlying implementation " +
-      "leverages both Gluten and Velox. Supports Spark 3.2.2, 3.3.1, 3.4.2, and 3.5.1 " +
-      "as Gluten does, also supports other versions but not fully tested.")
-    .internal()
-    .booleanConf
-    .createWithDefault(false)
-
-  val HYBRID_PARQUET_PRELOAD_CAP = conf("spark.rapids.sql.hybrid.parquet.numPreloadedBatches")
-    .doc("Preloading capacity of HybridParquetScan. If > 0, will enable preloading" +
-      " the result of HybridParquetScan asynchronously in a separate thread")
-    .internal()
-    .integerConf
-    .createWithDefault(0)
-
-  // This config name is the same as HybridPluginWrapper in Hybrid jar,
-  // can not refer to Hybrid jar because of the jar is optional.
-  val LOAD_HYBRID_BACKEND = conf("spark.rapids.sql.hybrid.loadBackend")
-    .doc("Load hybrid backend as an extra plugin of cuDF plugin during launch time")
-    .internal()
-    .startupOnly()
-    .booleanConf
-    .createWithDefault(false)
-
-  object HybridFilterPushdownType extends Enumeration {
-    val CPU, GPU, OFF = Value
-  }
-
-  val PUSH_DOWN_FILTERS_TO_HYBRID = conf("spark.rapids.sql.hybrid.parquet.filterPushDown")
-    .doc("Push down all supported filters to CPU if set to CPU. " +
-      "If set to GPU, no filters will be pushed down so all filters are on the GPU. " +
-      "If set to OFF, filters will be both pushed down and keeped on the GPU. " +
-      "OFF is to make the behavior same as before.")
-    .internal()
-    .stringConf
-    .transform(_.toUpperCase(java.util.Locale.ROOT))
-    .checkValues(HybridFilterPushdownType.values.map(_.toString))
-    .createWithDefault(HybridFilterPushdownType.CPU.toString)
-
-  val HYBRID_EXPRS_WHITELIST = conf("spark.rapids.sql.hybrid.whitelistExprs")
-    .doc("White list of expressions that can be pushed down to CPU. " +
-      "The expressions are separated by comma.")
-    .internal()
-    .stringConf
-    .createWithDefault("")
-
   val HASH_AGG_REPLACE_MODE = conf("spark.rapids.sql.hashAgg.replaceMode")
     .doc("Only when hash aggregate exec has these modes (\"all\" by default): " +
       "\"all\" (try to replace all aggregates, default), " +
@@ -2576,7 +2538,10 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
   val EXPLAIN = conf("spark.rapids.sql.explain")
     .doc("Explain why some parts of a query were not placed on a GPU or not. Possible " +
       "values are ALL: print everything, NONE: print nothing, NOT_ON_GPU: print only parts of " +
-      "a query that did not go on the GPU")
+      "a query that did not go on the GPU. ALL is intended only for debugging and can generate " +
+      "a large amount of driver log output for complex or high-volume workloads, potentially " +
+      "degrading driver performance or making it unresponsive. Do not use ALL in production; " +
+      "use NOT_ON_GPU (the default) or NONE instead.")
     .commonlyUsed()
     .stringConf
     .createWithDefault("NOT_ON_GPU")
@@ -2615,8 +2580,8 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
 
   val ALLOW_MULTIPLE_JARS = conf("spark.rapids.sql.allowMultipleJars")
     .startupOnly()
-    .doc("Allow multiple rapids-4-spark, spark-rapids-jni, and cudf jars on the classpath. " +
-      "Spark will take the first one it finds, so the version may not be expected. Possisble " +
+    .doc("Allow multiple rapids-4-spark, cudf-spark-jni, and cudf jars on the classpath. " +
+      "Spark will take the first one it finds, so the version may not be expected. Possible " +
       "values are ALWAYS: allow all jars, SAME_REVISION: only allow jars with the same " +
       "revision, NEVER: do not allow multiple jars at all.")
     .stringConf
@@ -3617,16 +3582,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val avroDebugDumpPrefix: Option[String] = get(AVRO_DEBUG_DUMP_PREFIX)
 
   lazy val avroDebugDumpAlways: Boolean = get(AVRO_DEBUG_DUMP_ALWAYS)
-
-  lazy val useHybridParquetReader: Boolean = get(HYBRID_PARQUET_READER)
-
-  lazy val hybridParquetPreloadBatches: Int = get(HYBRID_PARQUET_PRELOAD_CAP)
-
-  lazy val loadHybridBackend: Boolean = get(LOAD_HYBRID_BACKEND)
-
-  lazy val pushDownFiltersToHybrid: String = get(PUSH_DOWN_FILTERS_TO_HYBRID)
-
-  lazy val hybridExprsWhitelist: String = get(HYBRID_EXPRS_WHITELIST)
 
   lazy val hashAggReplaceMode: String = get(HASH_AGG_REPLACE_MODE)
 
