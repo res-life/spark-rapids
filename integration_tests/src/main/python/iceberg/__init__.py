@@ -37,7 +37,7 @@ iceberg_192_rest_deletion_vector_skip_mark = pytest.mark.skipif(
     is_iceberg_rest_catalog() and runtime_iceberg_version == "1.9.2",
     reason=(
         "Iceberg 1.9.2 leaks S3 connections when reading deletion vectors: "
-        "https://github.com/NVIDIA/cudf-spark/issues/15970"))
+        "https://github.com/apache/iceberg/pull/13899"))
 supports_iceberg_v3 = (
     runtime_iceberg_version is not None and
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9))
