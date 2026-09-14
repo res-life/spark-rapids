@@ -26,14 +26,7 @@ import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 /** Access to position-delta batch-write internals shared by Iceberg 1.9 and later. */
 public final class GpuSparkPositionDeltaWriteAccess {
   private static final ClassValue<Method> BROADCAST_REWRITABLE_DELETES_METHOD =
-      new ClassValue<Method>() {
-        @Override
-        protected Method computeValue(Class<?> type) {
-          Method method = findMethod(type, "broadcastRewritableDeletes");
-          method.setAccessible(true);
-          return method;
-        }
-      };
+      new BroadcastRewritableDeletesMethod();
 
   private GpuSparkPositionDeltaWriteAccess() {
   }
@@ -61,15 +54,25 @@ public final class GpuSparkPositionDeltaWriteAccess {
     }
   }
 
-  private static Method findMethod(Class<?> targetClass, String methodName) {
-    Class<?> current = targetClass;
-    while (current != null) {
-      try {
-        return current.getDeclaredMethod(methodName);
-      } catch (NoSuchMethodException e) {
-        current = current.getSuperclass();
-      }
+  /** Public to avoid package-private synthetic accessors in the Java 8 bytecode. */
+  public static final class BroadcastRewritableDeletesMethod extends ClassValue<Method> {
+    public BroadcastRewritableDeletesMethod() {
     }
-    throw new IllegalStateException("No method " + methodName + " in " + targetClass.getName());
+
+    @Override
+    protected Method computeValue(Class<?> type) {
+      Class<?> current = type;
+      while (current != null) {
+        try {
+          Method method = current.getDeclaredMethod("broadcastRewritableDeletes");
+          method.setAccessible(true);
+          return method;
+        } catch (NoSuchMethodException e) {
+          current = current.getSuperclass();
+        }
+      }
+      throw new IllegalStateException(
+          "No method broadcastRewritableDeletes in " + type.getName());
+    }
   }
 }
