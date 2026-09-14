@@ -230,6 +230,7 @@ def test_iceberg_merge_v3_table_fallback(
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@pytest.mark.skip(reason='Waiting for https://github.com/NVIDIA/cudf-spark/pull/15866')
 def test_iceberg_merge_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = f"{base_table_name}_cpu"
