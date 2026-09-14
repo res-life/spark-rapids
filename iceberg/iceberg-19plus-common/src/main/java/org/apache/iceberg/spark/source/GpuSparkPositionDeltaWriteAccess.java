@@ -25,10 +25,8 @@ import org.apache.spark.sql.connector.write.DeltaBatchWrite;
 
 /** Access to position-delta batch-write internals shared by Iceberg 1.9 and later. */
 public final class GpuSparkPositionDeltaWriteAccess {
-  private static final String POSITION_DELTA_BATCH_WRITE_CLASS =
-      "org.apache.iceberg.spark.source.SparkPositionDeltaWrite$PositionDeltaBatchWrite";
-  private static final Method BROADCAST_REWRITABLE_DELETES_METHOD =
-      findBroadcastRewritableDeletesMethod();
+  private static final ClassValue<Method> BROADCAST_REWRITABLE_DELETES_METHOD =
+      new MethodCache("broadcastRewritableDeletes");
 
   private GpuSparkPositionDeltaWriteAccess() {
   }
@@ -39,7 +37,7 @@ public final class GpuSparkPositionDeltaWriteAccess {
    * <p>Iceberg keeps {@code broadcastRewritableDeletes()} private on its position-delta batch
    * writer, but the GPU deletion-vector writer must use the same selection when merging an
    * existing deletion vector. Package placement cannot access a private member, so this helper
-   * uses reflection and resolves the method once when this helper is initialized.
+   * uses reflection and caches the resolved method per runtime class and class loader.
    *
    * @return the broadcast delete-file map, or {@code null} when there are no existing deletes
    *     to rewrite, such as the first deletion-vector write for a data file
@@ -48,26 +46,37 @@ public final class GpuSparkPositionDeltaWriteAccess {
   public static Broadcast<Map<String, DeleteFileSet>> broadcastRewritableDeletes(
       DeltaBatchWrite write) {
     try {
+      Method method = BROADCAST_REWRITABLE_DELETES_METHOD.get(write.getClass());
       return (Broadcast<Map<String, DeleteFileSet>>)
-          BROADCAST_REWRITABLE_DELETES_METHOD.invoke(write);
+          method.invoke(write);
     } catch (ReflectiveOperationException e) {
       throw new IllegalStateException(
           "Unable to broadcast rewritable deletes from " + write.getClass().getName(), e);
     }
   }
 
-  private static Method findBroadcastRewritableDeletesMethod() {
-    try {
-      Class<?> batchWriteClass = Class.forName(
-          POSITION_DELTA_BATCH_WRITE_CLASS,
-          false,
-          GpuSparkPositionDeltaWriteAccess.class.getClassLoader());
-      Method method = batchWriteClass.getDeclaredMethod("broadcastRewritableDeletes");
-      method.setAccessible(true);
-      return method;
-    } catch (ReflectiveOperationException e) {
+  /** Caches a no-argument method by name for each runtime class. */
+  public static final class MethodCache extends ClassValue<Method> {
+    private final String methodName;
+
+    public MethodCache(String methodName) {
+      this.methodName = methodName;
+    }
+
+    @Override
+    protected Method computeValue(Class<?> type) {
+      Class<?> current = type;
+      while (current != null) {
+        try {
+          Method method = current.getDeclaredMethod(methodName);
+          method.setAccessible(true);
+          return method;
+        } catch (NoSuchMethodException e) {
+          current = current.getSuperclass();
+        }
+      }
       throw new IllegalStateException(
-          "Unable to find broadcastRewritableDeletes on " + POSITION_DELTA_BATCH_WRITE_CLASS, e);
+          "No method " + methodName + " in " + type.getName());
     }
   }
 }
