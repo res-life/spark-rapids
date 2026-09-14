@@ -33,15 +33,10 @@ iceberg_unsupported_mark = pytest.mark.skipif(
 
 
 runtime_iceberg_version = os.environ.get("EXPECTED_ICEBERG_VERSION")
-iceberg_192_rest_deletion_vector_skip_mark = pytest.mark.skipif(
-    is_iceberg_rest_catalog() and runtime_iceberg_version == "1.9.2",
-    reason=(
-        "Iceberg 1.9.2 leaks S3 connections when reading deletion vectors: "
-        "https://github.com/apache/iceberg/pull/13899"))
 supports_iceberg_v3 = (
     runtime_iceberg_version is not None and
-    tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 9))
-ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 requires Iceberg 1.9.0 or later"
+    tuple(int(part) for part in runtime_iceberg_version.split(".")) > (1, 9, 2))
+ICEBERG_V3_UNSUPPORTED_REASON = "Iceberg v3 requires Iceberg 1.9.3 or later"
 supports_iceberg_row_lineage_inheritance = (
     runtime_iceberg_version is not None and
     tuple(int(part) for part in runtime_iceberg_version.split(".")[:2]) >= (1, 10))
