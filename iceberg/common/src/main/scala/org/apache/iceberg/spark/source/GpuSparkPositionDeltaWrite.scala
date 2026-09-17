@@ -820,7 +820,7 @@ class GpuPartitionedDeltaWriter(
   // The data spec for writing new rows
   private val dataSpec: PartitionSpec = table.spec()
   private val dataPartitioner: GpuIcebergSpecPartitioner =
-    new GpuIcebergSpecPartitioner(dataSpec, table.schema().asStruct())
+    new GpuIcebergSpecPartitioner(dataSpec, context.dataSchema.asStruct())
 
   // Ordinals for extracting fields from delete records
   protected val specIdOrdinal: Int = context.specIdOrdinal()
