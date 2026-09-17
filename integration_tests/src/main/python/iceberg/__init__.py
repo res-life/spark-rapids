@@ -46,9 +46,6 @@ ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON = \
 # Keep format versions crossed with every existing semantic test parameter.
 _v3_unsupported_mark = pytest.mark.skipif(
     not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-_v3_mor_fallback_mark = pytest.mark.allow_non_gpu_conditional(
-    True, "WriteDeltaExec", "MergeRowsExec", "BatchScanExec", "ColumnarToRowExec",
-    "ShuffleExchangeExec", "SortExec", "ProjectExec")
 # Row-level COW planning can retain the CPU scan used for file pruning.
 _v3_cow_scan_mark = pytest.mark.allow_non_gpu_conditional(True, "BatchScanExec")
 iceberg_format_versions = [
@@ -58,7 +55,7 @@ iceberg_read_format_versions = [pytest.param("1", id="v1"), *iceberg_format_vers
 iceberg_read_enabled_conf = {"spark.rapids.sql.format.iceberg.v3.enabled": "true"}
 iceberg_mor_format_versions = [
     pytest.param("2", id="v2"),
-    pytest.param("3", marks=[_v3_unsupported_mark, _v3_mor_fallback_mark], id="v3")]
+    pytest.param("3", marks=_v3_unsupported_mark, id="v3")]
 iceberg_cow_format_versions = [
     pytest.param("2", id="v2"),
     pytest.param("3", marks=[_v3_unsupported_mark, _v3_cow_scan_mark], id="v3")]
@@ -77,9 +74,7 @@ def with_iceberg_format_versions(parameters):
             version_marks = list(marks)
             if version == "3":
                 version_marks.append(_v3_unsupported_mark)
-                if "merge-on-read" in values:
-                    version_marks.append(_v3_mor_fallback_mark)
-                elif "copy-on-write" in values:
+                if "copy-on-write" in values:
                     version_marks.append(_v3_cow_scan_mark)
             result.append(pytest.param(
                 version, *values, marks=version_marks,
@@ -88,7 +83,7 @@ def with_iceberg_format_versions(parameters):
 
 
 def with_iceberg_dml_session(func, format_version, mode, conf):
-    """Require the current Puffin fallback specifically for v3 MOR writes."""
+    """Require GPU deletion-vector writes for v3 MOR operations."""
     if format_version != "3" or mode != "merge-on-read":
         return with_gpu_session(func, conf=conf)
     callback = spark_jvm().org.apache.spark.sql.rapids.ExecutionPlanCaptureCallback
@@ -97,9 +92,11 @@ def with_iceberg_dml_session(func, format_version, mode, conf):
         result = with_gpu_session(func, conf=conf)
         plans = callback.getResultsWithTimeout(10000)
         # Spark rewrites insert-only MERGE to append even on a MOR table.
-        assert any(callback.didFallBack(plan, "WriteDeltaExec") or
+        assert not any(callback.didFallBack(plan, "WriteDeltaExec") for plan in plans), \
+            "Unexpected v3 MOR CPU delta write:\n" + "\n".join(str(plan) for plan in plans)
+        assert any(callback.contains(plan, "GpuWriteDeltaExec") or
                    callback.contains(plan, "GpuAppendDataExec") for plan in plans), \
-            "Expected v3 MOR fallback or GPU append for insert-only MERGE:\n" + \
+            "Expected GPU delta write or GPU append for insert-only MERGE:\n" + \
             "\n".join(str(plan) for plan in plans)
         return result
     finally:
