@@ -347,7 +347,8 @@ def test_iceberg_v3_row_lineage_delete_leading_rows(spark_tmp_table_factory, rea
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(spark_tmp_table_factory):
+@pytest.mark.parametrize('delete_mode', ['copy-on-write', 'merge-on-read'])
+def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(spark_tmp_table_factory, delete_mode):
     do_delete_test(
         spark_tmp_table_factory,
         lambda spark, table: spark.sql(f"DELETE FROM {table} WHERE id < 3"),
@@ -357,7 +358,7 @@ def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(spark_tmp_table_factory)
             iceberg_delete_v3_enabled_conf, {"spark.sql.shuffle.partitions": "1"}),
         read_func=lambda spark, table: spark.sql(
             f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table}"),
-        write_order="id")
+        write_order="id", format_version="3", delete_mode=delete_mode)
 
 
 def _do_test_iceberg_delete_partitioned_table(
