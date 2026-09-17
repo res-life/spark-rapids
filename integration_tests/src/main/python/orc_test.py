@@ -1216,6 +1216,18 @@ def test_orc_gpu_write_cpu_read_timestamp_in_non_utc_timezone(spark_tmp_path, se
         write_func, read_func, data_path, conf={'spark.sql.session.timeZone': session_timezone})
 
 
+@tz_sensitive_test
+@pytest.mark.parametrize('timestamp', [datetime(2015, 1, 15, 12, tzinfo=timezone.utc),
+                                     datetime(2015, 7, 1, 12, tzinfo=timezone.utc)])
+def test_orc_gpu_write_cpu_read_timestamp_filter(spark_tmp_path, timestamp):
+    data_path = spark_tmp_path + '/ORC_GPU_WRITE_TIMESTAMP_FILTER'
+    write_func = lambda spark, path: (
+        spark.createDataFrame([(timestamp,)], 'ts timestamp').write.orc(path))
+    read_func = lambda spark, path: (
+        spark.read.orc(path).where(f.col('ts') == f.lit(timestamp)))
+    assert_gpu_and_cpu_writes_are_equal_collect(write_func, read_func, data_path)
+
+
 @pytest.mark.parametrize("reader_confs", reader_opt_confs, ids=idfn)
 @pytest.mark.parametrize('v1_enabled_list', ["", "orc"])
 @pytest.mark.parametrize("timezone_pair", [("UTC", "Asia/Shanghai"), ("Asia/Shanghai", "UTC"), ("Asia/Shanghai", "America/Los_Angeles")], ids=idfn)
