@@ -266,7 +266,6 @@ def test_iceberg_merge_v3_table_fallback(
 @iceberg
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
-@pytest.mark.skip(reason='Waiting for https://github.com/NVIDIA/cudf-spark/pull/15866')
 def test_iceberg_merge_v3_gpu_writes_deletion_vectors(spark_tmp_table_factory):
     base_table_name = get_full_table_name(spark_tmp_table_factory)
     cpu_table_name = f"{base_table_name}_cpu"
@@ -359,7 +358,8 @@ def test_iceberg_v3_row_lineage_merge_update_insert(
 @pytest.mark.skipif(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
-def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory):
+@pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
+def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory, merge_mode):
     base_table = get_full_table_name(spark_tmp_table_factory)
     cpu_table = f"{base_table}_cpu"
     gpu_table = f"{base_table}_gpu"
@@ -370,7 +370,7 @@ def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory)
             spark.sql(
                 f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
                 "TBLPROPERTIES ('format-version' = '3', "
-                "'write.merge.mode' = 'copy-on-write')")
+                f"'write.merge.mode' = '{merge_mode}')")
             spark.sql(f"ALTER TABLE {table} WRITE ORDERED BY id").collect()
             row_lineage_df(spark, with_value=True).writeTo(table).append()
 
@@ -394,7 +394,7 @@ def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory)
         merge,
         lambda spark, table: spark.sql(
             f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {table}"),
-        conf)
+        conf, format_version="3", merge_mode=merge_mode)
 
 
 @allow_non_gpu("MergeRows$Keep", "MergeRows$Discard", "MergeRows$Split")
