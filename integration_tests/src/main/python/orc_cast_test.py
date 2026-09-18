@@ -175,25 +175,19 @@ def test_non_utc_timestamp_regressions(spark_tmp_path):
     )
 
 
-# This is an existing ORC BIGINT-to-TIMESTAMP schema-evolution mismatch, independent of the
-# physical ORC timestamp defect fixed by #15895. The input is interpreted as the local wall-clock
-# time 1883-11-18 12:02:00. America/New_York moved backward from LMT (-04:56:02) to EST (-05:00)
+# Regression for ORC BIGINT-to-TIMESTAMP schema evolution at a historical overlap. The input is
+# interpreted as local wall-clock time 1883-11-18 12:02:00. America/New_York moved backward from
+# LMT (-04:56:02) to EST (-05:00)
 # at 17:00:00Z that day, so local times from 12:00:00 through 12:03:57 are ambiguous.
 #
 # CPU ORC's convertFromUtc subtracts the raw -05:00 offset before looking up the applicable offset.
 # It therefore probes 17:02:00Z, selects EST, and Spark preserves the original Calendar offset by
 # choosing withLaterOffsetAtOverlap(), producing -2717650680000000 microseconds. The GPU historical
-# path binds the local timestamp directly with java.time, which selects the earlier LMT offset and
-# produces -2717650918000000 microseconds, exactly 238 seconds earlier.
-#
-# Keep this case separate and strict: fixing the mismatch must turn it into an XPASS that fails the
-# suite and requires removing this marker, while the physical #15895 regression remains enabled.
+# path must preserve that ORC-selected instant through Spark's historical rebase.
 @tz_sensitive_test
 @pytest.mark.skipif(
     get_test_tz() != 'America/New_York',
     reason='requires the 1883 America/New_York LMT-to-EST overlap')
-@pytest.mark.xfail(
-    reason='existing ORC bigint-to-timestamp historical overlap mismatch', strict=True)
 @allow_non_gpu(*non_utc_allow_orc_scan)
 @validate_execs_in_gpu_plan('GpuFileSourceScanExec')
 def test_casting_from_bigint_to_timestamp_in_new_york_lmt_overlap(spark_tmp_path):

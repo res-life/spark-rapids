@@ -55,10 +55,8 @@ object GpuOrcTimezoneUtils {
    *
    * Apache ORC uses java.util.TimeZone for this conversion, while Spark materializes the
    * resulting java.sql.Timestamp using java.time rules. Before the reader timezone's first
-   * recorded transition those rule sets can differ, so use java.time for historical values and
-   * retain ORC's conversion for all later values, including DST gaps and overlaps. A pre-existing
-   * limitation remains for historical local-time overlaps: java.time selects its default earlier
-   * offset here, while Spark can retain a later offset from the original java.util.Calendar.
+   * recorded transition those rule sets can differ, so preserve the ORC-selected instant through
+   * Spark's historical rebase and retain ORC's conversion for all later values.
    */
   private[rapids] def convertOrcIntegerTimestamp(
       timestamp: ColumnVector,
