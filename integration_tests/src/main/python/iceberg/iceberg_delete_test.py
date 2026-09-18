@@ -184,7 +184,8 @@ def _assert_only_deletion_vectors(spark, table_name):
 
 
 @iceberg
-@allow_non_gpu("BatchScanExec", "ProjectExec")
+# Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
+@allow_non_gpu("BatchScanExec")
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @pytest.mark.parametrize('fanout_enabled', [False, True], ids=['clustered', 'fanout'])
@@ -232,7 +233,8 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
 
 
 @iceberg
-@allow_non_gpu("BatchScanExec", "ProjectExec")
+# Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
+@allow_non_gpu("BatchScanExec")
 @ignore_order(local=True)
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 def test_iceberg_delete_v3_gpu_upgrades_position_deletes(spark_tmp_table_factory):
