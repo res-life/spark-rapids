@@ -306,7 +306,7 @@ case $DIST_PROFILE in
 
 
 
-  [34]*)
+  [345]*)
     <<< $DIST_PROFILE IFS="," read -ra SPARK_SHIM_VERSIONS
     unset DIST_PROFILE
     ;;
