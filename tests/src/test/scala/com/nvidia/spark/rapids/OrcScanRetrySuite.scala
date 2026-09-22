@@ -20,7 +20,7 @@ import java.time.ZoneId
 
 import ai.rapids.cudf.{ColumnVector, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
-import com.nvidia.spark.rapids.jni.RmmSpark
+import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, RmmSpark}
 
 import org.apache.spark.sql.types.{LongType, StructField, StructType, TimestampType}
 
@@ -28,6 +28,19 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
 
   private val timestampSchema = StructType(Seq(StructField("a", TimestampType)))
   private val longSchema = StructType(Seq(StructField("a", LongType)))
+
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    GpuTimeZoneDB.cacheDatabase()
+  }
+
+  override def afterEach(): Unit = {
+    try {
+      GpuTimeZoneDB.shutdown()
+    } finally {
+      super.afterEach()
+    }
+  }
 
   private def injectGpuRetryOom(): Unit = {
     RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
