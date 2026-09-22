@@ -22,31 +22,11 @@ import java.util.Optional
 import scala.collection.mutable.ArrayBuffer
 
 import ai.rapids.cudf.{ColumnVector, ColumnView, DType, Table}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits.AutoCloseableProducingSeq
 import com.nvidia.spark.rapids.jni.{DateTimeRebase, GpuTimeZoneDB}
 
 object GpuOrcTimezoneUtils {
-
-  /**
-   * Rebase ORC date/time values inside an idempotent retry scope.
-   *
-   * The decoded table is made spillable before entering the retry block. Each attempt
-   * materializes its own table reference, which [[rebaseOrcDateTime]] consumes, so an OOM
-   * during any of the rebase allocations can safely retry without rereading the ORC chunk.
-   */
-  private[rapids] def rebaseOrcDateTimeWithRetry(
-      input: Table,
-      writerTimezone: ZoneId,
-      writerUsedProlepticGregorian: Boolean): Table = {
-    val spillable = closeOnExcept(input) { _ =>
-      SpillableTable(input, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
-    }
-    RmmRapidsRetryIterator.withRetryNoSplit(spillable) { attempt =>
-      rebaseOrcDateTime(
-        attempt.getTable(), writerTimezone, writerUsedProlepticGregorian)
-    }
-  }
 
   /** Resolve an ORC stripe footer timezone once at the metadata boundary. */
   private[rapids] def resolveWriterTimezone(writerTimezone: String): ZoneId = {
