@@ -462,15 +462,19 @@ object GpuOrcScan {
       isSchemaCaseSensitive: Boolean,
       writerTimezone: ZoneId,
       writerUsedProlepticGregorian: Boolean): Table = {
-    val spillableTable = closeOnExcept(table) { _ =>
-      SpillableTable(table, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    val spillableBatch = withResource(table) { _ =>
+      val batch = GpuColumnVector.from(table, GpuColumnVector.extractTypes(tableSchema))
+      closeOnExcept(batch) { _ =>
+        SpillableColumnarBatch(batch, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+      }
     }
-    withRetryNoSplit(spillableTable) { attempt =>
-      val attemptTable = attempt.getTable()
-      val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
-        attemptTable, writerTimezone, writerUsedProlepticGregorian)
-      SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
-        readDataSchema, isSchemaCaseSensitive, Some(castColumnTo))
+    withRetryNoSplit(spillableBatch) { attempt =>
+      withResource(attempt.getColumnarBatch()) { attemptBatch =>
+        val rebased = GpuOrcTimezoneUtils.rebaseOrcDateTime(
+          GpuColumnVector.from(attemptBatch), writerTimezone, writerUsedProlepticGregorian)
+        SchemaUtils.evolveSchemaIfNeededAndClose(rebased, tableSchema,
+          readDataSchema, isSchemaCaseSensitive, Some(castColumnTo))
+      }
     }
   }
 
