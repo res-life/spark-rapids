@@ -1010,9 +1010,10 @@ def test_iceberg_read_partition_key(format_version, spark_tmp_table_factory, key
     def setup_iceberg_table(spark):
         df = two_col_df(spark, key_gen, long_gen).orderBy("a")
         df.createOrReplaceTempView(tmpview)
-        spark.sql(f"CREATE TABLE {full_table} USING ICEBERG PARTITIONED BY (a) {iceberg_table_properties_sql(
-            format_version)} " + \
-                  f"AS SELECT * FROM {tmpview}")
+        spark.sql(
+            f"CREATE TABLE {full_table} USING ICEBERG PARTITIONED BY (a) "
+            f"{iceberg_table_properties_sql(format_version)} "
+            f"AS SELECT * FROM {tmpview}")
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : spark.sql(f"SELECT a FROM {full_table}"),
@@ -1028,9 +1029,10 @@ def test_iceberg_input_meta(format_version, spark_tmp_table_factory, reader_type
     def setup_iceberg_table(spark):
         df = binary_op_df(spark, long_gen).orderBy("a")
         df.createOrReplaceTempView(tmpview)
-        spark.sql(f"CREATE TABLE {full_table} USING ICEBERG PARTITIONED BY (a) {iceberg_table_properties_sql(
-            format_version)} " + \
-                  f"AS SELECT * FROM {tmpview}")
+        spark.sql(
+            f"CREATE TABLE {full_table} USING ICEBERG PARTITIONED BY (a) "
+            f"{iceberg_table_properties_sql(format_version)} "
+            f"AS SELECT * FROM {tmpview}")
     with_cpu_session(setup_iceberg_table)
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark : spark.sql(
