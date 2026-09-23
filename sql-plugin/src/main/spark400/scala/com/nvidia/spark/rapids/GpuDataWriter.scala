@@ -28,11 +28,35 @@ spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids
 
-import org.apache.spark.sql.connector.write.DataWriter
+import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
+
+import org.apache.spark.sql.connector.write.{DataWriter, DeltaWriter}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 trait GpuDataWriter extends DataWriter[ColumnarBatch] {
   override def write(record: ColumnarBatch): Unit
 
   override def write(metadata: ColumnarBatch, record: ColumnarBatch): Unit
+}
+
+/**
+ * Spark-facing contract for GPU delta writers.
+ *
+ * Every input batch and mask is transferred to the writer, which must consume it on both success
+ * and failure. The explicit write implementations preserve metadata instead of relying on Spark's
+ * version-specific defaults.
+ */
+trait GpuDeltaWriter extends GpuDataWriter with DeltaWriter[ColumnarBatch] {
+  override def write(rows: ColumnarBatch): Unit = insert(rows)
+
+  override def write(metadata: ColumnarBatch, rows: ColumnarBatch): Unit = {
+    reinsert(metadata, rows)
+  }
+
+  override def reinsert(metadata: ColumnarBatch, rows: ColumnarBatch): Unit
+
+  def insertAndReinsert(
+      metadata: ColumnarBatch,
+      rows: ColumnarBatch,
+      reinsertMask: CudfColumnVector): Unit
 }

@@ -61,7 +61,7 @@ class GpuRowLineageWriterSuite extends RmmSparkRetrySuiteBase {
           .column(Long.box(7L), null.asInstanceOf[java.lang.Long])
           .column(Long.box(0L), 0L).column(Long.box(101L), 102L).build()) { table =>
         withResource(GpuColumnVector.from(table, Array.fill[DataType](3)(LongType))) { metadata =>
-          withResource(GpuDataWriterWithRowLineage.appendLineage(
+          withResource(GpuIcebergRowLineage.appendLineage(
               record, metadata, writeSchema, metadataSchema)) { physical =>
             assert(physical.numCols() == 3)
             assert(values(physical, 0) == Seq(Some(1L), Some(2L)))
@@ -83,7 +83,7 @@ class GpuRowLineageWriterSuite extends RmmSparkRetrySuiteBase {
           .column(Long.box(101L), 102L).build()) { table =>
         withResource(GpuColumnVector.from(table, Array.fill[DataType](3)(LongType))) { metadata =>
           withResource(CudfColumnVector.fromBooleans(true, false)) { reinsertMask =>
-            withResource(GpuDataWriterWithRowLineage.appendLineage(
+            withResource(GpuIcebergRowLineage.appendLineage(
                 record, metadata, writeSchema, metadataSchema, reinsertMask)) { physical =>
               assert(values(physical, 0) == Seq(Some(1L), Some(2L)))
               assert(values(physical, 1) == Seq(Some(101L), None))
@@ -100,7 +100,7 @@ class GpuRowLineageWriterSuite extends RmmSparkRetrySuiteBase {
 
   test("insert appends inheritable null lineage") {
     withResource(dataBatch()) { record =>
-      withResource(GpuDataWriterWithRowLineage.appendLineage(
+      withResource(GpuIcebergRowLineage.appendLineage(
           record, null, writeSchema, null)) { physical =>
         assert(values(physical, 0) == Seq(Some(1L), Some(2L)))
         assert(values(physical, 1) == Seq(None, None))
@@ -115,7 +115,7 @@ class GpuRowLineageWriterSuite extends RmmSparkRetrySuiteBase {
         .column(Long.box(101L), 102L)
         .column(Long.box(7L), 8L).build()) { table =>
       withResource(GpuColumnVector.from(table, Array.fill[DataType](3)(LongType))) { record =>
-        withResource(GpuDataWriterWithRowLineage.appendLineage(
+        withResource(GpuIcebergRowLineage.appendLineage(
             record, null, writeSchema, null)) { physical =>
           assert(physical.numCols() == 3)
           assert(values(physical, 1) == Seq(Some(101L), Some(102L)))
@@ -123,7 +123,7 @@ class GpuRowLineageWriterSuite extends RmmSparkRetrySuiteBase {
       }
     }
     withResource(dataBatch()) { record =>
-      withResource(GpuDataWriterWithRowLineage.appendLineage(
+      withResource(GpuIcebergRowLineage.appendLineage(
           record, null, new StructType().add("id", LongType), null)) { physical =>
         assert(physical.numCols() == 1)
         assert(values(physical, 0) == Seq(Some(1L), Some(2L)))
@@ -135,7 +135,7 @@ class GpuRowLineageWriterSuite extends RmmSparkRetrySuiteBase {
     withResource(dataBatch()) { record =>
       withResource(new ColumnarBatch(Array.empty, 1)) { metadata =>
         val error = intercept[IllegalArgumentException] {
-          GpuDataWriterWithRowLineage.appendLineage(
+          GpuIcebergRowLineage.appendLineage(
             record, metadata, writeSchema, metadataSchema)
         }
         assert(error.getMessage.contains("Metadata row count"))

@@ -434,12 +434,12 @@ trait GpuDataWriterWithRowLineage extends GpuDataWriter {
   override def write(
       metadata: ColumnarBatch,
       record: ColumnarBatch): Unit = {
-    write(GpuDataWriterWithRowLineage.appendLineage(
+    write(GpuIcebergRowLineage.appendLineage(
       record, metadata, dataSparkType, metadataSchema))
   }
 }
 
-object GpuDataWriterWithRowLineage {
+object GpuIcebergRowLineage {
   val lineageColumnNames: Seq[String] = Seq("_row_id", "_last_updated_sequence_number")
 
   /**

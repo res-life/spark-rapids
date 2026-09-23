@@ -43,7 +43,8 @@ package org.apache.spark.sql.execution.datasources.v2
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.{ColumnVector => CudfColumnVector, Scalar => CudfScalar, Table => CudfTable}
-import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuColumnVector, GpuDeltaBatchWriter, GpuDeltaWrite, GpuExec, GpuMetric, GpuWrite}
+import com.nvidia.spark.rapids.{GpuColumnarToRowExec, GpuColumnVector, GpuDeltaWrite,
+  GpuDeltaWriter, GpuExec, GpuMetric, GpuWrite}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.withRetryNoSplit
 import com.nvidia.spark.rapids.shims.DeltaInsertFilter
@@ -55,7 +56,8 @@ import org.apache.spark.sql.catalyst.{GpuProjectingColumnarBatch, InternalRow}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.util.RowDeltaUtils.{DELETE_OPERATION, UPDATE_OPERATION}
 import org.apache.spark.sql.catalyst.util.WriteDeltaProjections
-import org.apache.spark.sql.connector.write.{BatchWrite, DataWriter, DataWriterFactory, DeltaWriter, PhysicalWriteInfoImpl, Write, WriterCommitMessage}
+import org.apache.spark.sql.connector.write.{BatchWrite, DataWriter, DataWriterFactory,
+  PhysicalWriteInfoImpl, Write, WriterCommitMessage}
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.{ExplainMode, QueryExecution, SparkPlan, SparkPlanInfo}
 import org.apache.spark.sql.execution.{SQLExecution, UnaryExecNode}
@@ -441,7 +443,7 @@ object GpuDataWritingSparkTask extends GpuWritingSparkTask[DataWriter[ColumnarBa
  */
 case class GpuDeltaWritingSparkTask(
     projs: WriteDeltaProjections)
-    extends GpuWritingSparkTask[DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter] {
+    extends GpuWritingSparkTask[GpuDeltaWriter] {
 
   private lazy val rowProjection = projs.rowProjection
     .map(GpuProjectingColumnarBatch(_))
@@ -454,7 +456,7 @@ case class GpuDeltaWritingSparkTask(
   private lazy val rowIdDataTypes = rowIdProjection.schema.fields.map(_.dataType)
 
   override protected def write(
-      writer: DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter,
+      writer: GpuDeltaWriter,
       batch: ColumnarBatch): Unit = {
     withRetryNoSplit(batch) { _ =>
       val deleteFilter = filterByOperation(batch, DELETE_OPERATION)
@@ -501,7 +503,7 @@ case class GpuDeltaWritingSparkTask(
  */
 case class GpuDeltaWithMetadataWritingSparkTask(
     projs: WriteDeltaProjections)
-    extends GpuWritingSparkTask[DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter] {
+    extends GpuWritingSparkTask[GpuDeltaWriter] {
 
   private lazy val rowProjection = projs.rowProjection
     .map(GpuProjectingColumnarBatch(_))
@@ -521,7 +523,7 @@ case class GpuDeltaWithMetadataWritingSparkTask(
     .orNull
 
   override protected def write(
-      writer: DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter,
+      writer: GpuDeltaWriter,
       batch: ColumnarBatch): Unit = {
     withRetryNoSplit(batch) { _ =>
       if (metadataProjection != null) {
@@ -622,7 +624,7 @@ object GpuDelteWritingSparkTask {
    * ownership of the selected rows, metadata and reinsertMask to the writer.
    */
   private[v2] def writeInserts(
-      writer: DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter,
+      writer: GpuDeltaWriter,
       batch: ColumnarBatch,
       rowProjection: GpuProjectingColumnarBatch,
       metadataProjection: Option[GpuProjectingColumnarBatch]): Unit = {

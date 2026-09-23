@@ -261,7 +261,7 @@ class GpuPositionDeltaWriterFactory(
 }
 
 
-trait GpuIcebergDeltaWriter extends DeltaWriter[ColumnarBatch] with GpuDeltaBatchWriter {
+trait GpuIcebergDeltaWriter extends GpuDeltaWriter {
 
   def context: GpuWriteContext
 
@@ -550,7 +550,7 @@ trait GpuDeleteAndDataDeltaWriter extends GpuIcebergDeltaWriter {
 
   override def reinsert(metadata: ColumnarBatch, row: ColumnarBatch): Unit = {
     val physicalRow = withResource(Seq(metadata, row)) { _ =>
-      GpuDataWriterWithRowLineage.appendLineage(
+      GpuIcebergRowLineage.appendLineage(
         row, metadata, context.dataSparkType, context.metadataSparkType)
     }
     insertData(physicalRow)
@@ -561,7 +561,7 @@ trait GpuDeleteAndDataDeltaWriter extends GpuIcebergDeltaWriter {
       row: ColumnarBatch,
       reinsertMask: CudfColumnVector): Unit = {
     val physicalRow = withResource(Seq(metadata, row, reinsertMask)) { _ =>
-      GpuDataWriterWithRowLineage.appendLineage(
+      GpuIcebergRowLineage.appendLineage(
         row, metadata, context.dataSparkType, context.metadataSparkType, reinsertMask)
     }
     insertData(physicalRow)
@@ -608,7 +608,9 @@ trait GpuDeleteAndDataDeltaWriter extends GpuIcebergDeltaWriter {
 
   override def update(metadata: ColumnarBatch, rowId: ColumnarBatch,
                      row: ColumnarBatch): Unit = {
-    throw new UnsupportedOperationException("Update must be represented as delete and insert")
+    withResource(Seq(metadata, rowId, row)) { _ =>
+      throw new UnsupportedOperationException("Update must be represented as delete and insert")
+    }
   }
 
   override def commit(): WriterCommitMessage = {
@@ -711,11 +713,15 @@ class GpuDeleteOnlyDeltaWriter(
       metadata: ColumnarBatch,
       rowId: ColumnarBatch, 
       row: ColumnarBatch): Unit = {
-    throw new UnsupportedOperationException("Delete-only writer does not support updates")
+    withResource(Seq(metadata, rowId, row)) { _ =>
+      throw new UnsupportedOperationException("Delete-only writer does not support updates")
+    }
   }
 
   override def insert(row: ColumnarBatch): Unit = {
-    throw new UnsupportedOperationException("Delete-only writer does not support inserts")
+    withResource(row) { _ =>
+      throw new UnsupportedOperationException("Delete-only writer does not support inserts")
+    }
   }
 
   override def insertAndReinsert(
@@ -728,7 +734,9 @@ class GpuDeleteOnlyDeltaWriter(
   }
 
   override def reinsert(metadata: ColumnarBatch, row: ColumnarBatch): Unit = {
-    throw new UnsupportedOperationException("Delete-only writer does not support reinserts")
+    withResource(Seq(metadata, row)) { _ =>
+      throw new UnsupportedOperationException("Delete-only writer does not support reinserts")
+    }
   }
 
   override def commit(): WriterCommitMessage = {
