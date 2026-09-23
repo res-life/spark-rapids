@@ -16,13 +16,15 @@
 
 package com.nvidia.spark.rapids
 
+import java.math.BigInteger
 import java.time.ZoneId
 
 import ai.rapids.cudf.{ColumnVector, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, RmmSpark}
 
-import org.apache.spark.sql.types.{LongType, StructField, StructType, TimestampType}
+import org.apache.spark.sql.types.{
+  CharType, DecimalType, LongType, StringType, StructField, StructType, TimestampType, VarcharType}
 
 class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
 
@@ -71,5 +73,42 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
       new Table(longs)
     }
     assertRetrySucceeds(table, longSchema)
+  }
+
+  test("ORC decimal schema evolution uses the physical decimal type for retry") {
+    val table = withResource(ColumnVector.decimalFromBigInt(-2, BigInteger.valueOf(123))) {
+      decimal => new Table(decimal)
+    }
+    val tableSchema = StructType(Seq(StructField("a", DecimalType(9, 2))))
+    val readSchema = StructType(Seq(StructField("a", DecimalType(38, 6))))
+
+    injectGpuRetryOom()
+    withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+        table, tableSchema, readSchema, isSchemaCaseSensitive = true,
+        writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
+      assertResult(DType.create(DType.DTypeEnum.DECIMAL128, -6))(result.getColumn(0).getType)
+    }
+  }
+
+  Seq(
+    ("CHAR", CharType(6), "abc   ", "abc"),
+    ("VARCHAR", VarcharType(6), "abc", "abc")
+  ).foreach { case (typeName, tableType, input, expected) =>
+    test(s"ORC $typeName schema evolution uses STRING for retry") {
+      val table = withResource(ColumnVector.fromStrings(input)) { strings =>
+        new Table(strings)
+      }
+      val tableSchema = StructType(Seq(StructField("a", tableType)))
+      val readSchema = StructType(Seq(StructField("a", StringType)))
+
+      injectGpuRetryOom()
+      withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+          table, tableSchema, readSchema, isSchemaCaseSensitive = true,
+          writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
+        withResource(result.getColumn(0).copyToHost()) { host =>
+          assertResult(expected)(host.getJavaString(0))
+        }
+      }
+    }
   }
 }
