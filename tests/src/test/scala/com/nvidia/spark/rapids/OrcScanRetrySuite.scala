@@ -32,9 +32,9 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
   private val timestampSchema = StructType(Seq(StructField("a", TimestampType)))
   private val longSchema = StructType(Seq(StructField("a", LongType)))
   private val shanghaiZone = ZoneId.of("Asia/Shanghai")
-  private val decodedShanghaiTimestampUs = 21_087_883_873L
-  private val expectedShanghaiTimestampUs = -7_713_116_127L
-  private val expectedShanghaiIntegerTimestampUs = -28_800_000_000L
+  private val decodedShanghaiTimestampUs = 21087883873L
+  private val expectedShanghaiTimestampUs = -7713116127L
+  private val expectedShanghaiIntegerTimestampUs = -28800000000L
 
   override def beforeEach(): Unit = {
     super.beforeEach()
@@ -124,26 +124,31 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
     assertGpuRetryOccurred()
   }
 
-  Seq(
-    ("CHAR", CharType(6), "abc   ", "abc"),
-    ("VARCHAR", VarcharType(6), "abc", "abc")
-  ).foreach { case (typeName, tableType, input, expected) =>
-    test(s"ORC $typeName schema evolution uses STRING for retry") {
-      val table = withResource(ColumnVector.fromStrings(input)) { strings =>
-        new Table(strings)
+  test("ORC CHAR and VARCHAR schema evolution uses STRING for retry") {
+    val table = withResource(ColumnVector.fromStrings("abc   ")) { charColumn =>
+      withResource(ColumnVector.fromStrings("abc")) { varcharColumn =>
+        new Table(charColumn, varcharColumn)
       }
-      val tableSchema = StructType(Seq(StructField("a", tableType)))
-      val readSchema = StructType(Seq(StructField("a", StringType)))
-
-      injectGpuRetryOom()
-      withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
-          table, tableSchema, readSchema, isSchemaCaseSensitive = true,
-          writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
-        withResource(result.getColumn(0).copyToHost()) { host =>
-          assertResult(expected)(host.getJavaString(0))
-        }
-      }
-      assertGpuRetryOccurred()
     }
+    val tableSchema = StructType(Seq(
+      StructField("char", CharType(6)),
+      StructField("varchar", VarcharType(6))))
+    val readSchema = StructType(Seq(
+      StructField("char", StringType),
+      StructField("varchar", StringType)))
+
+    injectGpuRetryOom()
+    withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
+        table, tableSchema, readSchema, isSchemaCaseSensitive = true,
+        writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
+      assertResult(2)(result.getNumberOfColumns)
+      withResource(result.getColumn(0).copyToHost()) { charHost =>
+        assertResult("abc")(charHost.getJavaString(0))
+      }
+      withResource(result.getColumn(1).copyToHost()) { varcharHost =>
+        assertResult("abc")(varcharHost.getJavaString(0))
+      }
+    }
+    assertGpuRetryOccurred()
   }
 }
