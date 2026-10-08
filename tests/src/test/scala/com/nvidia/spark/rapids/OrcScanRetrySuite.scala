@@ -18,6 +18,7 @@ package com.nvidia.spark.rapids
 
 import java.math.BigInteger
 import java.time.ZoneId
+import java.util.TimeZone
 
 import ai.rapids.cudf.{ColumnVector, DType, Table}
 import com.nvidia.spark.rapids.Arm.withResource
@@ -30,6 +31,10 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
 
   private val timestampSchema = StructType(Seq(StructField("a", TimestampType)))
   private val longSchema = StructType(Seq(StructField("a", LongType)))
+  private val shanghaiZone = ZoneId.of("Asia/Shanghai")
+  private val decodedShanghaiTimestampUs = 21_087_883_873L
+  private val expectedShanghaiTimestampUs = -7_713_116_127L
+  private val expectedShanghaiIntegerTimestampUs = -28_800_000_000L
 
   override def beforeEach(): Unit = {
     super.beforeEach()
@@ -40,39 +45,67 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
     try {
       GpuTimeZoneDB.shutdown()
     } finally {
+      RmmSpark.getAndResetNumRetryThrow(/*taskId*/ 1)
       super.afterEach()
     }
   }
 
   private def injectGpuRetryOom(): Unit = {
+    RmmSpark.getAndResetNumRetryThrow(/*taskId*/ 1)
     RmmSpark.forceRetryOOM(RmmSpark.getCurrentThreadId, 1,
       RmmSpark.OomInjectionType.GPU.ordinal, 0)
   }
 
-  private def assertRetrySucceeds(table: Table, tableSchema: StructType): Unit = {
+  private def assertGpuRetryOccurred(): Unit = {
+    val retryCount = RmmSpark.getAndResetNumRetryThrow(/*taskId*/ 1)
+    assert(retryCount > 0, s"expected at least one retry but saw $retryCount")
+  }
+
+  private def withDefaultTimeZone[T](zone: ZoneId)(body: => T): T = {
+    val originalTimeZone = TimeZone.getDefault
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone(zone))
+      body
+    } finally {
+      TimeZone.setDefault(originalTimeZone)
+    }
+  }
+
+  private def assertRetrySucceeds(
+      table: Table,
+      tableSchema: StructType,
+      expectedTimestampUs: Long): Unit = {
     injectGpuRetryOom()
     withResource(GpuOrcScan.rebaseAndEvolveSchemaWithRetryAndClose(
         table, tableSchema, timestampSchema, isSchemaCaseSensitive = true,
-        writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
+        writerTimezone = shanghaiZone, writerUsedProlepticGregorian = true)) { result =>
       assertResult(1)(result.getRowCount)
       assertResult(DType.TIMESTAMP_MICROSECONDS)(result.getColumn(0).getType)
+      withResource(result.getColumn(0).copyToHost()) { host =>
+        assertResult(expectedTimestampUs)(host.getLong(0))
+      }
     }
+    assertGpuRetryOccurred()
   }
 
   test("ORC timestamp rebase is retried on OOM") {
-    val table = withResource(ColumnVector.fromLongs(0L)) { longs =>
-      withResource(longs.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamps =>
-        new Table(timestamps)
+    withDefaultTimeZone(shanghaiZone) {
+      val table = withResource(ColumnVector.fromLongs(decodedShanghaiTimestampUs)) { longs =>
+        withResource(longs.castTo(DType.TIMESTAMP_MICROSECONDS)) { timestamps =>
+          new Table(timestamps)
+        }
       }
+      assertRetrySucceeds(table, timestampSchema, expectedShanghaiTimestampUs)
     }
-    assertRetrySucceeds(table, timestampSchema)
   }
 
   test("ORC integer-to-timestamp schema evolution is retried on OOM") {
-    val table = withResource(ColumnVector.fromLongs(0L)) { longs =>
-      new Table(longs)
+    withDefaultTimeZone(shanghaiZone) {
+      val table = withResource(ColumnVector.fromLongs(0L)) { longs =>
+        new Table(longs)
+      }
+      assertRetrySucceeds(table, longSchema, expectedShanghaiIntegerTimestampUs)
     }
-    assertRetrySucceeds(table, longSchema)
   }
 
   test("ORC decimal schema evolution uses the physical decimal type for retry") {
@@ -88,6 +121,7 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
         writerTimezone = ZoneId.of("UTC"), writerUsedProlepticGregorian = true)) { result =>
       assertResult(DType.create(DType.DTypeEnum.DECIMAL128, -6))(result.getColumn(0).getType)
     }
+    assertGpuRetryOccurred()
   }
 
   Seq(
@@ -109,6 +143,7 @@ class OrcScanRetrySuite extends RmmSparkRetrySuiteBase {
           assertResult(expected)(host.getJavaString(0))
         }
       }
+      assertGpuRetryOccurred()
     }
   }
 }
