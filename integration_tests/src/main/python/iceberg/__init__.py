@@ -23,6 +23,7 @@ from pyspark.sql.types import FloatType, DoubleType, BinaryType
 
 import pytest
 
+from asserts import assert_equal_with_local_sort
 from conftest import is_iceberg_rest_catalog, spark_jvm
 from data_gen import *
 from spark_session import is_iceberg_supported_spark, with_cpu_session, with_gpu_session
@@ -379,6 +380,43 @@ def _change_table(table_name, table_func: Callable[[SparkSession], None], messag
 
 def get_full_table_name(spark_tmp_table_factory):
     return f"default.{spark_tmp_table_factory.get()}"
+
+
+_ROW_LINEAGE_WRITE_CONF = {
+    **iceberg_write_enabled_conf,
+    "spark.rapids.sql.format.iceberg.v3.enabled": "true"
+}
+
+
+def assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory, setup_func, write_func, read_func):
+    base_table = get_full_table_name(spark_tmp_table_factory)
+    cpu_table = f"{base_table}_cpu"
+    gpu_table = f"{base_table}_gpu"
+
+    def setup_tables(spark):
+        setup_func(spark, cpu_table)
+        setup_func(spark, gpu_table)
+
+    def next_row_id(spark, table):
+        iceberg_table = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table)
+        return iceberg_table.operations().current().nextRowId()
+
+    with_cpu_session(setup_tables)
+    with_cpu_session(lambda spark: write_func(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    with_gpu_session(lambda spark: write_func(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+
+    cpu_data = with_cpu_session(
+        lambda spark: read_func(spark, cpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
+    gpu_data = with_cpu_session(
+        lambda spark: read_func(spark, gpu_table).collect(), conf=_ROW_LINEAGE_WRITE_CONF)
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+    cpu_next_row_id = with_cpu_session(
+        lambda spark: next_row_id(spark, cpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    gpu_next_row_id = with_cpu_session(
+        lambda spark: next_row_id(spark, gpu_table), conf=_ROW_LINEAGE_WRITE_CONF)
+    assert cpu_next_row_id == gpu_next_row_id
 
 
 def schema_to_ddl(spark, schema):

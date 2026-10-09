@@ -18,12 +18,14 @@ import pytest
 from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
     assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
-from data_gen import gen_df, copy_and_update
+from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
-    iceberg_format_versions, create_iceberg_table, iceberg_base_table_cols, iceberg_gens_list,
-    get_full_table_name, iceberg_full_gens_list, iceberg_write_enabled_conf,
-    iceberg_unsupported_mark, _build_tblprops, full_coverage_partition_transforms,
-    assert_iceberg_files_use_codec, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON)
+    assert_gpu_and_cpu_lineage_writes_are_equal, iceberg_format_versions, create_iceberg_table,
+    iceberg_base_table_cols, iceberg_gens_list, get_full_table_name, iceberg_full_gens_list,
+    iceberg_write_enabled_conf, iceberg_unsupported_mark, _build_tblprops,
+    full_coverage_partition_transforms, assert_iceberg_files_use_codec, supports_iceberg_v3,
+    ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -64,6 +66,35 @@ def test_insert_into_unpartitioned_table(format_version, spark_tmp_table_factory
     do_test_insert_into_table_sql(
         spark_tmp_table_factory,
         lambda table_name: create_iceberg_table(table_name, table_prop=table_prop))
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(
+    not supports_iceberg_row_lineage_inheritance,
+    reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
+def test_iceberg_v3_row_lineage_append(spark_tmp_table_factory):
+    def setup_iceberg_table(spark, table):
+        spark.sql(f"CREATE TABLE {table} (id BIGINT) USING ICEBERG "
+                  f"TBLPROPERTIES ('format-version' = '2')")
+        row_lineage_df(spark, start=1).writeTo(table).append()
+        spark.sql(
+            f"ALTER TABLE {table} SET TBLPROPERTIES ("
+            "'format-version' = '3', "
+            "'write.parquet.row-group-size-bytes' = '4096', "
+            "'read.split.target-size' = '4096', "
+            "'read.split.open-file-cost' = '0')")
+
+    def append_data(spark, table):
+        row_lineage_df(
+            spark, start=DEFAULT_DATA_GEN_LENGTH + 1).writeTo(table).append()
+
+    assert_gpu_and_cpu_lineage_writes_are_equal(
+        spark_tmp_table_factory,
+        setup_iceberg_table,
+        append_data,
+        lambda spark, table: spark.sql(
+            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table}"))
 
 
 @iceberg
