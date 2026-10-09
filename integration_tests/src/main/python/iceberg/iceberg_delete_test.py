@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import pytest
+from pyspark.sql import functions as f
 
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write_sql)
@@ -348,16 +349,21 @@ def test_iceberg_v3_row_lineage_delete_leading_rows(spark_tmp_table_factory, rea
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 @pytest.mark.parametrize('delete_mode', ['copy-on-write', 'merge-on-read'])
-def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(spark_tmp_table_factory, delete_mode):
+@pytest.mark.parametrize('partitioned', [False, True], ids=['unpartitioned', 'partitioned'])
+def test_iceberg_v3_row_lineage_gpu_delete_leading_rows(
+        spark_tmp_table_factory, delete_mode, partitioned):
     do_delete_test(
         spark_tmp_table_factory,
         lambda spark, table: spark.sql(f"DELETE FROM {table} WHERE id < 3"),
-        data_gen_func=lambda spark: row_lineage_df(spark, start=1),
+        # DELETE removes one leading row from each partition and leaves surviving rows in both.
+        data_gen_func=lambda spark: (
+            row_lineage_df(spark, start=1).withColumn("p", f.col("id") % 2)),
+        partition_col_sql="p" if partitioned else None,
         table_properties={"format-version": "3"},
         conf=copy_and_update(
             iceberg_delete_v3_enabled_conf, {"spark.sql.shuffle.partitions": "1"}),
         read_func=lambda spark, table: spark.sql(
-            f"SELECT id, _pos, _row_id, _last_updated_sequence_number FROM {table}"),
+            f"SELECT id, p, _pos, _row_id, _last_updated_sequence_number FROM {table}"),
         write_order="id", format_version="3", delete_mode=delete_mode)
 
 

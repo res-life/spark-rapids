@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import pytest
+from pyspark.sql import functions as f
 
 from asserts import (assert_equal_with_local_sort, assert_gpu_and_cpu_are_equal_collect,
                      assert_gpu_fallback_write_sql)
@@ -364,31 +365,38 @@ def test_iceberg_v3_row_lineage_merge_update_insert(
     not supports_iceberg_row_lineage_inheritance,
     reason=ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON)
 @pytest.mark.parametrize('merge_mode', ['copy-on-write', 'merge-on-read'])
-def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory, merge_mode):
+@pytest.mark.parametrize('partitioned', [False, True], ids=['unpartitioned', 'partitioned'])
+def test_iceberg_v3_row_lineage_gpu_merge_update_insert(
+        spark_tmp_table_factory, merge_mode, partitioned):
     base_table = get_full_table_name(spark_tmp_table_factory)
     cpu_table = f"{base_table}_cpu"
     gpu_table = f"{base_table}_gpu"
     source_view = spark_tmp_table_factory.get()
 
     def setup_iceberg_tables(spark):
+        partition_clause = "PARTITIONED BY (p) " if partitioned else ""
         for table in [cpu_table, gpu_table]:
             spark.sql(
-                f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
+                f"CREATE TABLE {table} (id BIGINT, v BIGINT, p BIGINT) USING ICEBERG "
+                f"{partition_clause}"
                 "TBLPROPERTIES ('format-version' = '3', "
                 f"'write.merge.mode' = '{merge_mode}')")
             spark.sql(f"ALTER TABLE {table} WRITE ORDERED BY id").collect()
-            row_lineage_df(spark, with_value=True).writeTo(table).append()
+            # Both partitions receive rows from the updated and inserted ID ranges.
+            row_lineage_df(spark, with_value=True) \
+                .withColumn("p", f.col("id") % 2).writeTo(table).append()
 
     def merge(spark, table):
-        row_lineage_df(
+        source = row_lineage_df(
             spark,
             start=DEFAULT_DATA_GEN_LENGTH // 2,
             with_value=True,
-            value_start=DEFAULT_DATA_GEN_LENGTH).createOrReplaceTempView(source_view)
+            value_start=DEFAULT_DATA_GEN_LENGTH).withColumn("p", f.col("id") % 2)
+        source.createOrReplaceTempView(source_view)
         spark.sql(
             f"MERGE INTO {table} t USING {source_view} s ON t.id = s.id "
             "WHEN MATCHED THEN UPDATE SET v = s.v "
-            "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v)").collect()
+            "WHEN NOT MATCHED THEN INSERT (id, v, p) VALUES (s.id, s.v, s.p)").collect()
 
     with_cpu_session(setup_iceberg_tables)
     conf = copy_and_update(
@@ -398,7 +406,7 @@ def test_iceberg_v3_row_lineage_gpu_merge_update_insert(spark_tmp_table_factory,
         gpu_table,
         merge,
         lambda spark, table: spark.sql(
-            f"SELECT id, v, _row_id, _last_updated_sequence_number FROM {table}"),
+            f"SELECT id, v, p, _row_id, _last_updated_sequence_number FROM {table}"),
         conf, format_version="3", merge_mode=merge_mode)
 
 
