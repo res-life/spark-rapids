@@ -38,7 +38,7 @@ def _is_write_node(name):
 @allow_non_gpu('CreateTableExec')
 @iceberg
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
-def test_v2_write_sql_ui_shows_gpu_child_operators(format_version, spark_tmp_table_factory):
+def test_write_sql_ui_shows_gpu_child_operators(format_version, spark_tmp_table_factory):
     """Regression test: the SQL UI / History Server must show the GPU child
     operators under a DataSource V2 table write (GpuV2TableWriteExec), not just
     the write node. GpuV2TableWriteExec executes a columnar copy of the query's
@@ -116,7 +116,7 @@ def test_v2_write_sql_ui_shows_gpu_child_operators(format_version, spark_tmp_tab
 @allow_non_gpu('CreateTableExec')
 @iceberg
 @pytest.mark.parametrize("format_version", iceberg_format_versions)
-def test_v2_write_sql_ui_gpu_child_operator_metrics_are_visible(format_version, spark_tmp_table_factory):
+def test_write_sql_ui_gpu_child_operator_metrics_are_visible(format_version, spark_tmp_table_factory):
     """Regression test: the SQL UI / History Server must show metric values (op
     times) on the GPU child operators of a DataSource V2 table write, not just
     their names. GpuV2TableWriteExec executes a columnar copy of the query's
@@ -144,7 +144,7 @@ def test_v2_write_sql_ui_gpu_child_operator_metrics_are_visible(format_version, 
 
         spark.sql(f"CREATE TABLE {table_name} (grp BIGINT, cnt BIGINT) "
                   f"USING ICEBERG {iceberg_table_properties_sql(format_version)}")
-        # See test_v2_write_sql_ui_shows_gpu_child_operators: drain the listener bus
+        # See test_write_sql_ui_shows_gpu_child_operators: drain the listener bus
         # and scope to executions created by our own INSERT (the IT Spark session is
         # shared, so the status store accumulates executions from earlier tests).
         spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(30000)
