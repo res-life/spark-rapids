@@ -21,11 +21,10 @@ from datetime import date, datetime, timezone
 from marks import *
 from spark_session import *
 
-# Using timestamps from 1970 to work around a cudf ORC bug
-# https://github.com/NVIDIA/spark-rapids/issues/140.
+# Timestamps before 1590 remain excluded by https://github.com/rapidsai/cudf/issues/11691.
 # Using a limited upper end for timestamps to avoid INT96 overflow on Parquet.
 def _restricted_timestamp(nullable=True):
-    return TimestampGen(start=datetime(1970, 1, 1, tzinfo=timezone.utc),
+    return TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc),
                         end=datetime(2262, 4, 11, tzinfo=timezone.utc),
                         nullable=nullable)
 
