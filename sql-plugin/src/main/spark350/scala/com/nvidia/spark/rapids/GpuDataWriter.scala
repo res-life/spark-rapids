@@ -24,6 +24,16 @@
 {"spark": "357"}
 {"spark": "358"}
 {"spark": "359"}
+{"spark": "400"}
+{"spark": "401"}
+{"spark": "402"}
+{"spark": "403"}
+{"spark": "404"}
+{"spark": "411"}
+{"spark": "412"}
+{"spark": "413"}
+{"spark": "420"}
+{"spark": "500"}
 spark-rapids-shim-json-lines ***/
 
 package com.nvidia.spark.rapids
@@ -37,8 +47,7 @@ trait GpuDataWriter extends DataWriter[ColumnarBatch] {
   override def write(record: ColumnarBatch): Unit
 
   def write(metadata: ColumnarBatch, record: ColumnarBatch): Unit = {
-    throw new UnsupportedOperationException(
-      "Writing records with metadata is not supported before Spark 4.0")
+    throw new UnsupportedOperationException("Writing records with metadata is not supported")
   }
 }
 
