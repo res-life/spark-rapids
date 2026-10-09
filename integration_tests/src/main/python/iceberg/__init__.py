@@ -63,7 +63,13 @@ iceberg_cow_format_versions = [
 
 
 def with_iceberg_format_versions(parameters):
-    """Cross existing parameter rows with v2/v3, preserving collection-time marks."""
+    """Prepend Iceberg v2 and v3 to every row in an existing DML parameter matrix.
+
+    Input rows may be scalar values, tuples, or ``pytest.param`` instances. Existing marks are
+    preserved, and existing IDs receive a ``v2-`` or ``v3-`` prefix. V3 rows are skipped when the
+    runtime lacks format-v3 support; copy-on-write v3 rows also allow the expected CPU
+    ``BatchScanExec`` used for file pruning.
+    """
     result = []
     for parameter in parameters:
         if hasattr(parameter, "values"):
