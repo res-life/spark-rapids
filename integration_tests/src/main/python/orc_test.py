@@ -476,6 +476,7 @@ orc_pred_push_gens = [
         # Once https://github.com/NVIDIA/spark-rapids/issues/139 is fixed replace this with
         # date_gen
         DateGen(start=date(1590, 1, 1)),
+        # ORC writer issue #140 is fixed, but the reader is still limited by issue #131.
         orc_timestamp_gen]
 orc_pred_push_test_matrix = generate_reduced_test_matrix({
     'orc_gen': {'values': orc_pred_push_gens, 'is_primary_dimension': True},
