@@ -92,7 +92,7 @@ case class GpuBatchScanExec(
     }
 
     if (dataSourceFilters.nonEmpty) {
-      val originalPartitioning = outputPartitioning
+      val originalPartitioning = super.outputPartitioning
 
       // the cast is safe as runtime filters are only assigned if the scan can be filtered
       val filterableScan = scan.asInstanceOf[SupportsRuntimeV2Filtering]
@@ -257,7 +257,8 @@ case class GpuBatchScanExec(
       }
 
       // Use the finalized partitions so padded and replicated inputs match outputPartitioning.
-      new GpuDataSourceRDD(sparkContext, finalPartitions, readerFactory)
+      new GpuDataSourceRDD(
+        sparkContext, finalPartitions, readerFactory, includeRefreshHint = false)
     }
     postDriverMetrics()
     rdd

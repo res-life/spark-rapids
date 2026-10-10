@@ -82,7 +82,7 @@ case class ColumnarOverrideRules(sparkSession: SparkSession) extends ColumnarRul
 
 object RapidsPluginUtils extends Logging {
   val CUDF_PROPS_FILENAME = "cudf-java-version-info.properties"
-  val JNI_PROPS_FILENAME = "spark-rapids-jni-version-info.properties"
+  val JNI_PROPS_FILENAME = "cudf-spark-jni-version-info.properties"
   val PLUGIN_PROPS_FILENAME = "rapids4spark-version-info.properties"
   private val PRIVATE_PROPS_FILENAME = "cudf-spark-private-version-info.properties"
 
@@ -155,11 +155,11 @@ object RapidsPluginUtils extends Logging {
     val possibleRapidsJarURLs = classloader.getResources(propName).asScala.toSet.toSeq.filter {
       url => {
         val urlPath = url.toString
-        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.10.0-spark341.jar,
+        // Filter out submodule jars, e.g. rapids-4-spark-aggregator_2.12-26.12.0-spark341.jar,
         // and files stored under subdirs of '!/', e.g.
-        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.12.0-cuda12.jar!/spark330/rapids4spark-version-info.properties
         // We only want to find the main jar, e.g.
-        // rapids-4-spark_2.12-26.10.0-cuda12.jar!/rapids4spark-version-info.properties
+        // rapids-4-spark_2.12-26.12.0-cuda12.jar!/rapids4spark-version-info.properties
         !urlPath.contains("rapids-4-spark-") && urlPath.endsWith("!/" + propName)
       }
     }
@@ -210,7 +210,7 @@ object RapidsPluginUtils extends Logging {
 
   def detectMultipleJars(conf: RapidsConf): Unit = {
     detectMultipleJar(PLUGIN_PROPS_FILENAME, "rapids-4-spark", conf)
-    detectMultipleJar(JNI_PROPS_FILENAME, "spark-rapids-jni", conf)
+    detectMultipleJar(JNI_PROPS_FILENAME, "cudf-spark-jni", conf)
     detectMultipleJar(CUDF_PROPS_FILENAME, "cudf", conf)
   }
 

@@ -37,7 +37,10 @@ spark-rapids/
 │   ├── src/main/scala/            # Main Scala sources
 │   │   └── com/nvidia/spark/rapids/
 │   │       ├── GpuOverrides.scala       # GPU operator registry & fallback rules
-│   │       ├── RapidsConf.scala         # Configuration keys & defaults
+│   │       ├── RapidsConf.scala         # Configuration registry, enums, and accessors
+│   │       ├── RapidsConfEntries.scala  # General, test, and debug configuration entries
+│   │       ├── RapidsConfResourceEntries.scala # Resource and memory configuration entries
+│   │       ├── RapidsConfSqlEntries.scala # SQL and file-format configuration entries
 │   │       ├── Arm.scala                # Resource management (withResource/closeOnExcept)
 │   │       ├── RmmRapidsRetryIterator.scala  # OOM retry framework
 │   │       ├── SpillableColumnarBatch.scala  # Spillable GPU batch wrapper
@@ -63,6 +66,20 @@ spark-rapids/
 ```
 
 ## Coding Conventions
+
+### Configuration Entries
+
+All plugin configuration properties are exposed through the `RapidsConf` object, but place
+new declarations according to category:
+
+- Add resource, memory, metrics, and profiler entries to `RapidsConfResourceEntries.scala`.
+- Add SQL and file-format entries to `RapidsConfSqlEntries.scala`.
+- Add test, debug, and remaining general entries to `RapidsConfEntries.scala`.
+
+Keep enumeration definitions and the configuration registry in `RapidsConf.scala` so their
+singleton ownership and initialization order remain stable. See
+[`Adding Configuration Properties`](docs/dev/README.md#adding-configuration-properties) for
+the complete contributor guidance.
 
 ### Scala/Java
 
