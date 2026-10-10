@@ -35,7 +35,7 @@ import org.apache.spark.sql.rapids.shims.TrampolineConnectShims.SparkSession
 
 class OrcWriterTimezoneSuite extends SparkQueryCompareTestSuite {
   private val timezones =
-    Seq("UTC", "Asia/Shanghai", "America/New_York", "US/Pacific", "PST")
+    Seq("UTC", "Asia/Shanghai", "America/New_York", "US/Pacific", "EST", "PST")
 
   private def dataFrame(spark: SparkSession): DataFrame = {
     import spark.implicits._
@@ -132,7 +132,7 @@ class OrcWriterTimezoneSuite extends SparkQueryCompareTestSuite {
     }
   }
 
-  Seq("GMT+05:30", "Etc/GMT+5", "EST", "SystemV/EST5").foreach { unsupportedTimezone =>
+  Seq("GMT+05:30", "SystemV/EST5").foreach { unsupportedTimezone =>
     test(s"ORC timestamp writes fall back for JVM timezone $unsupportedTimezone") {
       val originalTimezone = TimeZone.getDefault
       val conf = new SparkConf().set(RapidsConf.TEST_ALLOWED_NONGPU.key,

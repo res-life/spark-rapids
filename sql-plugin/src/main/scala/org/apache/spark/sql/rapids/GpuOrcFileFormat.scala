@@ -17,7 +17,8 @@
 package org.apache.spark.sql.rapids
 
 import java.nio.file.{Files, Paths}
-import java.time.ZoneId
+import java.time.{ZoneId, ZoneOffset}
+import java.util.TimeZone
 
 import scala.collection.JavaConverters._
 
@@ -64,18 +65,19 @@ object GpuOrcFileFormat extends Logging {
 
   private[rapids] def writerTimezoneId: String = ZoneId.systemDefault() match {
     case timezone if GpuOverrides.isUTCTimezone(timezone) => "UTC"
+    // Java resolves EST/MST/HST to offsets, but cuDF can resolve their original TZif names.
+    case _: ZoneOffset => TimeZone.getDefault.getID
     case timezone => timezone.getId
   }
 
-  private def supportsWriterTimezone(timezone: ZoneId): Boolean = {
+  private def supportsWriterTimezone(timezone: String): Boolean = {
     def resolvesToFile(name: String, visited: Set[String]): Boolean = {
       Files.isRegularFile(Paths.get("/usr/share/zoneinfo", name)) ||
         (!visited.contains(name) && writerTimezoneAliases.get(name).exists { target =>
           resolvesToFile(target, visited + name)
         })
     }
-    GpuOverrides.isUTCTimezone(timezone) ||
-      (!timezone.getRules.isFixedOffset && resolvesToFile(timezone.getId, Set.empty))
+    timezone == "UTC" || resolvesToFile(timezone, Set.empty)
   }
 
   def isSparkOrcFormat(cls: Class[_ <: FileFormat]): Boolean = {
@@ -124,12 +126,11 @@ object GpuOrcFileFormat extends Logging {
         "writer does not emit calendar metadata")
     }
 
-    // cuDF resolves writer timezones under /usr/share/zoneinfo. Non-UTC fixed offsets and some
-    // legacy IDs (for example, EST and SystemV/EST5) are not compatible with its ORC timestamp
-    // encoding, so keep them on the CPU.
+    // cuDF resolves writer timezones under /usr/share/zoneinfo. Java custom offsets and some
+    // legacy IDs (for example, SystemV/EST5) do not name TZif files, so keep them on the CPU.
     if (types.exists(GpuOverrides.isOrContainsTimestamp) &&
-        !supportsWriterTimezone(ZoneId.systemDefault())) {
-      meta.willNotWorkOnGpu("Writing ORC timestamps requires a non-fixed named JVM timezone " +
+        !supportsWriterTimezone(writerTimezoneId)) {
+      meta.willNotWorkOnGpu("Writing ORC timestamps requires a named JVM timezone " +
         s"supported by the system timezone database: ${ZoneId.systemDefault()}")
     }
 
