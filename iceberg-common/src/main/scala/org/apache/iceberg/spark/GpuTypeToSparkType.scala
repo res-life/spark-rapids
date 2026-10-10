@@ -81,11 +81,43 @@ object GpuTypeToSparkType {
  */
 class GpuTypeToSparkType extends TypeToSparkType {
   private val nestedIdsStack = mutable.ArrayBuffer.empty[Option[String]]
+  private val subtreeStarts = mutable.ArrayBuffer.empty[Int]
 
   private def pushNested(nested: Option[String]): Unit = nestedIdsStack += nested
 
   private def popNested(): Option[String] =
     nestedIdsStack.remove(nestedIdsStack.length - 1)
+
+  private def beforeSubtree(): Unit = subtreeStarts += nestedIdsStack.length
+
+  private def afterSubtree(): Unit = {
+    val start = subtreeStarts.remove(subtreeStarts.length - 1)
+    val resultCount = nestedIdsStack.length - start
+    if (resultCount == 0) {
+      // Iceberg may add non-primitive leaf types, such as Variant, without routing them
+      // through primitive(). They do not have nested field IDs but still need a stack entry.
+      pushNested(None)
+    } else {
+      require(resultCount == 1,
+        s"Expected one nested-id result for an Iceberg type subtree, found $resultCount")
+    }
+  }
+
+  override def beforeField(field: Types.NestedField): Unit = beforeSubtree()
+
+  override def afterField(field: Types.NestedField): Unit = afterSubtree()
+
+  override def beforeListElement(element: Types.NestedField): Unit = beforeSubtree()
+
+  override def afterListElement(element: Types.NestedField): Unit = afterSubtree()
+
+  override def beforeMapKey(key: Types.NestedField): Unit = beforeSubtree()
+
+  override def afterMapKey(key: Types.NestedField): Unit = afterSubtree()
+
+  override def beforeMapValue(value: Types.NestedField): Unit = beforeSubtree()
+
+  override def afterMapValue(value: Types.NestedField): Unit = afterSubtree()
 
   private def jsonOrNone(builder: MetadataBuilder): Option[String] = {
     val json = builder.build().json
