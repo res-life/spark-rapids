@@ -270,6 +270,10 @@ def test_write_round_trip_nullable_struct(spark_tmp_path, gen, orc_impl):
                 # once this is fixed
                 'spark.rapids.sql.format.orc.write.boolType.enabled' : True})
 
+# Spark 3.3's Hive storage API cannot safely convert pre-epoch timestamps while partition
+# files are read concurrently. The single-file writer tests above retain that coverage.
+orc_part_timestamp_start = datetime(
+        1970 if is_before_spark_340() else 1590, 1, 1, tzinfo=timezone.utc)
 orc_part_write_gens = [
         # Add back boolean_gen when  https://github.com/rapidsai/cudf/issues/6763 is fixed
         byte_gen, short_gen, int_gen, long_gen,
@@ -279,7 +283,7 @@ orc_part_write_gens = [
         # date_gen
         pytest.param(DateGen(start=date(1590, 1, 1)),
                      marks=allow_non_gpu_conditional(True, *orc_date_writer_allow)),
-        TimestampGen(start=datetime(1590, 1, 1, tzinfo=timezone.utc))]
+        TimestampGen(start=orc_part_timestamp_start)]
 
 # There are race conditions around when individual files are read in for partitioned data
 @ignore_order
