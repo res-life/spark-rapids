@@ -1269,12 +1269,17 @@ def test_csv_prefer_date_with_infer_schema(spark_tmp_path):
         exist_clazz = 'GpuFileSourceScanExec'
         non_exist_clazz = 'FileSourceScanExec'
 
+    # Use the writer's date format to keep this test focused on preferDate inference.
+    # GPU support for detected variable-width formats is tracked in
+    # https://github.com/NVIDIA/cudf-spark/issues/16540.
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.read.option("inferSchema", "true").csv(data_path),
+        lambda spark: spark.read.option("inferSchema", "true")
+            .option("dateFormat", "yyyy-MM-dd").csv(data_path),
         exist_classes = exist_clazz,
         non_exist_classes = non_exist_clazz)
     assert_cpu_and_gpu_are_equal_collect_with_capture(
-        lambda spark: spark.read.option("inferSchema", "true").option("preferDate", "false").csv(data_path),
+        lambda spark: spark.read.option("inferSchema", "true")
+            .option("dateFormat", "yyyy-MM-dd").option("preferDate", "false").csv(data_path),
         exist_classes = exist_clazz,
         non_exist_classes = non_exist_clazz)
 
