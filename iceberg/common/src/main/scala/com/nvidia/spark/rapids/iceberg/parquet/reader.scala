@@ -173,9 +173,21 @@ object GpuIcebergParquetReader {
         val isMap = annotation.isInstanceOf[MapLogicalTypeAnnotation]
         val hasListWrapper = annotation.isInstanceOf[ListLogicalTypeAnnotation] &&
           !(ParquetSchemaUtil.determineListElementType(group) eq group.getType(0))
-        group.withNewFields(group.getFields.asScala.map { child =>
+        val children = group.getFields.asScala.map { child =>
           physicalHelpers(child, isMap || hasListWrapper)
-        }.asJava)
+        }
+        if (annotation != null && annotation.toOriginalType() == null &&
+            (field.getId == null || requiredSchema.findField(field.getId.intValue()) == null)) {
+          // Opaque logical groups such as VARIANT are only needed for their validity here.
+          // Decode their retained children as an ordinary struct. LIST/MAP annotations have
+          // legacy original types and must remain intact to preserve collection structure.
+          val builder = ShadedTypes.buildGroup(group.getRepetition)
+          children.foreach(child => builder.addField(child))
+          Option(field.getId).foreach(id => builder.id(id.intValue()))
+          builder.named(field.getName)
+        } else {
+          group.withNewFields(children.asJava)
+        }
       } else if (field.getId != null &&
           requiredSchema.findField(field.getId.intValue()) != null) {
         field

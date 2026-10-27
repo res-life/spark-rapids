@@ -1223,6 +1223,51 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  test("Opaque logical groups used as validity helpers decode physically") {
+    val variant = try {
+      classOf[LogicalTypeAnnotation].getMethod("variantType", java.lang.Byte.TYPE)
+        .invoke(null, Byte.box(1.toByte)).asInstanceOf[LogicalTypeAnnotation]
+    } catch {
+      case _: NoSuchMethodException => cancel("Parquet runtime does not expose VARIANT")
+    }
+    val helper = ShadedTypes.optionalGroup()
+      .addField(ShadedTypes.required(ShadedPrimitiveTypeName.BINARY).named("metadata"))
+      .addField(ShadedTypes.required(ShadedPrimitiveTypeName.BINARY).named("value"))
+      .as(variant).id(2).named("legacy")
+    val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
+      ShadedTypes.optionalGroup().addField(helper).id(1).named("s")).asJava)
+    val defaultField = fieldWithDefaults(
+      3, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "s", Types.StructType.of(defaultField)))
+    val retained = GpuIcebergParquetReader.preserveStructValidity(
+      fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
+    val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+    val physicalHelper = physical.getType("s", "legacy").asGroupType()
+    assert(physicalHelper.getLogicalTypeAnnotation == null)
+    assert(physicalHelper.getId.intValue() == 2)
+    assert(physicalHelper.getFieldCount == 1)
+    assert(helper.getLogicalTypeAnnotation == variant)
+    val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
+      .convert(unshade(physical))
+    assert(converted("s").dataType.asInstanceOf[StructType]("legacy")
+      .dataType.asInstanceOf[StructType]("metadata").dataType == BinaryType)
+    val (info, shaded) = createParquetInfo(physical)
+    val processor = new GpuParquetReaderPostProcessor(
+      info, new JHashMap[Integer, Any](), expectedSchema, shaded, Map.empty)
+    assert(processor.displayActionPlan().contains("FillDefault(fieldId=3, int)"))
+
+    val projectedVariant = org.apache.iceberg.SchemaParser.fromJson(
+      """{"type":"struct","fields":[{"id":1,"name":"s","required":false,
+        |"type":{"type":"struct","fields":[{"id":2,"name":"legacy",
+        |"required":false,"type":"variant"}]}}]}""".stripMargin)
+    val projected = GpuIcebergParquetReader.physicalHelperSchema(fileSchema, projectedVariant)
+    assert(projected.getType("s", "legacy").getLogicalTypeAnnotation == variant)
+  }
+
   test("Unmapped validity helpers cannot bind to requested field IDs") {
     val defaultField = fieldWithDefaults(
       1000, "added", Types.IntegerType.get(), required = false,

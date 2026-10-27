@@ -22,9 +22,9 @@ from asserts import assert_cpu_and_gpu_are_equal_collect_with_capture, \
 from conftest import is_iceberg_remote_catalog, spark_jvm
 from data_gen import LongGen, StructGen, UniqueLongGen, disable_parquet_field_id_write, gen_df
 from iceberg import _build_tblprops, get_full_table_name, iceberg_unsupported_mark, \
-    rapids_reader_types, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
+    rapids_reader_types, runtime_iceberg_version, supports_iceberg_v3, ICEBERG_V3_UNSUPPORTED_REASON
 from marks import allow_non_gpu, iceberg, ignore_order
-from spark_session import with_cpu_session
+from spark_session import is_spark_400_or_later, with_cpu_session
 
 pytestmark = iceberg_unsupported_mark
 
@@ -901,3 +901,49 @@ def test_iceberg_legacy_list_initial_defaults(
             conf={'spark.rapids.sql.format.iceberg.v3.enabled': str(format_version == '3').lower(),
                   'spark.rapids.sql.format.parquet.reader.type': reader_type},
             result_canonicalize_func_before_compare=_check_default_rows(expected))
+
+
+@iceberg
+@pytest.mark.skipif(
+    not is_spark_400_or_later() or not supports_iceberg_v3 or
+    tuple(int(part) for part in runtime_iceberg_version.split('.')[:2]) < (1, 11),
+    reason='Iceberg VARIANT writes require Spark 4.x and Iceberg 1.11 or later')
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@ignore_order(local=True)
+def test_iceberg_v3_default_with_unprojected_variant(spark_tmp_table_factory, reader_type):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        props = _build_tblprops({'format-version': '3'})
+        props_sql = ', '.join(f"'{key}' = '{value}'" for key, value in props.items())
+        spark.sql(f'CREATE TABLE {table_name} (id INT, s STRUCT<present: VARIANT>) '
+                  f'USING ICEBERG TBLPROPERTIES ({props_sql})')
+        # Distinguish a null parent, SQL-null Variant, JSON null, and a non-null object.
+        spark.sql(
+            'SELECT id, CASE WHEN id = 0 THEN NULL ELSE '
+            "named_struct('present', parse_json(text)) END AS s "
+            "FROM VALUES (0, 'null'), (1, CAST(NULL AS STRING)), "
+            "(2, 'null'), (3, '{\"a\":1}') AS v(id, text)") \
+            .coalesce(1).writeTo(table_name).append()
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        table.updateSchema().addColumn(
+            's', 'added', jvm.org.apache.iceberg.types.Types.IntegerType.get(),
+            jvm.org.apache.iceberg.expressions.Literal.of(11)).commit()
+        spark.sql(f'REFRESH TABLE {table_name}')
+
+    with_cpu_session(setup)
+
+    def read(spark):
+        spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
+                       spark.conf.get('spark.rapids.sql.enabled') == 'true')
+        return spark.sql(f'SELECT id, s.added FROM {table_name}')
+
+    assert_gpu_and_cpu_are_equal_collect(
+        read,
+        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+              'spark.rapids.sql.format.parquet.reader.type': reader_type,
+              'spark.sql.iceberg.vectorization.enabled': 'false'},
+        result_canonicalize_func_before_compare=_check_default_rows([
+            (0, None), (1, 11), (2, 11), (3, 11)]))
