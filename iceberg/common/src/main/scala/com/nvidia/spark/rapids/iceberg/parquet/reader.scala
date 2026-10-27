@@ -42,7 +42,8 @@ import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaDa
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{
   GroupType => ShadedGroupType,
   MessageType => ShadedMessageType,
-  Type => ShadedType
+  Type => ShadedType,
+  Types => ShadedTypes
 }
 import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.MapLogicalTypeAnnotation
 import org.apache.parquet.hadoop.metadata.BlockMetaData
@@ -149,6 +150,32 @@ case class GpuIcebergParquetReaderConf(
 )
 
 object GpuIcebergParquetReader {
+  /** Decode helper leaves by physical type: only their definition/repetition levels are used. */
+  private[iceberg] def physicalHelperSchema(
+      readSchema: ShadedMessageType,
+      requiredSchema: Schema): ShadedMessageType = {
+    def physicalHelpers(field: ShadedType): ShadedType = {
+      if (!field.isPrimitive) {
+        val group = field.asGroupType()
+        group.withNewFields(group.getFields.asScala.map(physicalHelpers).asJava)
+      } else if (field.getId != null &&
+          requiredSchema.findField(field.getId.intValue()) != null) {
+        field
+      } else {
+        // An unprojected UUID, TIME or nanosecond timestamp can carry a parent's validity,
+        // although Spark's Parquet schema converter cannot decode its logical type.
+        val primitive = field.asPrimitiveType()
+        val builder = ShadedTypes.primitive(primitive.getPrimitiveTypeName, field.getRepetition)
+          .length(primitive.getTypeLength)
+        Option(field.getId).foreach(id => builder.id(id.intValue()))
+        builder.named(field.getName)
+      }
+    }
+
+    new ShadedMessageType(readSchema.getName,
+      readSchema.getFields.asScala.map(physicalHelpers).asJava)
+  }
+
   private[iceberg] def hasMissingDefaultFilter(
       fileSchema: ShadedMessageType,
       requiredSchema: Schema,
@@ -309,7 +336,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
           requiredSchema.findField(ShimUtils.rowIdFieldId()) != null
       }
       val initialProjection = projectSchema(fileSchema, requiredSchema)
-      val (typeWithIds, fileReadSchema) =
+      val (typeWithIds, projectedSchema) =
         // cuDF's deletion-vector Parquet path needs at least one physical data column. Force one
         // into metadata-only and count projections so native row-index filtering can determine
         // the surviving row count; the post-processor drops it from the requested output.
@@ -322,6 +349,9 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         } else {
           initialProjection
         }
+      // Use the original required schema so deletion-vector helpers are also decoded physically.
+      val fileReadSchema =
+        GpuIcebergParquetReader.physicalHelperSchema(projectedSchema, requiredSchema)
       val filteredBlocks = filterRowGroups(reader, requiredSchema, typeWithIds, file.filter)
       val blockFirstRowIndices: Seq[Long] = if (needsRowPosition || hasDeletionVector) {
         // `_pos` and inherited `_row_id` are file-global. When file.split is set the reader is
@@ -377,10 +407,7 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
         sqlConf.isParquetBinaryAsString,
         sqlConf.isParquetINT96AsTimestamp,
         conf.caseSensitive,
-        // Projected TIMESTAMP_NTZ fields are rejected during planning. A retained physical
-        // helper can still have that type; decode it as a timestamp to carry parent validity.
-        // The post-processor removes the helper before producing the requested output.
-        false,
+        sqlConf.parquetInferTimestampNTZEnabled,
         sqlConf.legacyParquetNanosAsLong
       ).convert(unshade(fileReadSchema))
 

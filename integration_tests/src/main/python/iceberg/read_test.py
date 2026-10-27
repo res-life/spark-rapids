@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -621,3 +622,120 @@ def test_iceberg_v3_default_with_unprojected_timestamp_ntz(spark_tmp_table_facto
         conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
               'spark.rapids.sql.format.parquet.reader.type': reader_type},
         result_canonicalize_func_before_compare=_check_default_rows([(0, None), (1, 11), (2, 11)]))
+
+
+@iceberg
+@pytest.mark.parametrize('format_version', ['2', pytest.param('3', marks=pytest.mark.skipif(
+    not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@pytest.mark.parametrize('shape', ['struct', 'list', 'map'])
+@ignore_order(local=True)
+def test_iceberg_missing_nested_field_with_unprojected_uuid(
+        spark_tmp_table_factory, format_version, reader_type, shape):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    default = 11 if format_version == '3' else None
+    nested_type = {'type': 'struct', 'fields': [
+        {'id': 3, 'name': 'legacy', 'required': False, 'type': 'uuid'}]}
+    if shape == 'list':
+        field_type = {'type': 'list', 'element-id': 4,
+                      'element-required': False, 'element': nested_type}
+        parent, expression = 'c.element', 'c.added'
+        expected = [(0, None), (1, []), (2, [None]), (3, [default, default, None])]
+    elif shape == 'map':
+        field_type = {'type': 'map', 'key-id': 4, 'key': 'string',
+                      'value-id': 5, 'value-required': False, 'value': nested_type}
+        parent, expression = 'c.value', 'map_values(c).added'
+        expected = [(0, None), (1, []), (2, [None]), (3, [default, default, None])]
+    else:
+        field_type = nested_type
+        parent, expression = 'c', 'c.added'
+        expected = [(0, None), (1, default), (2, default)]
+
+    def setup(spark):
+        jvm = spark_jvm()
+        schema = jvm.org.apache.iceberg.SchemaParser.fromJson(json.dumps({
+            'type': 'struct', 'fields': [
+                {'id': 1, 'name': 'id', 'required': True, 'type': 'int'},
+                {'id': 2, 'name': 'c', 'required': False, 'type': field_type}]}))
+        catalog = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergCatalog(
+            spark._jsparkSession, 'spark_catalog')
+        props = jvm.java.util.HashMap()
+        for key, value in _build_tblprops({'format-version': format_version}).items():
+            props.put(key, value)
+        table = catalog.createTable(jvm.org.apache.iceberg.catalog.TableIdentifier.parse(table_name),
+                                    schema, jvm.org.apache.iceberg.PartitionSpec.unpartitioned(), props)
+        schema = table.schema()
+        records = jvm.org.apache.iceberg.data.GenericRecord
+        old_struct = schema.findType('c')
+        if shape == 'list':
+            old_struct = old_struct.asListType().elementType()
+        elif shape == 'map':
+            old_struct = old_struct.asMapType().valueType()
+        null_leaf = records.create(old_struct.asStructType())
+        uuid_leaf = records.create(old_struct.asStructType())
+        uuid_leaf.setField('legacy', jvm.java.util.UUID.fromString(
+            '123e4567-e89b-12d3-a456-426614174000'))
+        if shape == 'list':
+            empty, null_element, elements = [jvm.java.util.ArrayList() for _ in range(3)]
+            null_element.add(None)
+            for value in (null_leaf, uuid_leaf, None):
+                elements.add(value)
+            values = [None, empty, null_element, elements]
+        elif shape == 'map':
+            empty, null_element, elements = [jvm.java.util.LinkedHashMap() for _ in range(3)]
+            null_element.put('a', None)
+            for key, value in zip(('a', 'b', 'c'), (null_leaf, uuid_leaf, None)):
+                elements.put(key, value)
+            values = [None, empty, null_element, elements]
+        else:
+            values = [None, null_leaf, uuid_leaf]
+
+        # Use Iceberg's writer because Spark SQL represents UUID as STRING and cannot create
+        # the original UUID-annotated physical column used as the validity helper.
+        path = table.location() + '/data/uuid-helper.parquet'
+        appender = jvm.org.apache.iceberg.data.GenericAppenderFactory(schema).newAppender(
+            table.io().newOutputFile(path), jvm.org.apache.iceberg.FileFormat.PARQUET)
+        try:
+            for index, value in enumerate(values):
+                row = records.create(schema)
+                row.setField('id', index)
+                row.setField('c', value)
+                appender.add(row)
+        finally:
+            appender.close()
+        data_file = jvm.org.apache.iceberg.DataFiles.builder(table.spec()).withPath(path) \
+            .withFormat(jvm.org.apache.iceberg.FileFormat.PARQUET) \
+            .withFileSizeInBytes(table.io().newInputFile(path).getLength()) \
+            .withMetrics(appender.metrics()).build()
+        table.newAppend().appendFile(data_file).commit()
+        update = table.updateSchema()
+        int_type = jvm.org.apache.iceberg.types.Types.IntegerType.get()
+        if format_version == '3':
+            update.addColumn(parent, 'added', int_type,
+                             jvm.org.apache.iceberg.expressions.Literal.of(default)).commit()
+        else:
+            update.addColumn(parent, 'added', int_type).commit()
+        spark.sql(f'REFRESH TABLE {table_name}')
+
+    with_cpu_session(setup)
+
+    def read(spark):
+        # An unpruned CPU reference preserves parent validity for default-only projections.
+        spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
+                       spark.conf.get('spark.rapids.sql.enabled') == 'true')
+        return spark.sql(f'SELECT id, {expression} AS added FROM {table_name}')
+
+    def check(cpu_rows, gpu_rows):
+        if shape == 'map':
+            def normalize(rows):
+                return [(row[0], None if row[1] is None else sorted(row[1], key=repr))
+                        for row in rows]
+            cpu_rows, gpu_rows = normalize(cpu_rows), normalize(gpu_rows)
+        return _check_default_rows(expected)(cpu_rows, gpu_rows)
+
+    assert_gpu_and_cpu_are_equal_collect(
+        read,
+        conf={'spark.rapids.sql.format.iceberg.v3.enabled': 'true',
+              'spark.rapids.sql.format.parquet.reader.type': reader_type,
+              'spark.sql.iceberg.vectorization.enabled': 'false'},
+        result_canonicalize_func_before_compare=check)

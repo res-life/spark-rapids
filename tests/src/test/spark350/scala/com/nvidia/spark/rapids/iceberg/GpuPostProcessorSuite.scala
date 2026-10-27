@@ -49,6 +49,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{
   Type => ShadedType,
   Types => ShadedTypes
 }
+import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation
 import org.apache.iceberg.shaded.org.apache.parquet.schema.PrimitiveType.{
   PrimitiveTypeName => ShadedPrimitiveTypeName
 }
@@ -60,7 +61,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter
+import org.apache.spark.sql.types.{BinaryType, DateType, LongType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 /**
@@ -1182,6 +1184,42 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       Types.NestedField.optional(2, "added", Types.IntegerType.get()))
     assert(!GpuIcebergParquetReader.hasMissingDefaultFilter(
       oldSchema, nullDefaultSchema, Expressions.notNull("added"), caseSensitive = true))
+  }
+
+  test("Validity helpers decode physical types and preserve projected logical types") {
+    val dateField = ShadedTypes.optional(ShadedPrimitiveTypeName.INT32)
+      .as(LogicalTypeAnnotation.dateType()).id(4).named("date")
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "s", Types.StructType.of(
+        Types.NestedField.optional(3, "added", Types.IntegerType.get()))),
+      Types.NestedField.optional(4, "date", Types.DateType.get()))
+    val helpers = Seq(
+      ShadedTypes.optional(ShadedPrimitiveTypeName.FIXED_LEN_BYTE_ARRAY).length(16)
+        .as(LogicalTypeAnnotation.uuidType()).id(2).named("legacy") -> BinaryType,
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64)
+        .as(LogicalTypeAnnotation.timeType(false, LogicalTypeAnnotation.TimeUnit.MICROS))
+        .id(2).named("legacy") -> LongType,
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64)
+        .as(LogicalTypeAnnotation.timestampType(true, LogicalTypeAnnotation.TimeUnit.NANOS))
+        .id(2).named("legacy") -> LongType,
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64)
+        .as(LogicalTypeAnnotation.timestampType(false, LogicalTypeAnnotation.TimeUnit.MICROS))
+        .id(2).named("legacy") -> LongType)
+
+    helpers.foreach { case (helper, sparkType) =>
+      val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
+        ShadedTypes.optionalGroup().addField(helper).id(1).named("s"), dateField).asJava)
+      val projected = ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema)
+      val retained = GpuIcebergParquetReader.preserveStructValidity(
+        fileSchema, projected, expectedSchema)
+      val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+      val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
+        .convert(unshade(physical))
+      assert(converted("s").dataType.asInstanceOf[StructType]("legacy").dataType == sparkType)
+      assert(converted("date").dataType == DateType)
+      assert(physical.getType("s", "legacy").getId.intValue() == 2)
+      assert(physical.asGroupType().getType("date") == dateField)
+    }
   }
 
   test("Default-only struct projections retain physical validity through nested containers") {
