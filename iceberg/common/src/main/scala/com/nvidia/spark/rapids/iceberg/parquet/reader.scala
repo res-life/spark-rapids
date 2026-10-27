@@ -43,10 +43,11 @@ import org.apache.iceberg.shaded.org.apache.parquet.hadoop.metadata.{BlockMetaDa
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{
   GroupType => ShadedGroupType,
   MessageType => ShadedMessageType,
+  PrimitiveType => ShadedPrimitiveType,
   Type => ShadedType,
   Types => ShadedTypes
 }
-import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.{ListLogicalTypeAnnotation, MapLogicalTypeAnnotation}
+import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.{ListLogicalTypeAnnotation, MapKeyValueTypeAnnotation, MapLogicalTypeAnnotation}
 import org.apache.parquet.hadoop.metadata.BlockMetaData
 
 import org.apache.spark.internal.Logging
@@ -155,52 +156,57 @@ object GpuIcebergParquetReader {
   private[iceberg] def physicalHelperSchema(
       readSchema: ShadedMessageType,
       requiredSchema: Schema): ShadedMessageType = {
-    val usedIds = mutable.HashSet.empty[Int]
-    usedIds ++= requiredSchema.idToName().keySet().asScala.map(_.toInt)
-    def collectIds(field: ShadedType): Unit = {
-      Option(field.getId).foreach(id => usedIds += id.intValue())
-      if (!field.isPrimitive) {
-        field.asGroupType().getFields.asScala.foreach(collectIds)
-      }
-    }
-    readSchema.getFields.asScala.foreach(collectIds)
-    var nextHelperId = 1
+    val visitor = new PhysicalHelperVisitor(readSchema, requiredSchema)
+    new ShadedMessageType(readSchema.getName,
+      ParquetSchemaVisitor.visitFields(readSchema, visitor).asJava)
+  }
 
-    def physicalHelpers(field: ShadedType, isWrapper: Boolean = false): ShadedType = {
-      val physical = if (!field.isPrimitive) {
-        val group = field.asGroupType()
-        val annotation = group.getLogicalTypeAnnotation
-        val isMap = annotation.isInstanceOf[MapLogicalTypeAnnotation]
-        val hasListWrapper = annotation.isInstanceOf[ListLogicalTypeAnnotation] &&
-          !(ParquetSchemaUtil.determineListElementType(group) eq group.getType(0))
-        val children = group.getFields.asScala.map { child =>
-          physicalHelpers(child, isMap || hasListWrapper)
-        }
-        if (annotation != null && annotation.toOriginalType() == null &&
-            (field.getId == null || requiredSchema.findField(field.getId.intValue()) == null)) {
-          // Opaque logical groups such as VARIANT are only needed for their validity here.
-          // Decode their retained children as an ordinary struct. LIST/MAP annotations have
-          // legacy original types and must remain intact to preserve collection structure.
-          val builder = ShadedTypes.buildGroup(group.getRepetition)
-          children.foreach(child => builder.addField(child))
-          Option(field.getId).foreach(id => builder.id(id.intValue()))
-          builder.named(field.getName)
-        } else {
-          group.withNewFields(children.asJava)
-        }
-      } else if (field.getId != null &&
-          requiredSchema.findField(field.getId.intValue()) != null) {
-        field
+  private class PhysicalHelperVisitor(readSchema: ShadedMessageType, requiredSchema: Schema)
+      extends ParquetSchemaVisitor[ShadedType] {
+    private val usedIds = mutable.HashSet.empty[Int]
+    usedIds ++= requiredSchema.idToName().keySet().asScala.map(_.toInt)
+    usedIds ++= ParquetSchemaVisitor.fieldIds(readSchema)
+    private var nextHelperId = 1
+
+    override def primitive(primitive: ShadedPrimitiveType): ShadedType = {
+      if (primitive.getId != null &&
+          requiredSchema.findField(primitive.getId.intValue()) != null) {
+        primitive
       } else {
         // An unprojected UUID, TIME or nanosecond timestamp can carry a parent's validity,
         // although Spark's Parquet schema converter cannot decode its logical type.
-        val primitive = field.asPrimitiveType()
-        val builder = ShadedTypes.primitive(primitive.getPrimitiveTypeName, field.getRepetition)
+        val builder = ShadedTypes.primitive(primitive.getPrimitiveTypeName, primitive.getRepetition)
           .length(primitive.getTypeLength)
-        Option(field.getId).foreach(id => builder.id(id.intValue()))
-        builder.named(field.getName)
+        Option(primitive.getId).foreach(id => builder.id(id.intValue()))
+        builder.named(primitive.getName)
       }
+    }
 
+    override def group(group: ShadedGroupType, children: Seq[ShadedType]): ShadedType = {
+      val annotation = group.getLogicalTypeAnnotation
+      val isCollection = annotation.isInstanceOf[ListLogicalTypeAnnotation] ||
+        annotation.isInstanceOf[MapLogicalTypeAnnotation] ||
+        annotation.isInstanceOf[MapKeyValueTypeAnnotation]
+      if (annotation != null && !isCollection &&
+          (group.getId == null || requiredSchema.findField(group.getId.intValue()) == null)) {
+        // Opaque logical groups such as VARIANT are only needed for their validity here.
+        // Decode their retained children as an ordinary struct. Collection annotations must
+        // remain intact to preserve the physical LIST/MAP structure.
+        val builder = ShadedTypes.buildGroup(group.getRepetition)
+        children.foreach(child => builder.addField(child))
+        Option(group.getId).foreach(id => builder.id(id.intValue()))
+        builder.named(group.getName)
+      } else {
+        group.withNewFields(children.asJava)
+      }
+    }
+
+    override def field(
+        field: ShadedType, parent: ShadedGroupType, physical: ShadedType): ShadedType = {
+      val annotation = parent.getLogicalTypeAnnotation
+      val isWrapper = annotation.isInstanceOf[MapLogicalTypeAnnotation] ||
+        (annotation.isInstanceOf[ListLogicalTypeAnnotation] &&
+          !(ParquetSchemaUtil.determineListElementType(parent) eq parent.getType(0)))
       if (physical.getId == null && !isWrapper) {
         // convert() invents IDs starting at 1000 for unmapped fields. Such an ID can bind a
         // helper to a real projected field, replacing its initial default with unrelated data.
@@ -214,9 +220,6 @@ object GpuIcebergParquetReader {
         physical
       }
     }
-
-    new ShadedMessageType(readSchema.getName,
-      readSchema.getFields.asScala.map(field => physicalHelpers(field)).asJava)
   }
 
   private[iceberg] def hasMissingDefaultFilter(
@@ -228,13 +231,12 @@ object GpuIcebergParquetReader {
       requiredSchema.asStruct(), Collections.singletonList(filter), caseSensitive)
       .asScala.filter(id => ShimUtils.hasInitialDefault(requiredSchema.findField(id)))
 
-    def containsFieldId(field: ShadedType, fieldId: Int): Boolean = {
-      (field.getId != null && field.getId.intValue() == fieldId) ||
-        (!field.isPrimitive && field.asGroupType().getFields.asScala
-          .exists(child => containsFieldId(child, fieldId)))
+    if (defaultFieldIds.isEmpty) {
+      false
+    } else {
+      val fileFieldIds = ParquetSchemaVisitor.fieldIds(fileSchema)
+      defaultFieldIds.exists(id => !fileFieldIds.contains(id.intValue()))
     }
-
-    defaultFieldIds.exists(id => !containsFieldId(fileSchema, id.intValue()))
   }
 
   /** Keep physical container paths when their projected children are missing from a file. */
