@@ -739,3 +739,165 @@ def test_iceberg_missing_nested_field_with_unprojected_uuid(
               'spark.rapids.sql.format.parquet.reader.type': reader_type,
               'spark.sql.iceberg.vectorization.enabled': 'false'},
         result_canonicalize_func_before_compare=check)
+
+
+def _create_iceberg_table_from_schema(spark, table_name, fields, format_version):
+    jvm = spark_jvm()
+    schema = jvm.org.apache.iceberg.SchemaParser.fromJson(json.dumps({
+        'type': 'struct', 'fields': fields}))
+    catalog = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergCatalog(
+        spark._jsparkSession, 'spark_catalog')
+    props = jvm.java.util.HashMap()
+    for key, value in _build_tblprops({'format-version': format_version}).items():
+        props.put(key, value)
+    return catalog.createTable(jvm.org.apache.iceberg.catalog.TableIdentifier.parse(table_name),
+                               schema, jvm.org.apache.iceberg.PartitionSpec.unpartitioned(), props)
+
+
+def _append_external_parquet(spark, table, path, row_count):
+    jvm = spark_jvm()
+    hpath = jvm.org.apache.hadoop.fs.Path(path)
+    size = hpath.getFileSystem(spark._jsc.hadoopConfiguration()).getFileStatus(hpath).getLen()
+    data_file = jvm.org.apache.iceberg.DataFiles.builder(table.spec()).withPath(path) \
+        .withFormat(jvm.org.apache.iceberg.FileFormat.PARQUET) \
+        .withFileSizeInBytes(size).withRecordCount(row_count).build()
+    mapping = jvm.org.apache.iceberg.mapping.MappingUtil.create(table.schema())
+    table.updateProperties().set('schema.name-mapping.default',
+        jvm.org.apache.iceberg.mapping.NameMappingParser.toJson(mapping)).commit()
+    table.newAppend().appendFile(data_file).commit()
+
+
+@iceberg
+@pytest.mark.parametrize('format_version', ['2', pytest.param('3', marks=pytest.mark.skipif(
+    not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@ignore_order(local=True)
+def test_iceberg_unmapped_validity_helper_id(
+        spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+
+    def setup(spark):
+        fields = [
+            {'id': 1, 'name': 'id', 'required': False, 'type': 'int'},
+            {'id': 2, 'name': 's', 'required': False, 'type': {'type': 'struct', 'fields': [
+                {'id': 3, 'name': 'present', 'required': False, 'type': 'long'}]}}]
+        # Evolve through real fields so the new column receives ID 1000, the first ID that
+        # Iceberg's Parquet converter would otherwise invent for an unmapped helper leaf.
+        fields += [{'id': i, 'name': f'unused_{i}', 'required': False, 'type': 'int'}
+                   for i in range(4, 1000)]
+        table = _create_iceberg_table_from_schema(spark, table_name, fields, format_version)
+        update = table.updateSchema()
+        for i in range(4, 1000):
+            update.deleteColumn(f'unused_{i}')
+        update.commit()
+        source = spark_tmp_path + '/unmapped'
+        spark.createDataFrame([(0, None), (1, (99, 7)), (2, (100, None))],
+            'id INT, s STRUCT<untracked: BIGINT, present: BIGINT>') \
+            .coalesce(1).write.parquet(source)
+        jvm = spark_jvm()
+        path = jvm.org.apache.hadoop.fs.Path(source)
+        files = path.getFileSystem(spark._jsc.hadoopConfiguration()).listStatus(path)
+        parquet = [f.getPath().toString() for f in files
+                   if f.getPath().getName().endswith('.parquet')]
+        assert len(parquet) == 1
+        _append_external_parquet(spark, table, parquet[0], 3)
+        update = table.updateSchema()
+        int_type = jvm.org.apache.iceberg.types.Types.IntegerType.get()
+        if format_version == '3':
+            update.addColumn('s', 'added', int_type,
+                             jvm.org.apache.iceberg.expressions.Literal.of(11)).commit()
+        else:
+            update.addColumn('s', 'added', int_type).commit()
+        assert table.schema().findField('s.added').fieldId() == 1000
+        spark.sql(f'REFRESH TABLE {table_name}')
+
+    with_cpu_session(setup, conf=disable_parquet_field_id_write)
+
+    def read(spark):
+        spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled',
+                       spark.conf.get('spark.rapids.sql.enabled') == 'true')
+        return spark.sql(f'SELECT id, s.added FROM {table_name}')
+
+    default = 11 if format_version == '3' else None
+    assert_gpu_and_cpu_are_equal_collect(
+        read,
+        conf={'spark.rapids.sql.format.iceberg.v3.enabled': str(format_version == '3').lower(),
+              'spark.rapids.sql.format.parquet.reader.type': reader_type,
+              'spark.sql.iceberg.vectorization.enabled': 'false'},
+        result_canonicalize_func_before_compare=_check_default_rows([
+            (0, None), (1, default), (2, default)]))
+
+
+@iceberg
+@pytest.mark.parametrize('format_version', ['2', pytest.param('3', marks=pytest.mark.skipif(
+    not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON))])
+@pytest.mark.parametrize('reader_type', rapids_reader_types)
+@ignore_order(local=True)
+def test_iceberg_legacy_list_initial_defaults(
+        spark_tmp_table_factory, spark_tmp_path, format_version, reader_type):
+    table_name = get_full_table_name(spark_tmp_table_factory)
+    path = spark_tmp_path + '/legacy-list.parquet'
+
+    def setup(spark):
+        fields = [
+            {'id': 1, 'name': 'id', 'required': False, 'type': 'int'},
+            {'id': 2, 'name': 'items', 'required': False, 'type': {
+                'type': 'list', 'element-id': 3, 'element-required': True,
+                'element': {'type': 'struct', 'fields': [
+                    {'id': 4, 'name': 'a', 'required': False, 'type': 'long'},
+                    {'id': 5, 'name': 'b', 'required': False, 'type': 'long'}]}}}]
+        table = _create_iceberg_table_from_schema(spark, table_name, fields, format_version)
+        jvm = spark_jvm()
+        schema = jvm.org.apache.parquet.schema.MessageTypeParser.parseMessageType(
+            'message test { optional int32 id; optional group items (LIST) { '
+            'repeated group element { optional int64 a; optional int64 b; } } }')
+        factory = jvm.org.apache.parquet.example.data.simple.SimpleGroupFactory(schema)
+        writer = jvm.org.apache.parquet.hadoop.example.ExampleParquetWriter \
+            .builder(jvm.org.apache.hadoop.fs.Path(path)) \
+            .withConf(spark._jsc.hadoopConfiguration()).withType(schema).build()
+        try:
+            for i in range(3):
+                row = factory.newGroup().append('id', i)
+                if i > 0:
+                    items = row.addGroup('items')
+                    if i == 2:
+                        items.addGroup('element')
+                        # Values outside INT32 force Py4J to use the INT64 append overload.
+                        items.addGroup('element').append('a', 5000000000).append('b', 6000000000)
+                writer.write(row)
+        finally:
+            writer.close()
+        _append_external_parquet(spark, table, path, 3)
+        update = table.updateSchema()
+        int_type = jvm.org.apache.iceberg.types.Types.IntegerType.get()
+        if format_version == '3':
+            update.addColumn('items.element', 'added', int_type,
+                             jvm.org.apache.iceberg.expressions.Literal.of(11)).commit()
+        else:
+            update.addColumn('items.element', 'added', int_type).commit()
+        spark.sql(f'REFRESH TABLE {table_name}')
+
+    with_cpu_session(setup)
+    default = 11 if format_version == '3' else None
+    for project_sibling in (False, True):
+        def read(spark):
+            if spark.conf.get('spark.rapids.sql.enabled') == 'true':
+                spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled', 'true')
+                columns = 'id, items.b AS present, items.added' if project_sibling else \
+                    'id, items.added'
+                return spark.sql(f'SELECT {columns} FROM {table_name}')
+            # Iceberg's CPU row reader fails on this legacy layout. Spark's Parquet reader
+            # provides an independent reference, including null and empty list cardinality.
+            spark.conf.set('spark.sql.optimizer.nestedSchemaPruning.enabled', 'false')
+            literal = '11' if format_version == '3' else 'NULL'
+            columns = ['id'] + (['items.b AS present'] if project_sibling else [])
+            columns += [f'transform(items, x -> CAST({literal} AS INT)) AS added']
+            return spark.read.parquet(path).selectExpr(*columns)
+
+        expected = ([(0, None, None), (1, [], []), (2, [None, 6000000000], [default, default])]
+                    if project_sibling else [(0, None), (1, []), (2, [default, default])])
+        assert_gpu_and_cpu_are_equal_collect(
+            read,
+            conf={'spark.rapids.sql.format.iceberg.v3.enabled': str(format_version == '3').lower(),
+                  'spark.rapids.sql.format.parquet.reader.type': reader_type},
+            result_canonicalize_func_before_compare=_check_default_rows(expected))

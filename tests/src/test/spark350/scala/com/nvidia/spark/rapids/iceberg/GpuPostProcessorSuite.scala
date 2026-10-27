@@ -46,6 +46,7 @@ import org.apache.iceberg.expressions.Expressions
 import org.apache.iceberg.parquet.ParquetSchemaUtil
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{
   MessageType => ShadedMessageType,
+  MessageTypeParser => ShadedMessageTypeParser,
   Type => ShadedType,
   Types => ShadedTypes
 }
@@ -1219,6 +1220,87 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       assert(converted("date").dataType == DateType)
       assert(physical.getType("s", "legacy").getId.intValue() == 2)
       assert(physical.asGroupType().getType("date") == dateField)
+    }
+  }
+
+  test("Unmapped validity helpers cannot bind to requested field IDs") {
+    val defaultField = fieldWithDefaults(
+      1000, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    val expectedSchema = new Schema(
+      Types.NestedField.optional(1, "id", Types.IntegerType.get()),
+      Types.NestedField.optional(2, "s", Types.StructType.of(defaultField)),
+      Types.NestedField.optional(3, "other", Types.LongType.get()))
+    val helpers = Seq(
+      ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("untracked"),
+      ShadedTypes.optionalGroup().addField(
+        ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("leaf")).named("untracked"),
+      ShadedTypes.optionalList().element(ShadedTypes.optionalGroup().addField(
+        ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("leaf")).named("element"))
+        .named("untracked"),
+      ShadedTypes.optionalMap().key(
+        ShadedTypes.required(ShadedPrimitiveTypeName.BINARY)
+          .as(LogicalTypeAnnotation.stringType()).named("key"))
+        .value(ShadedTypes.optionalGroup().addField(
+          ShadedTypes.optional(ShadedPrimitiveTypeName.INT64).named("leaf")).named("value"))
+        .named("untracked"))
+    helpers.foreach { helper =>
+      val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
+        ShadedTypes.optional(ShadedPrimitiveTypeName.INT32).id(1).named("id"),
+        ShadedTypes.optionalGroup().addField(helper).id(2).named("s")).asJava)
+      val retained = GpuIcebergParquetReader.preserveStructValidity(
+        fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
+      val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+      val partner = ParquetSchemaUtil.convert(physical)
+      assert(partner.findField(1000) == null)
+      assert(partner.findField(3) == null)
+      assert(partner.findField("s.untracked").fieldId() != 1000)
+      if (helper.getLogicalTypeAnnotation != null) {
+        assert(physical.getType("s", "untracked").asGroupType().getType(0).getId == null)
+      }
+      val (info, shaded) = createParquetInfo(physical)
+      val processor = new GpuParquetReaderPostProcessor(
+        info, new JHashMap[Integer, Any](), expectedSchema, shaded, Map.empty)
+      assert(processor.displayActionPlan().contains("FillDefault(fieldId=1000, int)"))
+    }
+  }
+
+  test("Legacy two-level LIST projections preserve struct element interpretation") {
+    val defaultField = fieldWithDefaults(
+      5, "added", Types.IntegerType.get(), required = false,
+      initialDefault = Some(Int.box(11))).getOrElse {
+      cancel("Iceberg runtime does not expose v3 field defaults")
+    }
+    for (elementName <- Seq("element", "array"); projectSibling <- Seq(false, true)) {
+      val fileSchema = ShadedMessageTypeParser.parseMessageType(
+        s"""message test {
+           |  optional group items (LIST) = 1 {
+           |    repeated group $elementName = 2 {
+           |      optional int64 a = 3;
+           |      optional int64 b = 4;
+           |    }
+           |  }
+           |}""".stripMargin)
+      val fields = if (projectSibling) {
+        Seq(Types.NestedField.optional(3, "a", Types.LongType.get()), defaultField)
+      } else {
+        Seq(defaultField)
+      }
+      val expectedSchema = new Schema(Types.NestedField.optional(1, "items",
+        Types.ListType.ofRequired(2, Types.StructType.of(fields.asJava))))
+      val retained = GpuIcebergParquetReader.preserveStructValidity(
+        fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
+      val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
+      val element = ParquetSchemaUtil.convert(physical).findType("items")
+        .asListType().elementType()
+      assert(element.isStructType)
+      assert(element.asStructType().fields().size() == (if (elementName == "element") 2 else 1))
+      val (info, shaded) = createParquetInfo(physical)
+      val processor = new GpuParquetReaderPostProcessor(
+        info, new JHashMap[Integer, Any](), expectedSchema, shaded, Map.empty)
+      assert(processor.displayActionPlan().contains("FillDefault(fieldId=5, int)"))
     }
   }
 

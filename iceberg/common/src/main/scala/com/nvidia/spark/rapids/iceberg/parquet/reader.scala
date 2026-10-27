@@ -21,6 +21,7 @@ import java.net.URI
 import java.util.{Collections, Objects}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 import com.nvidia.spark.rapids.{CombineConf, DateTimeRebaseCorrected, GpuMetric, ThreadPoolConfBuilder}
 import com.nvidia.spark.rapids.Arm.withResource
@@ -45,7 +46,7 @@ import org.apache.iceberg.shaded.org.apache.parquet.schema.{
   Type => ShadedType,
   Types => ShadedTypes
 }
-import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.MapLogicalTypeAnnotation
+import org.apache.iceberg.shaded.org.apache.parquet.schema.LogicalTypeAnnotation.{ListLogicalTypeAnnotation, MapLogicalTypeAnnotation}
 import org.apache.parquet.hadoop.metadata.BlockMetaData
 
 import org.apache.spark.internal.Logging
@@ -154,10 +155,27 @@ object GpuIcebergParquetReader {
   private[iceberg] def physicalHelperSchema(
       readSchema: ShadedMessageType,
       requiredSchema: Schema): ShadedMessageType = {
-    def physicalHelpers(field: ShadedType): ShadedType = {
+    val usedIds = mutable.HashSet.empty[Int]
+    usedIds ++= requiredSchema.idToName().keySet().asScala.map(_.toInt)
+    def collectIds(field: ShadedType): Unit = {
+      Option(field.getId).foreach(id => usedIds += id.intValue())
       if (!field.isPrimitive) {
+        field.asGroupType().getFields.asScala.foreach(collectIds)
+      }
+    }
+    readSchema.getFields.asScala.foreach(collectIds)
+    var nextHelperId = 1
+
+    def physicalHelpers(field: ShadedType, isWrapper: Boolean = false): ShadedType = {
+      val physical = if (!field.isPrimitive) {
         val group = field.asGroupType()
-        group.withNewFields(group.getFields.asScala.map(physicalHelpers).asJava)
+        val annotation = group.getLogicalTypeAnnotation
+        val isMap = annotation.isInstanceOf[MapLogicalTypeAnnotation]
+        val hasListWrapper = annotation.isInstanceOf[ListLogicalTypeAnnotation] &&
+          !(ParquetSchemaUtil.determineListElementType(group) eq group.getType(0))
+        group.withNewFields(group.getFields.asScala.map { child =>
+          physicalHelpers(child, isMap || hasListWrapper)
+        }.asJava)
       } else if (field.getId != null &&
           requiredSchema.findField(field.getId.intValue()) != null) {
         field
@@ -170,10 +188,23 @@ object GpuIcebergParquetReader {
         Option(field.getId).foreach(id => builder.id(id.intValue()))
         builder.named(field.getName)
       }
+
+      if (physical.getId == null && !isWrapper) {
+        // convert() invents IDs starting at 1000 for unmapped fields. Such an ID can bind a
+        // helper to a real projected field, replacing its initial default with unrelated data.
+        while (usedIds.contains(nextHelperId)) {
+          nextHelperId += 1
+        }
+        val helperId = nextHelperId
+        usedIds += helperId
+        physical.withId(helperId)
+      } else {
+        physical
+      }
     }
 
     new ShadedMessageType(readSchema.getName,
-      readSchema.getFields.asScala.map(physicalHelpers).asJava)
+      readSchema.getFields.asScala.map(field => physicalHelpers(field)).asJava)
   }
 
   private[iceberg] def hasMissingDefaultFilter(
@@ -199,6 +230,32 @@ object GpuIcebergParquetReader {
       fileSchema: ShadedMessageType,
       projectedSchema: ShadedMessageType,
       requiredSchema: Schema): ShadedMessageType = {
+    def withChildren(
+        fileGroup: ShadedGroupType,
+        projectedGroup: ShadedGroupType,
+        children: Seq[ShadedType]): ShadedGroupType = {
+      val result = projectedGroup.withNewFields(children.asJava)
+      if (fileGroup.getLogicalTypeAnnotation.isInstanceOf[ListLogicalTypeAnnotation] &&
+          !fileGroup.getType(0).isPrimitive &&
+          (ParquetSchemaUtil.determineListElementType(fileGroup) eq fileGroup.getType(0)) &&
+          !(ParquetSchemaUtil.determineListElementType(result) eq result.getType(0))) {
+        // A legacy two-level LIST can identify its repeated struct by its multiple fields.
+        // Keeping only one field would reinterpret that struct as a three-level list wrapper.
+        val fileElement = fileGroup.getType(0).asGroupType()
+        val element = result.getType(0).asGroupType()
+        val retained = element.getFields.asScala.map(f => f.getName -> f).toMap
+        val helper = fileElement.getFields.asScala.find(f => !retained.contains(f.getName))
+          .map(firstLeaf(_))
+        val fields = fileElement.getFields.asScala.flatMap { field =>
+          retained.get(field.getName).orElse(helper.filter(_.getName == field.getName))
+        }
+        result.withNewFields(Collections.singletonList[ShadedType](
+          element.withNewFields(fields.asJava)))
+      } else {
+        result
+      }
+    }
+
     def firstLeaf(field: ShadedType, keepAllChildren: Boolean = false): ShadedType = {
       if (field.isPrimitive) {
         field
@@ -208,7 +265,7 @@ object GpuIcebergParquetReader {
         // A map's repeated key/value group needs both children to remain a valid map schema.
         val isMap = group.getLogicalTypeAnnotation.isInstanceOf[MapLogicalTypeAnnotation]
         val retained = if (keepAllChildren) children else children.take(1)
-        group.withNewFields(retained.map(child => firstLeaf(child, isMap)).asJava)
+        withChildren(group, group, retained.map(child => firstLeaf(child, isMap)).toSeq)
       }
     }
 
@@ -254,7 +311,7 @@ object GpuIcebergParquetReader {
           // post-processor removes this helper field while applying the projected defaults.
           firstLeaf(fileField)
         } else {
-          projectedGroup.withNewFields(children.asJava)
+          withChildren(fileField.asGroupType(), projectedGroup, children)
         }
       }
     }
