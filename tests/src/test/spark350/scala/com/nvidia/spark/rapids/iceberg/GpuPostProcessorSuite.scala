@@ -37,7 +37,6 @@ import ai.rapids.cudf.{ColumnVector => CudfColumnVector}
 import com.nvidia.spark.rapids.{GpuColumnVector, RapidsConf}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.iceberg.parquet._
-import com.nvidia.spark.rapids.iceberg.parquet.converter.FromIcebergShaded.unshade
 import com.nvidia.spark.rapids.parquet.ParquetFileInfoWithBlockMeta
 import com.nvidia.spark.rapids.spill.SpillFramework
 import org.apache.hadoop.fs.Path
@@ -128,7 +127,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       filePath = new Path("/test/file.parquet"),
       blocks = Seq(block),
       partValues = InternalRow.empty,
-      schema = unshade(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,
@@ -156,7 +155,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       filePath = new Path("/test/file.parquet"),
       blocks = blocks,
       partValues = InternalRow.empty,
-      schema = unshade(shadedSchema),
+      schema = ShimUtils.getParquetUnshader().unshade(shadedSchema),
       readSchema = StructType(Seq.empty),
       dateRebaseMode = null,
       timestampRebaseMode = null,
@@ -1215,7 +1214,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         fileSchema, projected, expectedSchema)
       val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
       val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
-        .convert(unshade(physical))
+        .convert(ShimUtils.getParquetUnshader().unshade(physical))
       assert(converted("s").dataType.asInstanceOf[StructType]("legacy").dataType == sparkType)
       assert(converted("date").dataType == DateType)
       assert(physical.getType("s", "legacy").getId.intValue() == 2)
@@ -1252,7 +1251,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     assert(physicalHelper.getFieldCount == 1)
     assert(helper.getLogicalTypeAnnotation == variant)
     val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
-      .convert(unshade(physical))
+      .convert(ShimUtils.getParquetUnshader().unshade(physical))
     assert(converted("s").dataType.asInstanceOf[StructType]("legacy")
       .dataType.asInstanceOf[StructType]("metadata").dataType == BinaryType)
     val (info, shaded) = createParquetInfo(physical)
