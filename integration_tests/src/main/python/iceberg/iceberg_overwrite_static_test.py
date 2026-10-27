@@ -16,7 +16,8 @@ from typing import Callable, Any
 import pytest
 from pyspark.sql import functions as F
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect
+from asserts import (assert_equal_with_local_sort, assert_gpu_fallback_collect,
+                     assert_gpu_fallback_write_sql)
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, StringGen, copy_and_update, gen_df
 from iceberg import (
@@ -25,7 +26,8 @@ from iceberg import (
     iceberg_nested_write_gens_list, iceberg_write_enabled_conf, iceberg_unsupported_mark,
     _build_tblprops, overwrite_static_partition_transforms, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
-    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, row_lineage_df)
+    ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
+    row_lineage_df)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides
 from spark_session import with_gpu_session, with_cpu_session
 
@@ -97,6 +99,29 @@ def test_insert_overwrite_unpartitioned_table(format_version, spark_tmp_table_fa
 @iceberg
 @pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
 @ignore_order(local=True)
+@allow_non_gpu('OverwriteByExpressionExec')
+def test_insert_overwrite_encryption_fallback(spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    for suffix in ("_cpu", "_gpu"):
+        table = base_table_name + suffix
+        create_iceberg_table(
+            table, table_prop={"format-version": "3", "encryption.key-id": "test-key"},
+            df_gen=lambda spark: row_lineage_df(spark, length=128))
+        with_cpu_session(lambda spark: row_lineage_df(spark, length=128).writeTo(table).append())
+
+    def overwrite_data(spark, table):
+        view = spark_tmp_table_factory.get()
+        row_lineage_df(spark, start=128, length=32).createOrReplaceTempView(view)
+        spark.sql(f"INSERT OVERWRITE TABLE {table} SELECT * FROM {view}")
+
+    assert_gpu_fallback_write_sql(
+        overwrite_data, lambda spark, table: spark.table(table),
+        base_table_name, ["OverwriteByExpressionExec"], conf=iceberg_static_overwrite_conf)
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@ignore_order(local=True)
 @allow_non_gpu("OverwriteByExpressionExec", "ShuffleExchangeExec", "SortExec", "ProjectExec")
 def test_insert_overwrite_v3_table_fallback(spark_tmp_table_factory):
     table_name = get_full_table_name(spark_tmp_table_factory)
@@ -131,7 +156,7 @@ def test_iceberg_v3_row_lineage_insert_overwrite(spark_tmp_table_factory):
     def setup_iceberg_table(spark, table):
         spark.sql(
             f"CREATE TABLE {table} (id BIGINT, v BIGINT) USING ICEBERG "
-            "TBLPROPERTIES ('format-version' = '3')")
+            f"{iceberg_table_properties_sql('3')}")
         row_lineage_df(spark, with_value=True).writeTo(table).append()
 
     def overwrite(spark, table):
