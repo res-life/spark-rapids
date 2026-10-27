@@ -338,18 +338,17 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
 
   def projectSchema(fileSchema: ShadedMessageType, requiredSchema: Schema):
   (ShadedMessageType, ShadedMessageType) = {
-    val (typeWithIds, fileReadSchema) = if (ParquetSchemaUtil.hasIds(fileSchema)) {
-      (fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema))
+    val (typeWithIds, useFallbackIds) = if (ParquetSchemaUtil.hasIds(fileSchema)) {
+      (fileSchema, false)
     } else if (conf.nameMapping.isDefined) {
       val typeWithIds = ParquetSchemaUtil.applyNameMapping(fileSchema, conf.nameMapping.get)
-      (typeWithIds, ParquetSchemaUtil.pruneColumns(typeWithIds, requiredSchema))
+      (typeWithIds, false)
     } else {
-      val typeWithIds = ParquetSchemaUtil.addFallbackIds(fileSchema)
-      (typeWithIds, ParquetSchemaUtil.pruneColumnsFallback(typeWithIds, requiredSchema))
+      (ParquetSchemaUtil.addFallbackIds(fileSchema), true)
     }
 
     val readSchemaWithValidity =
-      GpuIcebergParquetReader.preserveStructValidity(typeWithIds, fileReadSchema, requiredSchema)
+      ShimUtils.pruneColumns(typeWithIds, requiredSchema, useFallbackIds)
     logDebug(s"Doing project schema, parquet file schema:\n$fileSchema " +
       s"\niceberg required schema:\n$requiredSchema " +
       s"\nfile reade schema:\n$readSchemaWithValidity")
@@ -364,26 +363,10 @@ trait GpuIcebergParquetReader extends Iterator[ColumnarBatch] with AutoCloseable
     val blocks = reader.getRowGroups.asScala
       .zipWithIndex
 
-    // Iceberg's Parquet filters treat absent columns as null, ignoring initial defaults.
-    // Keep these row groups and let Spark evaluate residuals after defaults are materialized.
-    val safeFilter = filter.filterNot(f => GpuIcebergParquetReader.hasMissingDefaultFilter(
-      typeWithIds, requiredSchema, f, conf.caseSensitive))
-    safeFilter.map { f =>
-      val statsFilter = new ParquetMetricsRowGroupFilter(requiredSchema,
-        f,
-        conf.caseSensitive)
-      val dictFilter = new ParquetDictionaryRowGroupFilter(requiredSchema,
-        f,
-        conf.caseSensitive)
-      val bloomFilter = new ParquetBloomRowGroupFilter(requiredSchema,
-        f,
-        conf.caseSensitive)
-
-      blocks.filter { case (rowGroup, _) =>
-          statsFilter.shouldRead(typeWithIds, rowGroup) &&
-            dictFilter.shouldRead(typeWithIds, rowGroup, reader.getDictionaryReader(rowGroup)) &&
-            bloomFilter.shouldRead(typeWithIds, rowGroup, reader.getBloomFilterDataReader(rowGroup))
-      }
+    filter.map { f =>
+      val shouldRead = ShimUtils.rowGroupFilter(
+        reader, requiredSchema, typeWithIds, f, conf.caseSensitive)
+      blocks.filter { case (_, index) => shouldRead.test(index) }
     }.getOrElse(blocks)
       .toSeq
   }

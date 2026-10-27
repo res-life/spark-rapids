@@ -1295,8 +1295,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
         ShadedTypes.optional(ShadedPrimitiveTypeName.INT32).id(1).named("id"),
         ShadedTypes.optionalGroup().addField(helper).id(2).named("s")).asJava)
-      val retained = GpuIcebergParquetReader.preserveStructValidity(
-        fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
+      val retained = ShimUtils.pruneColumns(fileSchema, expectedSchema, false)
       val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
       val partner = ParquetSchemaUtil.convert(physical)
       assert(partner.findField(1000) == null)
