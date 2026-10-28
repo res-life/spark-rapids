@@ -21,8 +21,23 @@ import scala.collection.mutable
 
 import org.apache.iceberg.shaded.org.apache.parquet.schema.{GroupType, PrimitiveType, Type}
 
-/** Visits physical fields, including the children of opaque logical groups such as VARIANT. */
-private[parquet] abstract class ParquetSchemaVisitor[T] {
+/**
+ * Visits every physical field, including LIST/MAP wrappers and children of opaque logical groups.
+ *
+ * Iceberg's ParquetTypeVisitor and TypeWithSchemaVisitor visit logical LIST elements and MAP
+ * keys/values rather than producing a result for each physical wrapper. ParquetTypeVisitor in
+ * Iceberg 1.10/1.11 also dispatches VARIANT to a callback without visiting its physical children;
+ * that callback is absent in 1.6/1.9. TypeWithSchemaVisitor has a separate ParquetVariantVisitor
+ * path starting in 1.9, selected by the companion Iceberg type in 1.9 and also by the Parquet
+ * annotation in 1.10/1.11. Adapting these visitors would require reconstructing wrapper results
+ * and handling the version-specific VARIANT traversal.
+ *
+ * Helper rewriting and field-ID collection instead require the same physical walk on Iceberg
+ * 1.6, 1.9, 1.10 and 1.11: descend into every group, visit fields after their children, and retain
+ * each field's physical parent. This lets helper rewriting preserve container layout while
+ * removing unsupported helper annotations, without linking to version-specific VARIANT APIs.
+ */
+private[parquet] abstract class PhysicalParquetSchemaVisitor[T] {
   def primitive(primitive: PrimitiveType): T
 
   def group(group: GroupType, children: Seq[T]): T
@@ -31,10 +46,8 @@ private[parquet] abstract class ParquetSchemaVisitor[T] {
   def field(field: Type, parent: GroupType, result: T): T = result
 }
 
-private[parquet] object ParquetSchemaVisitor {
-  // Iceberg's ParquetTypeVisitor gained a VARIANT callback after 1.9. Traverse the raw
-  // physical groups here so every supported runtime visits the same fields and IDs.
-  def visitFields[T](group: GroupType, visitor: ParquetSchemaVisitor[T]): Seq[T] = {
+private[parquet] object PhysicalParquetSchemaVisitor {
+  def visitFields[T](group: GroupType, visitor: PhysicalParquetSchemaVisitor[T]): Seq[T] = {
     group.getFields.asScala.map { field =>
       val result = if (field.isPrimitive) {
         visitor.primitive(field.asPrimitiveType())
@@ -48,7 +61,7 @@ private[parquet] object ParquetSchemaVisitor {
 
   def fieldIds(schema: GroupType): Set[Int] = {
     val ids = mutable.HashSet.empty[Int]
-    visitFields(schema, new ParquetSchemaVisitor[Unit] {
+    visitFields(schema, new PhysicalParquetSchemaVisitor[Unit] {
       override def primitive(primitive: PrimitiveType): Unit = ()
 
       override def group(group: GroupType, children: Seq[Unit]): Unit = ()

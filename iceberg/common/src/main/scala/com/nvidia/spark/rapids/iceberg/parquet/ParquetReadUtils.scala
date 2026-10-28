@@ -79,7 +79,7 @@ object ParquetReadUtils {
     if (defaultFieldIds.isEmpty) {
       false
     } else {
-      val fileFieldIds = ParquetSchemaVisitor.fieldIds(fileSchema)
+      val fileFieldIds = PhysicalParquetSchemaVisitor.fieldIds(fileSchema)
       defaultFieldIds.exists(id => !fileFieldIds.contains(id.intValue()))
     }
   }

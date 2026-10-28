@@ -157,14 +157,14 @@ object GpuIcebergParquetReader {
       requiredSchema: Schema): ShadedMessageType = {
     val visitor = new PhysicalHelperVisitor(readSchema, requiredSchema)
     new ShadedMessageType(readSchema.getName,
-      ParquetSchemaVisitor.visitFields(readSchema, visitor).asJava)
+      PhysicalParquetSchemaVisitor.visitFields(readSchema, visitor).asJava)
   }
 
   private class PhysicalHelperVisitor(readSchema: ShadedMessageType, requiredSchema: Schema)
-      extends ParquetSchemaVisitor[ShadedType] {
+      extends PhysicalParquetSchemaVisitor[ShadedType] {
     private val usedIds = mutable.HashSet.empty[Int]
     usedIds ++= requiredSchema.idToName().keySet().asScala.map(_.toInt)
-    usedIds ++= ParquetSchemaVisitor.fieldIds(readSchema)
+    usedIds ++= PhysicalParquetSchemaVisitor.fieldIds(readSchema)
     private var nextHelperId = 1
 
     override def primitive(primitive: ShadedPrimitiveType): ShadedType = {
