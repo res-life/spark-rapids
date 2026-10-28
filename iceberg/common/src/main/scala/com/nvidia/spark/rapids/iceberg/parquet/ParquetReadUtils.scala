@@ -16,10 +16,14 @@
 
 package com.nvidia.spark.rapids.iceberg.parquet
 
+import java.util.Collections
 import java.util.function.IntPredicate
 
+import scala.collection.JavaConverters._
+
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.iceberg.Schema
-import org.apache.iceberg.expressions.Expression
+import org.apache.iceberg.expressions.{Binder, Expression}
 import org.apache.iceberg.parquet.{ParquetBloomRowGroupFilter, ParquetDictionaryRowGroupFilter, ParquetMetricsRowGroupFilter, ParquetSchemaUtil}
 import org.apache.iceberg.shaded.org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.iceberg.shaded.org.apache.parquet.schema.MessageType
@@ -35,7 +39,7 @@ object ParquetReadUtils {
     } else {
       ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema)
     }
-    GpuIcebergParquetReader.preserveStructValidity(fileSchema, projected, requiredSchema)
+    ParquetSchemaProjection.preserveStructValidity(fileSchema, projected, requiredSchema)
   }
 
   def rowGroupFilter(
@@ -46,8 +50,7 @@ object ParquetReadUtils {
       caseSensitive: Boolean): IntPredicate = {
     // Older filters treat absent columns as null, ignoring initial defaults. Spark must
     // evaluate these residuals after defaults are materialized, so retain every row group.
-    if (GpuIcebergParquetReader.hasMissingDefaultFilter(
-        fileSchema, requiredSchema, filter, caseSensitive)) {
+    if (hasMissingDefaultFilter(fileSchema, requiredSchema, filter, caseSensitive)) {
       (_: Int) => true
     } else {
       val stats = new ParquetMetricsRowGroupFilter(requiredSchema, filter, caseSensitive)
@@ -61,6 +64,23 @@ object ParquetReadUtils {
           bloom.shouldRead(fileSchema, block, reader.getBloomFilterDataReader(block))
       }
       shouldRead
+    }
+  }
+
+  private[iceberg] def hasMissingDefaultFilter(
+      fileSchema: MessageType,
+      requiredSchema: Schema,
+      filter: Expression,
+      caseSensitive: Boolean): Boolean = {
+    val defaultFieldIds = Binder.boundReferences(
+      requiredSchema.asStruct(), Collections.singletonList(filter), caseSensitive)
+      .asScala.filter(id => ShimUtils.hasInitialDefault(requiredSchema.findField(id)))
+
+    if (defaultFieldIds.isEmpty) {
+      false
+    } else {
+      val fileFieldIds = ParquetSchemaVisitor.fieldIds(fileSchema)
+      defaultFieldIds.exists(id => !fileFieldIds.contains(id.intValue()))
     }
   }
 }

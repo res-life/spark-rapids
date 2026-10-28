@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids.iceberg.parquet
 
 import java.io.{IOException, UncheckedIOException}
 import java.net.URI
-import java.util.{Collections, Objects}
+import java.util.Objects
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -33,7 +33,7 @@ import com.nvidia.spark.rapids.shims.parquet.GpuParquetUtilsShims
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.iceberg.{MetadataColumns, Schema}
-import org.apache.iceberg.expressions.{Binder, Expression}
+import org.apache.iceberg.expressions.Expression
 import org.apache.iceberg.mapping.NameMapping
 import org.apache.iceberg.parquet._
 import org.apache.iceberg.shaded.org.apache.parquet.ParquetReadOptions
@@ -219,118 +219,6 @@ object GpuIcebergParquetReader {
         physical
       }
     }
-  }
-
-  private[iceberg] def hasMissingDefaultFilter(
-      fileSchema: ShadedMessageType,
-      requiredSchema: Schema,
-      filter: Expression,
-      caseSensitive: Boolean): Boolean = {
-    val defaultFieldIds = Binder.boundReferences(
-      requiredSchema.asStruct(), Collections.singletonList(filter), caseSensitive)
-      .asScala.filter(id => ShimUtils.hasInitialDefault(requiredSchema.findField(id)))
-
-    if (defaultFieldIds.isEmpty) {
-      false
-    } else {
-      val fileFieldIds = ParquetSchemaVisitor.fieldIds(fileSchema)
-      defaultFieldIds.exists(id => !fileFieldIds.contains(id.intValue()))
-    }
-  }
-
-  /** Keep physical container paths when their projected children are missing from a file. */
-  private[iceberg] def preserveStructValidity(
-      fileSchema: ShadedMessageType,
-      projectedSchema: ShadedMessageType,
-      requiredSchema: Schema): ShadedMessageType = {
-    def withChildren(
-        fileGroup: ShadedGroupType,
-        projectedGroup: ShadedGroupType,
-        children: Seq[ShadedType]): ShadedGroupType = {
-      val result = projectedGroup.withNewFields(children.asJava)
-      if (fileGroup.getLogicalTypeAnnotation.isInstanceOf[ListLogicalTypeAnnotation] &&
-          !fileGroup.getType(0).isPrimitive &&
-          (ParquetSchemaUtil.determineListElementType(fileGroup) eq fileGroup.getType(0)) &&
-          !(ParquetSchemaUtil.determineListElementType(result) eq result.getType(0))) {
-        // A legacy two-level LIST can identify its repeated struct by its multiple fields.
-        // Keeping only one field would reinterpret that struct as a three-level list wrapper.
-        val fileElement = fileGroup.getType(0).asGroupType()
-        val element = result.getType(0).asGroupType()
-        val retained = element.getFields.asScala.map(f => f.getName -> f).toMap
-        val helper = fileElement.getFields.asScala.find(f => !retained.contains(f.getName))
-          .map(firstLeaf(_))
-        val fields = fileElement.getFields.asScala.flatMap { field =>
-          retained.get(field.getName).orElse(helper.filter(_.getName == field.getName))
-        }
-        result.withNewFields(Collections.singletonList[ShadedType](
-          element.withNewFields(fields.asJava)))
-      } else {
-        result
-      }
-    }
-
-    def firstLeaf(field: ShadedType, keepAllChildren: Boolean = false): ShadedType = {
-      if (field.isPrimitive) {
-        field
-      } else {
-        val group = field.asGroupType()
-        val children = group.getFields.asScala
-        // A map's repeated key/value group needs both children to remain a valid map schema.
-        val isMap = group.getLogicalTypeAnnotation.isInstanceOf[MapLogicalTypeAnnotation]
-        val retained = if (keepAllChildren) children else children.take(1)
-        withChildren(group, group, retained.map(child => firstLeaf(child, isMap)).toSeq)
-      }
-    }
-
-    def isRequested(field: ShadedType): Boolean = {
-      if (field.getId != null) {
-        requiredSchema.findField(field.getId.intValue()) != null
-      } else {
-        // Parquet's repeated list and map wrapper groups do not have Iceberg field IDs.
-        !field.isPrimitive && field.asGroupType().getFields.asScala.exists(isRequested)
-      }
-    }
-
-    def preserveChildren(
-        fileGroup: ShadedGroupType,
-        projectedGroup: ShadedGroupType): Seq[ShadedType] = {
-      val projectedByName = projectedGroup.getFields.asScala.map(f => f.getName -> f).toMap
-      fileGroup.getFields.asScala.flatMap { field =>
-        projectedByName.get(field.getName) match {
-          case Some(projectedField) => Some(preserve(field, projectedField))
-          case None if isRequested(field) =>
-            // Restore every requested path before choosing helper leaves. One leaf under an
-            // ancestor cannot preserve a sibling collection's validity or element counts.
-            val emptyProjection = if (field.isPrimitive) {
-              field
-            } else {
-              field.asGroupType().withNewFields(Collections.emptyList[ShadedType]())
-            }
-            Some(preserve(field, emptyProjection))
-          case _ => None
-        }
-      }.toSeq
-    }
-
-    def preserve(fileField: ShadedType, projectedField: ShadedType): ShadedType = {
-      if (projectedField.isPrimitive) {
-        projectedField
-      } else {
-        val projectedGroup = projectedField.asGroupType()
-        val children = preserveChildren(fileField.asGroupType(), projectedGroup)
-        if (children.isEmpty) {
-          // ParquetSchemaUtil.convert drops empty structs. A retained physical leaf carries
-          // definition levels for the parent even when the leaf itself is null. The
-          // post-processor removes this helper field while applying the projected defaults.
-          firstLeaf(fileField)
-        } else {
-          withChildren(fileField.asGroupType(), projectedGroup, children)
-        }
-      }
-    }
-
-    new ShadedMessageType(
-      projectedSchema.getName, preserveChildren(fileSchema, projectedSchema).asJava)
   }
 }
 

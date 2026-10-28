@@ -1166,23 +1166,23 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       Expressions.and(Expressions.equal("id", 1L), Expressions.equal("added", 11)),
       Expressions.or(Expressions.equal("id", 1L), Expressions.equal("added", 11)),
       Expressions.equal("s.added", 11)).foreach { filter =>
-      assert(GpuIcebergParquetReader.hasMissingDefaultFilter(
+      assert(ParquetReadUtils.hasMissingDefaultFilter(
         oldSchema, requiredSchema, filter, caseSensitive = true), filter.toString)
     }
-    assert(!GpuIcebergParquetReader.hasMissingDefaultFilter(
+    assert(!ParquetReadUtils.hasMissingDefaultFilter(
       oldSchema, requiredSchema, Expressions.equal("id", 1L), caseSensitive = true))
-    assert(GpuIcebergParquetReader.hasMissingDefaultFilter(
+    assert(ParquetReadUtils.hasMissingDefaultFilter(
       oldSchema, requiredSchema, Expressions.equal("ADDED", 11), caseSensitive = false))
 
     val renamedPhysical =
       ShadedTypes.optional(ShadedPrimitiveTypeName.INT32).id(2).named("old_name")
     val currentSchema = new ShadedMessageType(
       "test", Seq[ShadedType](physicalId, renamedPhysical, physicalStruct).asJava)
-    assert(!GpuIcebergParquetReader.hasMissingDefaultFilter(
+    assert(!ParquetReadUtils.hasMissingDefaultFilter(
       currentSchema, requiredSchema, Expressions.notNull("added"), caseSensitive = true))
     val nullDefaultSchema = new Schema(
       Types.NestedField.optional(2, "added", Types.IntegerType.get()))
-    assert(!GpuIcebergParquetReader.hasMissingDefaultFilter(
+    assert(!ParquetReadUtils.hasMissingDefaultFilter(
       oldSchema, nullDefaultSchema, Expressions.notNull("added"), caseSensitive = true))
   }
 
@@ -1210,7 +1210,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       val fileSchema = new ShadedMessageType("test", Seq[ShadedType](
         ShadedTypes.optionalGroup().addField(helper).id(1).named("s"), dateField).asJava)
       val projected = ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema)
-      val retained = GpuIcebergParquetReader.preserveStructValidity(
+      val retained = ParquetSchemaProjection.preserveStructValidity(
         fileSchema, projected, expectedSchema)
       val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
       val converted = new ParquetToSparkSchemaConverter(false, true, true, true, false)
@@ -1242,7 +1242,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
     }
     val expectedSchema = new Schema(
       Types.NestedField.optional(1, "s", Types.StructType.of(defaultField)))
-    val retained = GpuIcebergParquetReader.preserveStructValidity(
+    val retained = ParquetSchemaProjection.preserveStructValidity(
       fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
     val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
     val physicalHelper = physical.getType("s", "legacy").asGroupType()
@@ -1333,7 +1333,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
       }
       val expectedSchema = new Schema(Types.NestedField.optional(1, "items",
         Types.ListType.ofRequired(2, Types.StructType.of(fields.asJava))))
-      val retained = GpuIcebergParquetReader.preserveStructValidity(
+      val retained = ParquetSchemaProjection.preserveStructValidity(
         fileSchema, ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema), expectedSchema)
       val physical = GpuIcebergParquetReader.physicalHelperSchema(retained, expectedSchema)
       val element = ParquetSchemaUtil.convert(physical).findType("items")
@@ -1414,7 +1414,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
           val fileSchema = new ShadedMessageType("test", Seq(fileField, unrelatedField).asJava)
           val expectedSchema = new Schema(expectedField)
           val projected = ParquetSchemaUtil.pruneColumns(fileSchema, expectedSchema)
-          val restored = GpuIcebergParquetReader.preserveStructValidity(
+          val restored = ParquetSchemaProjection.preserveStructValidity(
             fileSchema, projected, expectedSchema)
           val projectedPaths = projected.getPaths.asScala.map(_.toSeq).toSet
           val helperSchema = new ShadedMessageType("test", Seq(retainedField).asJava)
@@ -1428,10 +1428,10 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
           assert((partnerSchema.findField(6) != null) ==
             projectedPaths.exists(_.last == "ignored"))
           assert(partnerSchema.findField(9) == null)
-          assert(GpuIcebergParquetReader.preserveStructValidity(
+          assert(ParquetSchemaProjection.preserveStructValidity(
             fileSchema, fileSchema, expectedSchema) == fileSchema)
           val emptySchema = new ShadedMessageType("test", Seq.empty[ShadedType].asJava)
-          assert(GpuIcebergParquetReader.preserveStructValidity(
+          assert(ParquetSchemaProjection.preserveStructValidity(
             fileSchema, emptySchema, new Schema()) == emptySchema)
 
           val (parquetInfo, shadedSchema) = createParquetInfo(restored)
@@ -1496,7 +1496,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         val fileSchema = new ShadedMessageType("test", Seq[ShadedType](fileField).asJava)
         val requiredSchema = new Schema(requiredField)
         val projected = ParquetSchemaUtil.pruneColumns(fileSchema, requiredSchema)
-        val restored = GpuIcebergParquetReader.preserveStructValidity(
+        val restored = ParquetSchemaProjection.preserveStructValidity(
           fileSchema, projected, requiredSchema)
         val partner = ParquetSchemaUtil.convert(restored)
         val projectedPaths = projected.getPaths.asScala.map(_.toSeq).toSet
@@ -1504,7 +1504,7 @@ class GpuPostProcessorSuite extends AnyFunSuite with BeforeAndAfterAll {
         // Keep extra siblings already retained by Iceberg, but do not add unrelated helpers.
         assert((partner.findField(2) != null) == projectedPaths.exists(_.last == "unrelated"))
         assert((partner.findField(13) != null) == projectedPaths.exists(_.last == "first"))
-        assert(GpuIcebergParquetReader.preserveStructValidity(
+        assert(ParquetSchemaProjection.preserveStructValidity(
           fileSchema, restored, requiredSchema) == restored)
 
         val (parquetInfo, shadedSchema) = createParquetInfo(restored)
