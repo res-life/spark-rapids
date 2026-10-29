@@ -225,7 +225,9 @@ def test_timestamp_fraction_ansi_invalid(value):
         lambda spark: spark.createDataFrame([(value,)], 'a string').select(
             f.to_timestamp('a', _LOCAL_FORMAT)).collect(),
         conf=dict(_CONF, **{'spark.sql.ansi.enabled': True}),
-        error_message=re.compile('CANNOT_PARSE_TIMESTAMP|Exception occurred when parsing timestamp'))
+        error_message=re.compile(
+            'CANNOT_PARSE_TIMESTAMP|DateTimeParseException|'
+            'Exception occurred when parsing timestamp'))
 
 
 @allow_non_gpu(*non_utc_allow)
