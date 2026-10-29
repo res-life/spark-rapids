@@ -284,6 +284,48 @@ def test_iceberg_delete_v3_gpu_writes_and_merges_deletion_vectors(
 
 
 @iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+def test_iceberg_delete_v3_ignores_unprojected_unsupported_default(
+        spark_tmp_table_factory):
+    base_table_name = get_full_table_name(spark_tmp_table_factory)
+    cpu_table_name = f"{base_table_name}_cpu"
+    gpu_table_name = f"{base_table_name}_gpu"
+
+    def setup_table(spark, table_name):
+        spark.sql(
+            f"CREATE TABLE {table_name} (id BIGINT) USING ICEBERG "
+            "TBLPROPERTIES ('format-version'='3', 'write.delete.mode'='merge-on-read')")
+        spark.createDataFrame([(1,), (2,)], "id BIGINT").coalesce(1).writeTo(table_name).append()
+
+        jvm = spark_jvm()
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+            spark._jsparkSession, table_name)
+        uuid_type = jvm.org.apache.iceberg.types.Types.UUIDType.get()
+        default_value = jvm.org.apache.iceberg.expressions.Literal.of(
+            "123e4567-e89b-12d3-a456-426614174000").to(uuid_type)
+        table.updateSchema().addColumn("token", uuid_type, default_value).commit()
+        spark.sql(f"REFRESH TABLE {table_name}")
+
+    with_cpu_session(lambda spark: setup_table(spark, cpu_table_name))
+    with_cpu_session(lambda spark: setup_table(spark, gpu_table_name))
+
+    def delete_odd_id(spark, table_name):
+        spark.sql(f"DELETE FROM {table_name} WHERE id % 2 = 1").collect()
+
+    with_cpu_session(lambda spark: delete_odd_id(spark, cpu_table_name),
+                     conf=iceberg_delete_mor_enabled_conf)
+    with_iceberg_dml_session(
+        lambda spark: delete_odd_id(spark, gpu_table_name),
+        "3", "merge-on-read", conf=iceberg_delete_mor_enabled_conf)
+
+    cpu_data = with_cpu_session(lambda spark: spark.table(cpu_table_name).select("id").collect())
+    gpu_data = with_cpu_session(lambda spark: spark.table(gpu_table_name).select("id").collect())
+    assert cpu_data == [Row(2)]
+    assert_equal_with_local_sort(cpu_data, gpu_data)
+
+
+@iceberg
 # Iceberg metadata table scans are CPU-only; the DELETE command is still GPU-validated.
 @allow_non_gpu("BatchScanExec")
 @ignore_order(local=True)
