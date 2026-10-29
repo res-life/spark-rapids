@@ -630,6 +630,22 @@ object GpuToTimestamp {
     "MMyyyy"
   )
 
+  // These patterns use the JNI parser's fractional-second and offset tokens. Their
+  // SimpleDateFormat equivalents have different semantics, so only CORRECTED is supported.
+  val CORRECTED_TIMESTAMP_FORMATS: Set[String] = (for {
+    separator <- Set(" ", "'T'")
+    fraction <- Set("", ".SSS")
+    offset <- Set("", "X", "XX", "XXX")
+  } yield s"yyyy-MM-dd${separator}HH:mm:ss$fraction$offset") -- CORRECTED_COMPATIBLE_FORMATS
+
+  // Formatting fractions does not depend on timeParserPolicy. Offsets need a separate
+  // formatter: cuDF's %z would describe UTC even after shifting to the session timezone.
+  val CORRECTED_FORMATTING_FORMATS: Set[String] = CORRECTED_COMPATIBLE_FORMATS ++
+    CORRECTED_TIMESTAMP_FORMATS.filterNot(_.endsWith("X"))
+
+  def hasExplicitOffset(sparkFormat: String): Boolean =
+    CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat) && sparkFormat.endsWith("X")
+
   // We are compatible with Spark for these formats when the timeParserPolicy is LEGACY. It
   // is possible that other formats may be supported but these are the only ones that we have
   // tests for.
@@ -676,12 +692,12 @@ object GpuToTimestamp {
   }
 
   // True iff the fused JNI parser handles this (sparkFormat, policy) combination.
-  // Today the JNI accepts every entry in CORRECTED_COMPATIBLE_FORMATS / LEGACY_COMPATIBLE_FORMATS.
   private def isSimpleSparkFormat(sparkFormat: String, isLegacy: Boolean): Boolean = {
     if (isLegacy) {
       LEGACY_COMPATIBLE_FORMATS.contains(sparkFormat)
     } else {
-      CORRECTED_COMPATIBLE_FORMATS.contains(sparkFormat)
+      CORRECTED_COMPATIBLE_FORMATS.contains(sparkFormat) ||
+        CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat)
     }
   }
 
@@ -692,11 +708,8 @@ object GpuToTimestamp {
     // as interchangeable, but Spark's DateTimeFormatter requires an exact match.
     // We also use cuDF isTimestamp to reject truly unparseable strings.
     //
-    // NOTE: Formats like "yyyy-MM-dd HH:mm:ss.SSS" cannot be added to
-    // CORRECTED_COMPATIBLE_FORMATS because cuDF's %3f requires exactly 3
-    // fractional digits, while Java's DateTimeFormatter accepts 1-3 digits
-    // (e.g. "11:59:59.9" is valid on CPU but rejected by cuDF). The
-    // incompatible path here is the correct fallback for such formats.
+    // Compatible fractional formats use the JNI path instead: cuDF's %3f requires
+    // exactly three digits, whereas Spark accepts one to three digits for SSS.
     if (strfFormat.startsWith("%Y-%m-%d %H") || strfFormat.startsWith("%Y/%m/%d %H")) {
       // The 4 element-wise GPU kernels below (matchesRe, not, isTimestamp, and) add
       // negligible overhead compared to the downstream parseStringAsTimestamp which
@@ -836,7 +849,7 @@ abstract class GpuToTimestamp
             failOnError,
             timeParserPolicy == ExceptionTimeParserPolicy)
         }
-        if (GpuOverrides.isUTCTimezone(zoneId)) {
+        if (GpuOverrides.isUTCTimezone(zoneId) || hasExplicitOffset(sparkFormat)) {
           res
         } else {
           withResource(res) { _ =>
