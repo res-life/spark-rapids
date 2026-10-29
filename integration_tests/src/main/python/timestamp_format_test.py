@@ -75,9 +75,10 @@ def test_timestamp_format_corrected(separator, fraction, offset, zone):
 @allow_non_gpu(*non_utc_allow)
 @pytest.mark.parametrize('zone', _TIMEZONES)
 @pytest.mark.parametrize('policy', ['CORRECTED', 'EXCEPTION'])
-@pytest.mark.parametrize('pattern', [_LOCAL_FORMAT, "yyyy-MM-dd'T'HH:mm:ss.SSS"])
+@pytest.mark.parametrize('pattern', [_LOCAL_FORMAT, "yyyy-MM-dd'T'HH:mm:ss.SSS",
+                                   "yyyy-MM-dd'T'HH:mm:ss"])
 def test_timestamp_millisecond_formatting(zone, policy, pattern):
-    # Fractional timestamps, including negative epoch values, must truncate to milliseconds.
+    # Match Spark's fractional truncation, including negative epoch values.
     values = ['1969-12-31 23:59:59.999999', '1970-01-01 00:00:00.000001',
               '2024-03-10T06:59:59.123456Z', '2024-03-10T07:00:00.987654Z',
               '2024-11-03T05:59:59.123456Z', '2024-11-03T06:00:00.987654Z', None]
