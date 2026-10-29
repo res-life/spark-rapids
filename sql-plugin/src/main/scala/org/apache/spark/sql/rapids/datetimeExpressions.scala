@@ -705,8 +705,8 @@ object GpuToTimestamp {
     // as interchangeable, but Spark's DateTimeFormatter requires an exact match.
     // We also use cuDF isTimestamp to reject truly unparseable strings.
     //
-    // Compatible fractional formats use the JNI path instead: cuDF's %3f requires
-    // exactly three digits, whereas Spark accepts one to three digits for SSS.
+    // Compatible fractional formats use JNI for Spark's fraction-width and separator
+    // validation rather than the permissive cuDF parsing path.
     if (strfFormat.startsWith("%Y-%m-%d %H") || strfFormat.startsWith("%Y/%m/%d %H")) {
       // The 4 element-wise GPU kernels below (matchesRe, not, isTimestamp, and) add
       // negligible overhead compared to the downstream parseStringAsTimestamp which
