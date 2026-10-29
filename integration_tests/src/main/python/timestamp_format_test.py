@@ -130,6 +130,22 @@ def test_timestamp_fraction_ansi_valid(pattern, value, ansi):
 
 
 @allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('conditional', ['if', 'case'])
+def test_timestamp_fraction_ansi_conditional(conditional):
+    values = [(0, False, 'invalid'), (1, True, '2024-01-01 00:00:00.123'),
+              (2, None, 'invalid'), (3, True, None)]
+    parsed = "to_timestamp(a, '{}')".format(_LOCAL_FORMAT)
+    expression = ('if(ok, {}, cast(null as timestamp))'.format(parsed)
+                  if conditional == 'if' else
+                  'case when ok then {} else cast(null as timestamp) end'.format(parsed))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.createDataFrame(values, 'id int, ok boolean, a string').selectExpr(
+            'id', expression),
+        exist_classes='GpuGetTimestamp', non_exist_classes='GpuCpuBridgeExpression',
+        conf=dict(_CONF, **{'spark.sql.ansi.enabled': True}))
+
+
+@allow_non_gpu(*non_utc_allow)
 @pytest.mark.parametrize('value', ['2024-01-01 00:00:00.1234', '2024-02-30 00:00:00.123'])
 def test_timestamp_fraction_ansi_invalid(value):
     assert_gpu_and_cpu_error(

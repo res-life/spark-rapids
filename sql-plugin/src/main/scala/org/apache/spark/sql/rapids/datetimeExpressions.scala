@@ -834,6 +834,8 @@ abstract class GpuToTimestamp
 
   val failOnError: Boolean = SQLConf.get.ansiEnabled
 
+  override def hasSideEffects: Boolean = super.hasSideEffects || failOnError
+
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
     val tmp = lhs.dataType match {
       case StringType =>
