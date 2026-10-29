@@ -643,9 +643,6 @@ object GpuToTimestamp {
   val CORRECTED_FORMATTING_FORMATS: Set[String] = CORRECTED_COMPATIBLE_FORMATS ++
     CORRECTED_TIMESTAMP_FORMATS.filterNot(_.endsWith("X"))
 
-  def hasExplicitOffset(sparkFormat: String): Boolean =
-    CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat) && sparkFormat.endsWith("X")
-
   // We are compatible with Spark for these formats when the timeParserPolicy is LEGACY. It
   // is possible that other formats may be supported but these are the only ones that we have
   // tests for.
@@ -737,7 +734,8 @@ object GpuToTimestamp {
       strfFormat: String,
       dtype: DType,
       failOnError: Boolean,
-      exceptionPolicy: Boolean): ColumnVector = {
+      exceptionPolicy: Boolean,
+      zoneId: ZoneId): ColumnVector = {
 
     // `tsVector` will be closed in replaceSpecialDates
     val tsVector = if (isSimpleSparkFormat(sparkFormat, isLegacy = false)) {
@@ -748,8 +746,13 @@ object GpuToTimestamp {
         } else {
           CastStrings.TIME_PARSER_POLICY_CORRECTED
         }
-        CastStrings.parseTimestampWithFormat(
-          lhs.getBase, sparkFormat, parserPolicy)
+        if (!exceptionPolicy && CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat)) {
+          // Resolve local seconds in the session zone before checked microsecond arithmetic.
+          // Numeric offsets in the input override that zone, matching Spark's formatter.
+          CastStrings.parseTimestampWithFormatChecked(lhs.getBase, sparkFormat, zoneId)
+        } else {
+          CastStrings.parseTimestampWithFormat(lhs.getBase, sparkFormat, parserPolicy)
+        }
       } catch {
         case e: CastException =>
           throw QueryExecutionErrors.failToParseDateTimeInNewParserError(
@@ -834,7 +837,12 @@ abstract class GpuToTimestamp
 
   val failOnError: Boolean = SQLConf.get.ansiEnabled
 
-  override def hasSideEffects: Boolean = super.hasSideEffects || failOnError
+  private def usesCheckedParser: Boolean = timeParserPolicy == CorrectedTimeParserPolicy &&
+    CORRECTED_TIMESTAMP_FORMATS.contains(sparkFormat)
+
+  // Spark propagates arithmetic overflow even when ANSI is disabled or for try_to_timestamp.
+  override def hasSideEffects: Boolean = super.hasSideEffects || failOnError ||
+    (left.dataType == StringType && usesCheckedParser)
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
     val tmp = lhs.dataType match {
@@ -849,9 +857,10 @@ abstract class GpuToTimestamp
             strfFormat,
             DType.TIMESTAMP_MICROSECONDS,
             failOnError,
-            timeParserPolicy == ExceptionTimeParserPolicy)
+            timeParserPolicy == ExceptionTimeParserPolicy,
+            zoneId)
         }
-        if (GpuOverrides.isUTCTimezone(zoneId) || hasExplicitOffset(sparkFormat)) {
+        if (GpuOverrides.isUTCTimezone(zoneId) || usesCheckedParser) {
           res
         } else {
           withResource(res) { _ =>

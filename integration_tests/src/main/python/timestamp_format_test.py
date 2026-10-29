@@ -146,6 +146,79 @@ def test_timestamp_fraction_ansi_conditional(conditional):
 
 
 @allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('zone,pattern,value', [
+    ('UTC', _LOCAL_FORMAT, '+294247-01-10 04:00:54.775'),
+    ('UTC', _LOCAL_FORMAT, '-290308-12-21 19:59:06.000'),
+    ('+08:00', _LOCAL_FORMAT, '+294247-01-10 04:00:54.776'),
+    ('-05:00', _LOCAL_FORMAT, '-290308-12-21 19:59:05.225'),
+    ('America/New_York', _LOCAL_FORMAT, '-290308-12-21 19:59:05.225'),
+    ('Asia/Shanghai', _LOCAL_FORMAT + 'XXX', '+294247-01-10 12:30:54.775+08:30'),
+])
+def test_timestamp_arithmetic_boundary_valid(zone, pattern, value):
+    # Resolve the session/input zone before checking seconds * 1000000 + fraction.
+    # Return epoch seconds so Python's datetime year limit is irrelevant.
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.createDataFrame([(value,), (None,)], 'a string').select(
+            f.to_timestamp('a', pattern).cast('long')),
+        exist_classes='GpuGetTimestamp', non_exist_classes='GpuCpuBridgeExpression',
+        conf=dict(_CONF, **{'spark.sql.session.timeZone': zone}))
+
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('zone,pattern,value', [
+    ('UTC', _LOCAL_FORMAT, '+294247-01-10 04:00:54.776'),
+    ('UTC', _LOCAL_FORMAT, '-290308-12-21 19:59:05.225'),
+    ('-05:00', _LOCAL_FORMAT, '+294247-01-10 04:00:54.775'),
+    ('+08:00', _LOCAL_FORMAT, '-290308-12-21 19:59:06.000'),
+    ('America/New_York', _LOCAL_FORMAT, '+294247-01-10 04:00:54.775'),
+    ('America/New_York', _LOCAL_FORMAT + 'XXX', '+294247-01-10 12:30:54.776+08:30'),
+    ('Asia/Shanghai', _LOCAL_FORMAT + 'XXX', '-290308-12-22 04:29:05.225+08:30'),
+    ('UTC', _LOCAL_FORMAT, '+999999999-01-01 00:00:00.000'),
+    ('UTC', _LOCAL_FORMAT, '-999999999-01-01 00:00:00.000'),
+])
+@pytest.mark.parametrize('ansi', [False, True])
+def test_timestamp_arithmetic_overflow(zone, pattern, value, ansi):
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame([(value,)], 'a string').select(
+            f.to_timestamp('a', pattern)).collect(),
+        conf=dict(_CONF, **{'spark.sql.ansi.enabled': ansi,
+                           'spark.sql.session.timeZone': zone}),
+        error_message=re.compile('ArithmeticException: long overflow'))
+
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.parametrize('ansi', [False, True])
+@pytest.mark.parametrize('conditional', ['if', 'case'])
+def test_timestamp_arithmetic_overflow_conditional(ansi, conditional):
+    values = [(0, False, '+294247-01-10 04:00:54.776'),
+              (1, True, '2024-01-01 00:00:00.123'),
+              (2, None, '-290308-12-21 19:59:05.225')]
+    parsed = "to_timestamp(a, '{}')".format(_LOCAL_FORMAT)
+    expression = ('if(ok, {}, cast(null as timestamp))'.format(parsed)
+                  if conditional == 'if' else
+                  'case when ok then {} else cast(null as timestamp) end'.format(parsed))
+    assert_cpu_and_gpu_are_equal_collect_with_capture(
+        lambda spark: spark.createDataFrame(values, 'id int, ok boolean, a string').selectExpr(
+            'id', expression),
+        exist_classes='GpuGetTimestamp', non_exist_classes='GpuCpuBridgeExpression',
+        conf=dict(_CONF, **{'spark.sql.ansi.enabled': ansi,
+                           'spark.sql.session.timeZone': 'UTC'}))
+
+
+@allow_non_gpu(*non_utc_allow)
+@pytest.mark.skipif(is_before_spark_350(), reason='try_to_timestamp requires Spark 3.5')
+def test_try_timestamp_arithmetic_overflow():
+    # try_to_timestamp suppresses parse errors, but Spark still propagates arithmetic overflow.
+    assert_gpu_and_cpu_error(
+        lambda spark: spark.createDataFrame(
+            [('+294247-01-10 04:00:54.776',)], 'a string').select(
+                f.call_function('try_to_timestamp', f.col('a'), f.lit(_LOCAL_FORMAT))).collect(),
+        conf=dict(_CONF, **{'spark.sql.ansi.enabled': True,
+                           'spark.sql.session.timeZone': 'UTC'}),
+        error_message=re.compile('ArithmeticException: long overflow'))
+
+
+@allow_non_gpu(*non_utc_allow)
 @pytest.mark.parametrize('value', ['2024-01-01 00:00:00.1234', '2024-02-30 00:00:00.123'])
 def test_timestamp_fraction_ansi_invalid(value):
     assert_gpu_and_cpu_error(
