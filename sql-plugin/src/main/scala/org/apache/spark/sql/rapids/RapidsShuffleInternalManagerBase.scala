@@ -1260,10 +1260,27 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
       fetcherIterator: RapidsShuffleBlockFetcherIterator,
       serializer: GpuColumnarBatchSerializer)
     extends Iterator[(Any, Any)] {
-    private val queued = new LinkedBlockingQueue[(Any, Any)]
+    private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
+    private case class QueuedResult(result: (Any, Any), size: Long) {
+      def release(): (Any, Any) = {
+        limiter.release(size)
+        result
+      }
+
+      def close(): Unit = {
+        try {
+          result match {
+            case (_, cb: ColumnarBatch) => cb.close()
+            case _ =>
+          }
+        } finally {
+          limiter.release(size)
+        }
+      }
+    }
+    private val queued = new LinkedBlockingQueue[QueuedResult]
     private val futures = new mutable.Queue[Future[Option[BlockState]]]()
     private val serializerInstance = serializer.newInstance()
-    private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
     private val fallbackIter: Iterator[(Any, Any)] with AutoCloseable =
       if (numReaderThreads == 1) {
         // this is the non-optimized case, where we add metrics to capture the blocked
@@ -1339,9 +1356,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
 
       // All futures are now done or cancelled — no more queued.offer() calls can arrive.
       // Safe to drain queued and pendingIts without a race.
-      queued.forEach {
-        case (_, cb:ColumnarBatch) => cb.close()
-      }
+      queued.forEach(_.close())
       queued.clear()
 
       // close any materialized BlockState objects that are holding onto netty buffers or
@@ -1460,11 +1475,10 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
           // for our futures to finish. Either way, it's safe to block
           // here while we wait.
           waitTimeStart = System.nanoTime()
-          val res = queued.take()
+          val res = queued.take().release()
           var success = false
           try {
             val queueWaitThisCall = System.nanoTime() - waitTimeStart
-            // limiter is now released immediately after deserialization in deserializeTask
             res match {
               case (_, _: ColumnarBatch) =>
                 popFetchedIfAvailable()
@@ -1506,21 +1520,21 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
     private def deserializeTask(blockState: BlockState, acquiredSize: Long): Unit = {
       futures += RapidsShuffleInternalManagerBase.queueReadTask(() => {
         var success = false
-        // Track the size we need to release (starts with the pre-acquired size)
+        // Track quota acquired for the next batch until ownership moves to queued.
         var sizeToRelease = acquiredSize
         try {
           var currentBatchSize = blockState.getNextBatchSize
           var didFit = true
           while (blockState.hasNext && didFit) {
             val batch = blockState.next()
-            queued.offer(batch)
+            queued.offer(QueuedResult(batch, currentBatchSize))
+            sizeToRelease = 0
             // peek at the next batch
             currentBatchSize = blockState.getNextBatchSize
             limiterAcquireCount.foreach(_ += 1)
             didFit = limiter.acquire(currentBatchSize)
             if (didFit) {
-              // Successfully acquired, add to sizeToRelease for later release
-              sizeToRelease += currentBatchSize
+              sizeToRelease = currentBatchSize
             } else {
               limiterAcquireFailCount.foreach(_ += 1)
             }
@@ -1532,7 +1546,7 @@ abstract class RapidsShuffleThreadedReaderBase[K, C](
             None // no further batches
           }
         } finally {
-          // Release limiter immediately after deserialization completes
+          // Release only quota that was not transferred to a queued result.
           limiter.release(sizeToRelease)
           // Close blockState (Netty buffer) immediately if:
           // - failed (success = false), or

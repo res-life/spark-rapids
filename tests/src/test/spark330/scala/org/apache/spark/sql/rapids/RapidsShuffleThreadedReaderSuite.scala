@@ -41,7 +41,8 @@ package org.apache.spark.sql.rapids
 import java.io.{ByteArrayOutputStream, InputStream}
 import java.nio.ByteBuffer
 
-import ai.rapids.cudf.{HostColumnVector, HostMemoryBuffer}
+import ai.rapids.cudf.{DefaultHostMemoryAllocator, HostColumnVector, HostMemoryAllocator,
+  HostMemoryBuffer, MemoryBuffer}
 import com.nvidia.spark.rapids.{GpuColumnarBatchSerializer, GpuColumnVector, GpuMetric,
   LocalGpuMetric, NoopMetric, RapidsConf, RapidsHostColumnVector, SlicedSerializedColumnVector,
   SparkSessionHolder}
@@ -110,6 +111,46 @@ class RecordingManagedBuffer(
 class RapidsShuffleThreadedReaderSuite
     extends AnyFunSuite with BeforeAndAfterAll {
 
+  private class PeakHostMemoryAllocator(delegate: HostMemoryAllocator)
+      extends HostMemoryAllocator {
+    private var liveBytes = 0L
+    private var peakBytes = 0L
+
+    override def allocate(amount: Long, preferPinned: Boolean): HostMemoryBuffer = {
+      track(amount, delegate.allocate(amount, preferPinned))
+    }
+
+    override def allocate(amount: Long): HostMemoryBuffer = {
+      track(amount, delegate.allocate(amount))
+    }
+
+    private def track(amount: Long, buffer: HostMemoryBuffer): HostMemoryBuffer = {
+      synchronized {
+        liveBytes += amount
+        peakBytes = math.max(peakBytes, liveBytes)
+      }
+      val previousHandler = buffer.getEventHandler
+      buffer.setEventHandler(new MemoryBuffer.EventHandler {
+        override def onClosed(refCount: Int): Unit = {
+          try {
+            if (refCount == 0) {
+              PeakHostMemoryAllocator.this.synchronized {
+                liveBytes -= amount
+              }
+            }
+          } finally {
+            if (previousHandler != null) {
+              previousHandler.onClosed(refCount)
+            }
+          }
+        }
+      })
+      buffer
+    }
+
+    def peak: Long = synchronized(peakBytes)
+  }
+
   override def afterAll(): Unit = {
     RapidsShuffleInternalManagerBase.stopThreadPool()
   }
@@ -118,7 +159,9 @@ class RapidsShuffleThreadedReaderSuite
       numReaderThreads: Int,
       injectError: Boolean = false,
       maxBytesInFlight: Long = 1024 * 1024,
-      useNonEmptyBatches: Boolean = false): Unit = {
+      useNonEmptyBatches: Boolean = false,
+      rowsPerBatch: Int = 1,
+      trackPeakDecodedBytes: Boolean = false): Unit = {
     val testConf = new SparkConf(false)
     // this sets the session and the SparkEnv
     SparkSessionHolder.withSparkSession(testConf, _ => {
@@ -144,8 +187,8 @@ class RapidsShuffleThreadedReaderSuite
       (0 until keyValuePairsPerMap).foreach { i =>
         if (useNonEmptyBatches) {
           val hostColumn = new RapidsHostColumnVector(
-            IntegerType, HostColumnVector.fromInts(i))
-          withResource(new ColumnarBatch(Array(hostColumn), 1)) { batch =>
+            IntegerType, HostColumnVector.fromInts(Array.fill(rowsPerBatch)(i): _*))
+          withResource(new ColumnarBatch(Array(hostColumn), rowsPerBatch)) { batch =>
             serializationStream.writeKey(i)
             serializationStream.writeValue(batch)
           }
@@ -235,6 +278,41 @@ class RapidsShuffleThreadedReaderSuite
           }
         }
         taskContext.markTaskCompleted(Some(e))
+      } else if (trackPeakDecodedBytes) {
+        val previousAllocator = DefaultHostMemoryAllocator.get()
+        val trackingAllocator = new PeakHostMemoryAllocator(previousAllocator)
+        var taskError: Option[Throwable] = None
+        DefaultHostMemoryAllocator.set(trackingAllocator)
+        try {
+          val results = shuffleReader.read()
+          var resultCount = 0
+          while (results.hasNext) {
+            val result = results.next()
+            try {
+              resultCount += 1
+            } finally {
+              result.asInstanceOf[Product2[Any, Any]]._2 match {
+                case batch: ColumnarBatch => batch.close()
+                case _ =>
+              }
+            }
+          }
+          assert(resultCount === keyValuePairsPerMap * numMaps)
+          // One dequeued batch can coexist with up to maxBytesInFlight of queued batches.
+          assert(trackingAllocator.peak <= 2 * maxBytesInFlight,
+            s"decoded host memory peaked at ${trackingAllocator.peak} bytes with " +
+              s"$maxBytesInFlight bytes allowed in flight")
+        } catch {
+          case t: Throwable =>
+            taskError = Some(t)
+            throw t
+        } finally {
+          try {
+            DefaultHostMemoryAllocator.set(previousAllocator)
+          } finally {
+            taskContext.markTaskCompleted(taskError)
+          }
+        }
       } else {
         val results = shuffleReader.read().toArray
         try {
@@ -263,8 +341,13 @@ class RapidsShuffleThreadedReaderSuite
     })
   }
 
-  test("reader pool safely resumes a BlockState after a limiter pause") {
-    runShuffleRead(numReaderThreads = 2, maxBytesInFlight = 128, useNonEmptyBatches = true)
+  test("reader pool bounds queued batches and resumes a BlockState after a limiter pause") {
+    runShuffleRead(
+      numReaderThreads = 2,
+      maxBytesInFlight = 8 * 1024,
+      useNonEmptyBatches = true,
+      rowsPerBatch = 1024,
+      trackPeakDecodedBytes = true)
   }
 
   /**
