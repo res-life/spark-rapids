@@ -26,6 +26,19 @@ import net.jpountz.lz4.LZ4Compressor;
  * Writes the lz4-java block stream used by Spark directly into record-owned heap segments.
  * Compressed payloads have no intermediate output array. Input buffering, the RAW-block copy,
  * and any copying inside the compressor/JNI implementation remain.
+ *
+ * <p>Each instance encodes one shuffle record, which is one partition's ColumnarBatch rather
+ * than one row. See {@link SegmentedByteArrayOutputStream} for the partition/record/segment
+ * relationship. The serialized record is split into input blocks of at most
+ * {@code spark.io.compression.lz4.blockSize} bytes (Spark defaults to 32 KiB); the final block
+ * may be smaller. Each encoded block contains a header followed by compressed bytes, or RAW
+ * bytes when compression does not reduce the size. Closing the record's stream appends an
+ * end marker.
+ *
+ * <p>A segment is storage for encoded blocks, not an input compression block. Before encoding,
+ * reserve enough contiguous space for the header and the maximum compressed length. After
+ * encoding, commit only the actual header and payload length. If the next reservation does not
+ * fit, start a new segment and leave the old segment's unused tail out of the record payload.
  */
 public final class Lz4SegmentedOutputStream extends OutputStream {
   private static final byte[] MAGIC = {'L', 'Z', '4', 'B', 'l', 'o', 'c', 'k'};

@@ -27,6 +27,30 @@ import java.util.Objects;
  * Like ByteArrayOutputStream, close is a no-op: closing a codec must leave its output readable.
  * The producer owns the stream until publication; the consumer then owns it exclusively.
  * The transferred owner releases segment references on close; there is no retained buffer pool.
+ *
+ * <p>Terminology in the multithreaded shuffle writer:
+ * <ul>
+ *   <li>Partition: a logical reduce partition. One map task can produce multiple records for
+ *       the same partition, including records from different upstream GPU batches.</li>
+ *   <li>Record: one input (partition key, ColumnarBatch) pair. The batch belongs to one partition
+ *       and may contain many rows. Each record has its own serialization/compression stream and
+ *       its own instance of this buffer.</li>
+ *   <li>Segment: one fixed-capacity byte array owned by one record. A record can span multiple
+ *       segments; segments are never shared between records. Only each segment's valid prefix
+ *       contributes to the record's byte stream.</li>
+ *   <li>Compression block: a chunk of a record's serialized bytes processed by the codec.
+ *       Its boundaries are independent of row boundaries. In the direct LZ4 path, a segment
+ *       can hold multiple complete encoded blocks, and no encoded block crosses a segment.</li>
+ * </ul>
+ * <pre>
+ * One map task's output for a reduce partition:
+ *   record 0 -> segment 0 [block 0][block 1][unused tail]
+ *           -> segment 1 [block 2][end marker][unused tail]
+ *   record 1 -> its own segments and compression stream
+ * </pre>
+ * <p>The block-alignment guarantee comes from {@link Lz4SegmentedOutputStream} reserving
+ * contiguous regions with {@link #acquire(int)}. Ordinary {@code write} calls can split data
+ * across segments. Segment boundaries and unused tails are not encoded in the output stream.
  */
 public final class SegmentedByteArrayOutputStream extends OutputStream {
   private final int segmentSize;
