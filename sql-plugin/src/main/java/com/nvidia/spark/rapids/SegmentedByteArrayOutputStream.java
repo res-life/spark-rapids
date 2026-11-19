@@ -35,10 +35,12 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
   private WritableRegion pending;
 
   private static final class Segment {
+    // Payload always starts at array index 0: bytes[0, payloadLength) contains valid data.
+    // The unused tail bytes[payloadLength, bytes.length) is not part of the record payload.
     private final byte[] bytes;
-    // Position in the logical byte stream, excluding unused tails of preceding segments.
+    // Offset in the owning record's logical byte stream, excluding preceding segments' tails.
     private final long logicalOffset;
-    // Valid bytes occupy bytes[0, payloadLength); the remaining array capacity is unused.
+    // Number of valid bytes: 0 <= payloadLength <= bytes.length; a segment may be completely full.
     private int payloadLength;
 
     private Segment(int capacity, long logicalOffset) {
