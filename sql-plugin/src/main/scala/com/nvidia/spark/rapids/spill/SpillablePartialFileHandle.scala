@@ -451,23 +451,29 @@ class SpillablePartialFileHandle private (
 
     // Flush before forcing the file, including bytes appended after a write-phase spill.
     // The streams are detached, so every close must be attempted even if flush/force fails.
+    // Keep cleanup inline to avoid capturing mutable state in callbacks.
     var failure: Throwable = null
     var interrupted = false
-    def attempt(action: => Unit): Unit = {
-      try {
-        action
-      } catch {
-        case t: Throwable =>
-          interrupted |= failure != null && t.isInstanceOf[InterruptedException]
-          failure = SpillFramework.addFailure(failure, t)
-      }
-    }
-    attempt {
+    try {
       bos.foreach(_.flush())
       if (syncWrites) fos.foreach(_.getChannel.force(true))
+    } catch {
+      case t: Throwable => failure = t
     }
-    attempt { bos.foreach(_.close()) }
-    attempt { fos.foreach(_.close()) }
+    try {
+      bos.foreach(_.close())
+    } catch {
+      case t: Throwable =>
+        interrupted |= failure != null && t.isInstanceOf[InterruptedException]
+        failure = SpillFramework.addFailure(failure, t)
+    }
+    try {
+      fos.foreach(_.close())
+    } catch {
+      case t: Throwable =>
+        interrupted |= failure != null && t.isInstanceOf[InterruptedException]
+        failure = SpillFramework.addFailure(failure, t)
+    }
     if (interrupted) Thread.currentThread().interrupt()
     if (failure != null) throw failure
   }

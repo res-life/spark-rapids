@@ -752,6 +752,66 @@ class SpillablePartialFileHandleSuite
     }
   }
 
+  for (interruptAt <- Seq("buffered close", "raw close"); failFlush <- Seq(false, true)) {
+    test(s"finishWrite preserves interruption: at=$interruptAt failFlush=$failFlush") {
+      val file = File.createTempFile("finish-interrupted-", ".bin")
+      val flushFailure = new IOException("injected flush failure")
+      val interruption = new InterruptedException("injected close interruption")
+      var raw: FileOutputStream = null
+      var attemptedBufferedClose = false
+      val handle = SpillablePartialFileHandle.createFileOnly(file, syncWrites = false,
+        bufferedOutputStreamFactory = out => {
+          raw = out
+          new BufferedOutputStream(out) {
+            override def flush(): Unit = {
+              if (failFlush) throw flushFailure
+              super.flush()
+            }
+            override def close(): Unit = {
+              attemptedBufferedClose = true
+              if (interruptAt == "buffered close") throw interruption
+              raw.close()
+            }
+          }
+        })
+      val tracked = mock[FileOutputStream]
+      doAnswer((_: InvocationOnMock) => {
+        raw.close()
+        if (interruptAt == "raw close") throw interruption
+        null
+      }).when(tracked).close()
+      val wasInterrupted = Thread.interrupted()
+      try {
+        handle.write(Array[Byte](1, 2, 3), 0, 3)
+        val field = classOf[SpillablePartialFileHandle].getDeclaredField("fileOutputStream")
+        field.setAccessible(true)
+        field.set(handle, Some(tracked))
+        if (failFlush) {
+          assert(intercept[IOException](handle.finishWrite()) eq flushFailure)
+          assert(flushFailure.getSuppressed.toSeq == Seq(interruption))
+          assert(Thread.currentThread().isInterrupted)
+        } else {
+          assert(intercept[InterruptedException](handle.finishWrite()) eq interruption)
+          assert(interruption.getSuppressed.isEmpty)
+          assert(!Thread.currentThread().isInterrupted)
+        }
+        assert(attemptedBufferedClose)
+        assert(!raw.getChannel.isOpen)
+        handle.finishWrite()
+        verify(tracked).close()
+      } finally {
+        Thread.interrupted()
+        try {
+          if (raw != null) raw.close()
+          handle.close()
+          file.delete()
+        } finally {
+          if (wasInterrupted) Thread.currentThread().interrupt()
+        }
+      }
+    }
+  }
+
   for ((sync, failForce) <- Seq((false, false), (true, false), (true, true))) {
     test(s"finishWrite flush/sync/close order: sync=$sync failForce=$failForce") {
       val file = File.createTempFile("finish-sync-", ".bin")
