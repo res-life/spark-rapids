@@ -20,7 +20,8 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.file.Files
 
-import com.nvidia.spark.rapids.ShimLoader
+import com.nvidia.spark.rapids.{RapidsConf, SegmentedByteArrayOutputStream, ShimLoader}
+import com.nvidia.spark.rapids.spill.SpillFramework
 import org.mockito.Mockito.when
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
@@ -84,4 +85,73 @@ class RapidsLocalDiskShuffleMapOutputWriterSuite extends AnyFunSuite with Mockit
       sparkContext.stop()
     }
   }
+
+  test("record output without catalog consumes segments directly into a file") {
+    val directory = Files.createTempDirectory("shuffle-owned-file-").toFile
+    val resolver = mock[IndexShuffleBlockResolver]
+    when(resolver.getDataFile(1, 2L)).thenReturn(new File(directory, "shuffle.data"))
+    val writer = new RapidsLocalDiskShuffleMapOutputWriter(
+      1, 2L, 2, resolver, new SparkConf(false))
+    writer.setRecordBufferMode(retainInMemory = false)
+    val bytes = Array.tabulate[Byte](150003)(_.toByte)
+    try {
+      val partition = writer.getPartitionWriter(0)
+      assert(writer.getPartialFileHandle().get.isFileOnly)
+      val stream = partition.openStream()
+      val record = new SegmentedByteArrayOutputStream(8192)
+      record.write(bytes)
+      stream.asInstanceOf[SegmentedByteArrayOutputStream.Sink].writeRecord(record)
+      assert(partition.getNumBytesWritten == bytes.length)
+      intercept[IllegalStateException](record.write(42))
+      stream.close()
+      writer.getPartitionWriter(1).openStream().close()
+      writer.finishWritePhase()
+      assert(writer.getPartitionLengths().sameElements(Array[Long](bytes.length, 0)))
+      val handle = writer.getPartialFileHandle().get
+      val actual = new Array[Byte](bytes.length)
+      assert(handle.read(actual, 0, actual.length) == actual.length)
+      assert(actual.sameElements(bytes))
+    } finally {
+      writer.abort(null)
+      directory.delete()
+    }
+  }
+
+  for (recordMode <- Seq(false, true)) {
+    test(s"native storage for ordinary callers or synchronous records: record=$recordMode") {
+      val conf = new SparkConf(false)
+        .set("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize", "128k")
+        .set("spark.rapids.memory.host.partialFileBufferInitialSize", "1k")
+        .set("spark.shuffle.sync", recordMode.toString)
+      SpillFramework.initialize(new RapidsConf(conf))
+      val directory = Files.createTempDirectory("shuffle-native-stream-").toFile
+      val resolver = mock[IndexShuffleBlockResolver]
+      when(resolver.getDataFile(1, 2L)).thenReturn(new File(directory, "shuffle.data"))
+      val writer = new RapidsLocalDiskShuffleMapOutputWriter(1, 2L, 1, resolver, conf)
+      try {
+        if (recordMode) writer.setRecordBufferMode(retainInMemory = false)
+        val stream = writer.getPartitionWriter(0).openStream()
+        if (recordMode) {
+          val record = new SegmentedByteArrayOutputStream(7)
+          record.write(Array[Byte](1, 2, 3))
+          stream.asInstanceOf[SegmentedByteArrayOutputStream.Sink].writeRecord(record)
+        } else {
+          stream.write(Array[Byte](1, 2, 3))
+        }
+        stream.close()
+        writer.finishWritePhase()
+        val handle = writer.getPartialFileHandle().get
+        assert(handle.isMemoryBased && !handle.isSpilled)
+        val actual = new Array[Byte](3)
+        assert(handle.read(actual, 0, 3) == 3)
+        assert(actual.sameElements(Array[Byte](1, 2, 3)))
+        intercept[IllegalStateException](writer.setRecordBufferMode(retainInMemory = false))
+      } finally {
+        writer.abort(null)
+        SpillFramework.shutdown()
+        directory.delete()
+      }
+    }
+  }
+
 }

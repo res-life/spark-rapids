@@ -16,12 +16,15 @@
 
 package com.nvidia.spark.rapids.spill
 
-import java.io.{BufferedOutputStream, File, FileOutputStream}
+import java.io.{BufferedOutputStream, File, FileOutputStream, IOException}
+import java.nio.channels.FileChannel
 import java.util.Arrays
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 
 import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsConf
+import org.mockito.Mockito.{doAnswer, doThrow, inOrder, never, spy, verify, when}
+import org.mockito.invocation.InvocationOnMock
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatestplus.mockito.MockitoSugar
@@ -706,6 +709,93 @@ class SpillablePartialFileHandleSuite
     }
   }
 
+  for (failureAt <- Seq("flush", "close", "repeated flush")) {
+    test(s"finishWrite closes the raw file after buffered failure: $failureAt") {
+      val file = File.createTempFile("finish-failure-", ".bin")
+      val failAtFlush = failureAt != "close"
+      val flushFailure = new IOException("injected flush failure")
+      val closeFailure = if (failureAt == "repeated flush") flushFailure else {
+        new IOException("injected close failure")
+      }
+      var raw: FileOutputStream = null
+      var attemptedClose = false
+      val handle = SpillablePartialFileHandle.createFileOnly(file, syncWrites = false,
+        bufferedOutputStreamFactory = out => {
+          raw = out
+          new BufferedOutputStream(out) {
+            override def flush(): Unit = {
+              if (failAtFlush) throw flushFailure
+              super.flush()
+            }
+            override def close(): Unit = {
+              attemptedClose = true
+              throw closeFailure
+            }
+          }
+        })
+      try {
+        handle.write(Array[Byte](1, 2, 3), 0, 3)
+        val error = intercept[IOException](handle.finishWrite())
+        assert(error eq (if (failAtFlush) flushFailure else closeFailure))
+        assert(attemptedClose, "the buffered stream must be closed after a failed flush")
+        assert(!raw.getChannel.isOpen, "the raw file must close even if buffered close fails")
+        if (failAtFlush && (closeFailure ne error)) {
+          assert(error.getSuppressed.contains(closeFailure))
+        } else {
+          assert(error.getSuppressed.isEmpty)
+        }
+      } finally {
+        if (raw != null) raw.close()
+        handle.close()
+        file.delete()
+      }
+    }
+  }
+
+  for ((sync, failForce) <- Seq((false, false), (true, false), (true, true))) {
+    test(s"finishWrite flush/sync/close order: sync=$sync failForce=$failForce") {
+      val file = File.createTempFile("finish-sync-", ".bin")
+      var raw: FileOutputStream = null
+      var buffered: BufferedOutputStream = null
+      val handle = SpillablePartialFileHandle.createFileOnly(file, syncWrites = sync,
+        bufferedOutputStreamFactory = out => {
+          raw = out
+          buffered = spy(new BufferedOutputStream(out))
+          buffered
+        })
+      val channel = mock[FileChannel]
+      val tracked = mock[FileOutputStream]
+      val forceFailure = new IOException("injected force failure")
+      when(tracked.getChannel).thenReturn(channel)
+      if (failForce) doThrow(forceFailure).when(channel).force(true)
+      doAnswer((_: InvocationOnMock) => { raw.close(); null }).when(tracked).close()
+      try {
+        val expected = Array[Byte](1, 2, 3, 4, 5)
+        handle.write(expected, 0, expected.length)
+        // Observe the force operation without relying on filesystem durability or JDK internals.
+        val field = classOf[SpillablePartialFileHandle].getDeclaredField("fileOutputStream")
+        field.setAccessible(true)
+        field.set(handle, Some(tracked))
+        if (failForce) {
+          assert(intercept[IOException](handle.finishWrite()) eq forceFailure)
+        } else {
+          handle.finishWrite()
+        }
+        val calls = inOrder(buffered, channel, tracked)
+        calls.verify(buffered).flush()
+        if (sync) calls.verify(channel).force(true) else verify(channel, never()).force(true)
+        calls.verify(buffered).close()
+        calls.verify(tracked).close()
+        assert(!raw.getChannel.isOpen)
+        assert(java.nio.file.Files.readAllBytes(file.toPath).sameElements(expected))
+      } finally {
+        if (raw != null) raw.close()
+        handle.close()
+        file.delete()
+      }
+    }
+  }
+
   private def withLargeLogicalFileOnlyHandle(tempFile: File)(
       testBody: SpillablePartialFileHandle => Unit): Unit = {
     val outputStream = mock[BufferedOutputStream]
@@ -713,10 +803,16 @@ class SpillablePartialFileHandleSuite
       file = tempFile,
       syncWrites = false,
       bufferedOutputStreamFactory = _ => outputStream)) { handle =>
-      val ignored = new Array[Byte](1)
+      val ignored = new Array[Byte](1024 * 1024)
       val expectedLogicalSize = Int.MaxValue.toLong + 4096L
-      handle.write(ignored, 0, Int.MaxValue)
-      handle.write(ignored, 0, 4096)
+      // The mocked stream discards bytes; keep each array write valid while advancing
+      // the handle past 2 GiB without allocating or writing a 2 GiB payload.
+      var remaining = expectedLogicalSize
+      while (remaining > 0) {
+        val size = math.min(remaining, ignored.length).toInt
+        handle.write(ignored, 0, size)
+        remaining -= size
+      }
       handle.finishWrite()
       assert(handle.getTotalBytesWritten == expectedLogicalSize)
       testBody(handle)
