@@ -27,6 +27,7 @@ import net.jpountz.xxhash.XXHashFactory
 import org.scalatest.funsuite.AnyFunSuite
 
 import org.apache.spark.SparkConf
+import org.apache.spark.internal.config.{ConfigEntry, IO_COMPRESSION_LZ4_BLOCKSIZE}
 import org.apache.spark.serializer.{JavaSerializer, SerializerManager}
 import org.apache.spark.storage.ShuffleBlockId
 
@@ -75,12 +76,13 @@ class Lz4SegmentedOutputStreamSuite extends AnyFunSuite {
       new Random(197).nextBytes(input)
       java.util.Arrays.fill(input, 0, blockSize, 0.toByte)
       java.util.Arrays.fill(input, blockSize * 3, blockSize * 4, 7.toByte)
+      val factory = new Lz4SegmentedOutputStream.Factory(blockSize, compressor)
       for (length <- Seq(0, 1, blockSize - 1, blockSize, blockSize + 1, input.length)) {
         val payload = input.take(length)
         val expected = new ByteArrayOutputStream()
         writeMixed(manager.wrapStream(block, expected), payload)
         val result = new SegmentedByteArrayOutputStream(segmentSize)
-        val direct = new Lz4SegmentedOutputStream(result, blockSize, compressor, checksum)
+        val direct = factory.create(result, checksum)
         writeMixed(direct, payload)
         direct.close()
         intercept[IOException](direct.write(1))
@@ -92,18 +94,75 @@ class Lz4SegmentedOutputStreamSuite extends AnyFunSuite {
 
   private class RecordingCompressor extends LZ4Compressor {
     val destinations = new ArrayBuffer[Array[Byte]]()
+    val capacities = new ArrayBuffer[Int]()
     var failure: Option[RuntimeException] = None
 
     override def compress(src: Array[Byte], srcOffset: Int, length: Int,
         dst: Array[Byte], dstOffset: Int, capacity: Int): Int = {
       failure.foreach(throw _)
       destinations += dst
+      capacities += capacity
       compressor.compress(src, srcOffset, length, dst, dstOffset, capacity)
     }
 
     override def compress(src: ByteBuffer, srcOffset: Int, length: Int,
         dst: ByteBuffer, dstOffset: Int, capacity: Int): Int =
       compressor.compress(src, srcOffset, length, dst, dstOffset, capacity)
+  }
+
+  test("full and partial blocks use the configured capacity at the exact segment boundary") {
+    val blockSize = 32768
+    val bound = compressor.maxCompressedLength(blockSize)
+    val minimumAvailable = 21 + bound
+    val recording = new RecordingCompressor
+    val factory = new Lz4SegmentedOutputStream.Factory(blockSize, recording)
+    assert(!factory.supports(minimumAvailable - 1))
+    assert(factory.supports(minimumAvailable))
+    intercept[IllegalArgumentException] {
+      factory.create(new SegmentedByteArrayOutputStream(minimumAvailable - 1), checksum)
+    }
+    val conf = new SparkConf(false).set("spark.io.compression.codec", "lz4")
+    val manager = new SerializerManager(new JavaSerializer(conf), conf)
+    val input = new Array[Byte](blockSize * 3 + 1)
+    new Random(29).nextBytes(input)
+    val result = new SegmentedByteArrayOutputStream(minimumAvailable)
+    writeMixed(factory.create(result, checksum), input)
+    assert(recording.capacities.toSeq == Seq.fill(4)(bound))
+    assert(decode(manager, bytes(result)).sameElements(input))
+  }
+
+  test("configured block size is read once and retained across record streams") {
+    class CountingSparkConf extends SparkConf(false) {
+      var blockSizeReads = 0
+
+      override def get[T](entry: ConfigEntry[T]): T = {
+        if (entry.key == IO_COMPRESSION_LZ4_BLOCKSIZE.key) {
+          blockSizeReads += 1
+        }
+        super.get(entry)
+      }
+    }
+    val conf = new CountingSparkConf
+    conf.set("spark.io.compression.codec", "lz4")
+      .set("spark.io.compression.lz4.blockSize", "64k")
+    val manager = new SerializerManager(new JavaSerializer(conf), conf)
+    val input = new Array[Byte](65536 * 3 + 17)
+    new Random(43).nextBytes(input)
+    val expected = new ByteArrayOutputStream()
+    writeMixed(manager.wrapStream(block, expected), input)
+    conf.blockSizeReads = 0
+    val compression = new ShuffleRecordCompression(conf, manager)
+    for (_ <- 0 until 3) {
+      val result = new SegmentedByteArrayOutputStream(131072)
+      val stream = compression.wrapStream(block, result)
+      assert(stream.isInstanceOf[Lz4SegmentedOutputStream])
+      writeMixed(stream, input)
+      assert(bytes(result).sameElements(expected.toByteArray))
+      assert(decode(manager, bytes(result)).sameElements(input))
+      assert(conf.blockSizeReads == 1)
+      // Spark Core does not support live updates; the writer keeps its captured parameters.
+      conf.set("spark.io.compression.lz4.blockSize", "16k")
+    }
   }
 
   test("compressor writes into the same arrays transferred to the partial-file consumer") {
@@ -140,6 +199,8 @@ class Lz4SegmentedOutputStreamSuite extends AnyFunSuite {
 
   for ((codec, encrypted, compress, segmentSize, optimized) <- Seq(
       ("lz4", false, true, 131072, true),
+      ("LZ4", false, true, 131072, true),
+      ("org.apache.spark.io.LZ4CompressionCodec", false, true, 131072, true),
       ("lz4", true, true, 131072, false),
       ("lz4", false, false, 131072, false),
       ("lz4", false, true, 8192, false),

@@ -38,24 +38,57 @@ public final class Lz4SegmentedOutputStream extends OutputStream {
   private final Checksum checksum;
   private final byte[] input;
   private final int level;
+  private final int maxCompressedLength;
+  private final int minimumAvailableSize;
   private int count;
   private boolean finished;
 
-  public static boolean supports(int blockSize, int segmentSize, LZ4Compressor compressor) {
-    return blockSize >= 64 && blockSize <= (1 << 25) &&
-        HEADER_LENGTH + compressor.maxCompressedLength(blockSize) <= segmentSize;
+  /** Immutable parameters shared by all record streams belonging to a shuffle writer. */
+  public static final class Factory {
+    private final LZ4Compressor compressor;
+    private final int blockSize;
+    private final int level;
+    private final int maxCompressedLength;
+    private final int minimumAvailableSize;
+
+    public Factory(int blockSize, LZ4Compressor compressor) {
+      if (blockSize < 64 || blockSize > (1 << 25)) {
+        throw new IllegalArgumentException("LZ4 block size must be between 64 bytes and 32 MiB");
+      }
+      this.compressor = Objects.requireNonNull(compressor, "compressor");
+      this.blockSize = blockSize;
+      level = Math.max(0, 32 - Integer.numberOfLeadingZeros(blockSize - 1) - LEVEL_BASE);
+      maxCompressedLength = compressor.maxCompressedLength(blockSize);
+      minimumAvailableSize = HEADER_LENGTH + maxCompressedLength;
+    }
+
+    public boolean supports(int segmentSize) {
+      return minimumAvailableSize <= segmentSize;
+    }
+
+    public Lz4SegmentedOutputStream create(
+        SegmentedByteArrayOutputStream out, Checksum checksum) {
+      return new Lz4SegmentedOutputStream(out, this, checksum);
+    }
   }
 
   public Lz4SegmentedOutputStream(SegmentedByteArrayOutputStream out, int blockSize,
       LZ4Compressor compressor, Checksum checksum) {
+    this(out, new Factory(blockSize, compressor), checksum);
+  }
+
+  private Lz4SegmentedOutputStream(
+      SegmentedByteArrayOutputStream out, Factory factory, Checksum checksum) {
     this.out = Objects.requireNonNull(out, "out");
-    this.compressor = Objects.requireNonNull(compressor, "compressor");
+    this.compressor = factory.compressor;
     this.checksum = Objects.requireNonNull(checksum, "checksum");
-    if (!supports(blockSize, out.getSegmentSize(), compressor)) {
+    if (!factory.supports(out.getSegmentSize())) {
       throw new IllegalArgumentException("Encoded LZ4 block must fit in one segment");
     }
-    input = new byte[blockSize];
-    level = Math.max(0, 32 - Integer.numberOfLeadingZeros(blockSize - 1) - LEVEL_BASE);
+    input = new byte[factory.blockSize];
+    level = factory.level;
+    maxCompressedLength = factory.maxCompressedLength;
+    minimumAvailableSize = factory.minimumAvailableSize;
   }
 
   private void requireOpen() throws IOException {
@@ -91,13 +124,14 @@ public final class Lz4SegmentedOutputStream extends OutputStream {
     checksum.reset();
     checksum.update(input, 0, count);
     int check = (int) checksum.getValue();
-    int bound = compressor.maxCompressedLength(count);
+    // The full-block bound also covers a partial final block. Advance by the actual
+    // encoded length below, so subsequent blocks can reuse the remaining space.
     try (SegmentedByteArrayOutputStream.WritableRegion region =
-        out.acquire(HEADER_LENGTH + bound)) {
+        out.acquire(minimumAvailableSize)) {
       byte[] bytes = region.array();
       int offset = region.offset();
       int length = compressor.compress(input, 0, count,
-          bytes, offset + HEADER_LENGTH, bound);
+          bytes, offset + HEADER_LENGTH, maxCompressedLength);
       int method = LZ4;
       if (length >= count) {
         method = RAW;

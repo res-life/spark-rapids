@@ -36,16 +36,23 @@ private object ShuffleRecordCompression {
 
 /** Narrow POC: preserve SerializerManager for encryption, other codecs and small segments. */
 private[rapids] class ShuffleRecordCompression(conf: SparkConf, manager: SerializerManager) {
-  private lazy val codec = CompressionCodec.createCodec(conf)
-  private lazy val blockSize = conf.get(IO_COMPRESSION_LZ4_BLOCKSIZE).toInt
+  // Spark Core compression settings are fixed for the running application. Like Spark's
+  // LZ4CompressionCodec, capture them once, then share the immutable parameters across records.
+  private lazy val useLz4 = {
+    if (manager.encryptionEnabled || !conf.getBoolean("spark.shuffle.compress", true)) {
+      false
+    } else {
+      val codecName = CompressionCodec.getCodecName(conf)
+      codecName.equalsIgnoreCase("lz4") || codecName == classOf[LZ4CompressionCodec].getName
+    }
+  }
+  private lazy val lz4 = new Lz4SegmentedOutputStream.Factory(
+    conf.get(IO_COMPRESSION_LZ4_BLOCKSIZE).toInt, ShuffleRecordCompression.compressor)
 
   def wrapStream(block: ShuffleBlockId, out: OutputStream): OutputStream = out match {
     case segmented: SegmentedByteArrayOutputStream
-        if !manager.encryptionEnabled && conf.getBoolean("spark.shuffle.compress", true) &&
-          codec.getClass == classOf[LZ4CompressionCodec] &&
-          Lz4SegmentedOutputStream.supports(blockSize, segmented.getSegmentSize,
-            ShuffleRecordCompression.compressor) =>
-      new Lz4SegmentedOutputStream(segmented, blockSize, ShuffleRecordCompression.compressor,
+        if useLz4 && lz4.supports(segmented.getSegmentSize) =>
+      lz4.create(segmented,
         ShuffleRecordCompression.hashes.newStreamingHash32(
           ShuffleRecordCompression.checksumSeed).asChecksum())
     case _ => manager.wrapStream(block, out)
