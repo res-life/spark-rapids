@@ -36,12 +36,14 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
 
   private static final class Segment {
     private final byte[] bytes;
-    private final long start;
-    private int length;
+    // Position in the logical byte stream, excluding unused tails of preceding segments.
+    private final long logicalOffset;
+    // Valid bytes occupy bytes[0, payloadLength); the remaining array capacity is unused.
+    private int payloadLength;
 
-    private Segment(int capacity, long start) {
+    private Segment(int capacity, long logicalOffset) {
       this.bytes = new byte[capacity];
-      this.start = start;
+      this.logicalOffset = logicalOffset;
     }
   }
 
@@ -68,7 +70,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
   private Segment writableSegment(int minimumCapacity) {
     requireWritable();
     if (segments.isEmpty() ||
-        segmentSize - segments.get(segments.size() - 1).length < minimumCapacity) {
+        segmentSize - segments.get(segments.size() - 1).payloadLength < minimumCapacity) {
       segments.add(new Segment(segmentSize, count));
     }
     return segments.get(segments.size() - 1);
@@ -103,15 +105,15 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     }
 
     public byte[] array() { requireActive(); return segment.bytes; }
-    public int offset() { requireActive(); return segment.length; }
-    public int capacity() { requireActive(); return segmentSize - segment.length; }
+    public int offset() { requireActive(); return segment.payloadLength; }
+    public int capacity() { requireActive(); return segmentSize - segment.payloadLength; }
 
     public void commit(int length) {
       requireActive();
       if (length < 0 || length > capacity()) {
         throw new IndexOutOfBoundsException();
       }
-      segment.length += length;
+      segment.payloadLength += length;
       count += length;
       close();
     }
@@ -121,7 +123,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     public void close() {
       if (!done) {
         requireActive();
-        if (segment.length == 0) segments.remove(segments.size() - 1);
+        if (segment.payloadLength == 0) segments.remove(segments.size() - 1);
         pending = null;
         done = true;
       }
@@ -131,7 +133,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
   @Override
   public void write(int value) {
     Segment segment = writableSegment(1);
-    segment.bytes[segment.length++] = (byte) value;
+    segment.bytes[segment.payloadLength++] = (byte) value;
     count++;
   }
 
@@ -144,9 +146,9 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     }
     while (length > 0) {
       Segment segment = writableSegment(1);
-      int amount = Math.min(length, segmentSize - segment.length);
-      System.arraycopy(bytes, offset, segment.bytes, segment.length, amount);
-      segment.length += amount;
+      int amount = Math.min(length, segmentSize - segment.payloadLength);
+      System.arraycopy(bytes, offset, segment.bytes, segment.payloadLength, amount);
+      segment.payloadLength += amount;
       count += amount;
       offset += amount;
       length -= amount;
@@ -171,7 +173,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
       throw new IllegalArgumentException("Cannot write a stream to itself");
     }
     for (Segment segment : segments) {
-      out.write(segment.bytes, 0, segment.length);
+      out.write(segment.bytes, 0, segment.payloadLength);
     }
   }
 
@@ -221,13 +223,13 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
       int high = segments.size() - 1;
       while (low < high) {
         int mid = low + (high - low + 1) / 2;
-        if (segments.get(mid).start <= offset) low = mid; else high = mid - 1;
+        if (segments.get(mid).logicalOffset <= offset) low = mid; else high = mid - 1;
       }
       int index = low;
       while (length > 0) {
         Segment segment = segments.get(index++);
-        int inSegment = (int) (offset - segment.start);
-        int size = Math.min(length, segment.length - inSegment);
+        int inSegment = (int) (offset - segment.logicalOffset);
+        int size = Math.min(length, segment.payloadLength - inSegment);
         System.arraycopy(segment.bytes, inSegment, target, start, size);
         offset += size;
         start += size;
@@ -239,7 +241,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
       requireOpen();
       Objects.requireNonNull(out, "out");
       for (Segment segment : segments) {
-        out.write(segment.bytes, 0, segment.length);
+        out.write(segment.bytes, 0, segment.payloadLength);
       }
     }
 
