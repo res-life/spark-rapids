@@ -39,13 +39,13 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     // The unused tail bytes[payloadLength, bytes.length) is not part of the record payload.
     private final byte[] bytes;
     // Offset in the owning record's logical byte stream, excluding preceding segments' tails.
-    private final long logicalOffset;
+    private final long offsetInRecord;
     // Number of valid bytes: 0 <= payloadLength <= bytes.length; a segment may be completely full.
     private int payloadLength;
 
-    private Segment(int capacity, long logicalOffset) {
+    private Segment(int capacity, long offsetInRecord) {
       this.bytes = new byte[capacity];
-      this.logicalOffset = logicalOffset;
+      this.offsetInRecord = offsetInRecord;
     }
   }
 
@@ -225,12 +225,12 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
       int high = segments.size() - 1;
       while (low < high) {
         int mid = low + (high - low + 1) / 2;
-        if (segments.get(mid).logicalOffset <= offset) low = mid; else high = mid - 1;
+        if (segments.get(mid).offsetInRecord <= offset) low = mid; else high = mid - 1;
       }
       int index = low;
       while (length > 0) {
         Segment segment = segments.get(index++);
-        int inSegment = (int) (offset - segment.logicalOffset);
+        int inSegment = (int) (offset - segment.offsetInRecord);
         int size = Math.min(length, segment.payloadLength - inSegment);
         System.arraycopy(segment.bytes, inSegment, target, start, size);
         offset += size;
