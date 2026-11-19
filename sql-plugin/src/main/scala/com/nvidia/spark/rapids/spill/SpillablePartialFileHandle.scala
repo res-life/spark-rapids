@@ -23,8 +23,8 @@ import java.nio.channels.FileChannel
 import scala.util.control.NonFatal
 
 import ai.rapids.cudf.HostMemoryBuffer
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.{HostAlloc, SegmentedByteArrayOutputStream}
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.rapids.GpuTaskMetrics
@@ -541,6 +541,17 @@ class SpillablePartialFileHandle private (
             "Host buffer is null but spilledToDisk is false")
       }
     }
+  }
+
+  /**
+   * Release the sequential reader while preserving its logical position for a later read.
+   * Like read(), this is single-threaded; random-access readers keep their own channel.
+   */
+  def closeReadStream(): Unit = {
+    val streams = bufferedInputStream.toSeq ++ fileInputStream.toSeq
+    bufferedInputStream = None
+    fileInputStream = None
+    withResource(streams) { _ => () }
   }
 
   /**

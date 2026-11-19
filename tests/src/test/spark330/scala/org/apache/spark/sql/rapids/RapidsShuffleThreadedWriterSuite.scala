@@ -23,6 +23,7 @@ package org.apache.spark.sql.rapids
 
 import java.io._
 import java.nio.ByteBuffer
+import java.nio.file.{Files, NoSuchFileException, Paths}
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
@@ -36,6 +37,7 @@ import scala.util.control.NonFatal
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{MapOutputSegments, MultithreadedShuffleBufferCatalog, RapidsConf,
   SlicedSerializedColumnVector}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.spill.{SpillablePartialFileHandle, SpillFramework}
 import org.mockito.{Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
@@ -252,8 +254,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   protected def outputBufferSegmentSize: String = "0"
 
-  private def createTestBatch(value: Int): ColumnarBatch = {
-    val bufferSize = 64 + (value % 64)
+  private def createTestBatch(value: Int, extraBytes: Int = 0): ColumnarBatch = {
+    val bufferSize = 64 + (value % 64) + extraBytes
     val hmb = HostMemoryBuffer.allocate(bufferSize)
     for (i <- 0 until bufferSize) {
       hmb.setByte(i, (value + i).toByte)
@@ -549,7 +551,85 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
 
   // ==================== Skip-merge catalog ====================
 
-  for (segmentSize <- Seq("0", "32", "1m"); compress <- Seq(false, true)) {
+  test("many file-backed batches keep output and merge input descriptors bounded") {
+    val descriptors = Paths.get("/proc/self/fd")
+    assume(Files.isDirectory(descriptors), "file descriptor inspection requires procfs")
+    conf.set("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize", "128k")
+    useUncompressedShuffleOutput()
+    val maxOpenFiles = new AtomicInteger()
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def getPartitionWriter(reducePartitionId: Int): ShufflePartitionWriter = {
+            val openFiles = withResource(Files.list(descriptors)) { entries =>
+              import scala.collection.JavaConverters._
+              entries.iterator().asScala.count { path =>
+                try {
+                  Files.readSymbolicLink(path).startsWith(tempDir.toPath)
+                } catch {
+                  case _: NoSuchFileException => false // Another merger closed its file.
+                }
+              }
+            }
+            maxOpenFiles.accumulateAndGet(openFiles, (a: Int, b: Int) => math.max(a, b))
+            // Allow descriptor turnover during this non-atomic procfs scan. The bound is
+            // independent of batch count and also checked after all partition-0 merge reads.
+            assert(openFiles <= 2 * numWriterThreads + 2,
+              s"Completed batches retained $openFiles open files")
+            super.getPartitionWriter(reducePartitionId)
+          }
+        }
+      }
+    }
+    val batches = 32
+    val writer = createWriter()
+    try {
+      writer.write(createTestRecords(Iterator.fill(batches)(Seq(0, 1)).flatten))
+      writer.stop(true)
+      verifyWrite(writer, batches * 2, Set(0, 1))
+      assert(maxOpenFiles.get() > 0, "the test must exercise file-backed storage")
+      assert(readPartitionKeys(writer, 0) == Seq.fill(batches)(0))
+      assert(readPartitionKeys(writer, 1) == Seq.fill(batches)(1))
+    } finally {
+      writer.stop(false)
+    }
+  }
+
+  test("batch finalization failure reaches the producer and releases quota") {
+    val failure = new IOException("injected batch finalization failure")
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def finishWritePhase(): Unit = {
+            super.finishWritePhase()
+            throw failure
+          }
+        }
+      }
+    }
+    val writer = createWriter()
+    try {
+      val error = intercept[IOException] {
+        writer.write(createTestRecords(Iterator(0, 1, 0, 1)))
+      }
+      assert(Iterator.iterate[Throwable](error)(_.getCause).takeWhile(_ != null).contains(failure))
+      assert(writer.getBytesInFlight == 0)
+    } finally {
+      writer.stop(false)
+    }
+  }
+
+  for (segmentSize <- Seq("0", "8k", "128k", "1m"); compress <- Seq(false, true)) {
     test(s"partition payload roundtrip with segmentSize=$segmentSize and compression=$compress") {
       conf.set("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize", segmentSize)
       conf.set("spark.shuffle.compress", compress.toString)
@@ -557,7 +637,8 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
       when(blockManager.serializerManager).thenReturn(manager)
       val writer = createWriter()
       // Partition 0 reappears in a second batch, exercising the partial-file merge too.
-      writer.write(createTestRecords(Iterator(0, 1, 7)))
+      val extraBytes = 256 * 1024
+      writer.write(Iterator(0, 1, 7).map(key => (key, createTestBatch(key, extraBytes))))
       writer.stop(true)
       verifyWrite(writer, 3, Set(0, 1))
       val file = new RandomAccessFile(outputFile, "r")
@@ -573,7 +654,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
             expectedKeys.foreach { key =>
               assert(input.readInt() == key)
               assert(input.readInt() == 1)
-              val size = 64 + key % 64
+              val size = 64 + key % 64 + extraBytes
               assert(input.readInt() == size)
               val payload = new Array[Byte](size)
               input.readFully(payload)
@@ -956,7 +1037,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
     val producersBlocked = new CountDownLatch(numWriterThreads)
     val releaseProducers = new CountDownLatch(1)
     val blockedWriters = (0 until numWriterThreads).map(_ => createWriter())
-    val blockedRecords = (0 until numWriterThreads).map(createTestBatch)
+    val blockedRecords = (0 until numWriterThreads).map(value => createTestBatch(value))
     val blockedThreads = blockedWriters.zip(blockedRecords).map { case (writer, batch) =>
       val input = new Iterator[(Int, ColumnarBatch)] {
         private var hasNextCalls = 0
@@ -1408,7 +1489,7 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
   }
 }
 
-/** Run the same ordering, cancellation and failure cases with multiple segments per record. */
+/** Run ordering, cancellation and failure cases with the direct LZ4 output path enabled. */
 class RapidsShuffleSegmentedWriterSuite extends RapidsShuffleThreadedWriterSuite {
-  override protected def outputBufferSegmentSize: String = "32"
+  override protected def outputBufferSegmentSize: String = "128k"
 }

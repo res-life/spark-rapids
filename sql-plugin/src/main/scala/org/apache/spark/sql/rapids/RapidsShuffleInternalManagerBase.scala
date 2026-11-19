@@ -299,6 +299,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
   private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
   private val bufferSegmentSize =
     new RapidsConf(sparkConf).shuffleMultiThreadedWriterBufferSegmentSize
+  private val recordCompression =
+    new ShuffleRecordCompression(sparkConf, blockManager.serializerManager)
   private val limiterWaitTimeMetric =
     handle.metrics.get(METRIC_THREADED_WRITER_LIMITER_WAIT_TIME)
   private val serializationWaitTimeMetric =
@@ -408,7 +410,6 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
         while (keepDraining && !completionFuture.isDone) {
           currentWorkState match {
             case Complete =>
-              completionFuture.complete(null)
               keepDraining = false
             case NotReady =>
               keepDraining = false
@@ -428,7 +429,13 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
           }
         }
 
-        if (currentPartitionToWrite >= numPartitions) {
+        if (currentPartitionToWrite >= numPartitions && !completionFuture.isDone) {
+          // Close this batch's file before publishing completion. Waiting until the producer
+          // exhausts its input leaves one open output file per completed batch.
+          writer match {
+            case rapids: RapidsLocalDiskShuffleMapOutputWriter => rapids.finishWritePhase()
+            case _ =>
+          }
           completionFuture.complete(null)
         }
       } catch {
@@ -834,7 +841,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                 }
 
                 // Serialize + compress + encryption to memory buffer
-                val compressedOutputStream = blockManager.serializerManager.wrapStream(
+                val compressedOutputStream = recordCompression.wrapStream(
                   ShuffleBlockId(shuffleId, mapId, reducePartitionId), buffer)
 
                 val serializationStream = serializerInstance.serializeStream(
@@ -1106,22 +1113,26 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
             if (partitionLength > 0) {
               val handle = partialFile.handle
 
-              // Read partition data sequentially
-              // No reset needed - handle maintains read position automatically
-              val temp = new Array[Byte](fileBufferSize)
-              var remaining = partitionLength
-              while (remaining > 0) {
-                val bytesToRead = math.min(remaining, temp.length).toInt
-                val bytesRead = handle.read(temp, 0, bytesToRead)
-                if (bytesRead > 0) {
-                  os.write(temp, 0, bytesRead)
-                  remaining -= bytesRead
-                } else {
-                  throw new IOException(
-                    s"EOF reading partition $partitionId " +
-                      s"from partial file ${partialFiles.indexOf(partialFile)}, " +
-                      s"expected $partitionLength bytes, got ${partitionLength - remaining}")
+              try {
+                // The handle preserves its logical position when its input stream is closed.
+                val temp = new Array[Byte](fileBufferSize)
+                var remaining = partitionLength
+                while (remaining > 0) {
+                  val bytesToRead = math.min(remaining, temp.length).toInt
+                  val bytesRead = handle.read(temp, 0, bytesToRead)
+                  if (bytesRead > 0) {
+                    os.write(temp, 0, bytesRead)
+                    remaining -= bytesRead
+                  } else {
+                    throw new IOException(
+                      s"EOF reading partition $partitionId " +
+                        s"from partial file ${partialFiles.indexOf(partialFile)}, " +
+                        s"expected $partitionLength bytes, got ${partitionLength - remaining}")
+                  }
                 }
+              } finally {
+                // Only the current partial file needs an input descriptor during merge.
+                handle.closeReadStream()
               }
             }
           }

@@ -89,6 +89,29 @@ class OwnedRecordHandleSuite extends AnyFunSuite with BeforeAndAfterEach {
     }
   }
 
+  test("reserved records read and spill across unused segment tails") {
+    val data = new SegmentedByteArrayOutputStream(16)
+    data.write(Array.tabulate[Byte](10)(_.toByte))
+    withResource(data.acquire(8)) { region =>
+      Array[Byte](40, 41, 42).copyToArray(region.array(), region.offset())
+      region.commit(3)
+    }
+    val expected = Array.tabulate[Byte](10)(_.toByte) ++ Array[Byte](40, 41, 42)
+    withResource(create(Files.createTempFile("owned-reserved", ".bin").toFile)) { handle =>
+      handle.writeRecord(data)
+      handle.finishWrite()
+      assert(handle.getAllocatedCapacity == 32)
+      val read = new Array[Byte](expected.length)
+      assert(handle.readAt(0, read, 0, read.length) == read.length)
+      assert(read.sameElements(expected))
+      handle.spill()
+      assert(handle.getAllocatedCapacity == 0)
+      java.util.Arrays.fill(read, 0.toByte)
+      assert(handle.readAt(0, read, 0, read.length) == read.length)
+      assert(read.sameElements(expected))
+    }
+  }
+
   test("executor budget exhaustion spills without waiting on another unfinished writer") {
     withResource(create(Files.createTempFile("owned-first", ".bin").toFile, budget = 14)) { a =>
       withResource(create(Files.createTempFile("owned-second", ".bin").toFile, budget = 14)) { b =>
