@@ -29,14 +29,23 @@ import org.apache.spark.storage.ShuffleBlockId
 class SegmentedByteArrayOutputStreamSuite extends AnyFunSuite {
   private val segmentKey = "spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize"
 
-  test("segment configuration defaults to 1 MiB and validates byte sizes") {
+  test("segment configuration defaults to 128 KiB and accepts zero or 8 KiB through 32 MiB") {
     assert(new RapidsConf(Map.empty[String, String]).shuffleMultiThreadedWriterBufferSegmentSize ==
-      1024 * 1024)
-    for ((value, expected) <- Seq("0" -> 0, "1m" -> 1048576, "64k" -> 65536)) {
+      128 * 1024)
+    for ((value, expected) <- Seq(
+        "0" -> 0,
+        "8k" -> 8192,
+        "128k" -> 131072,
+        "1m" -> 1048576,
+        "32m" -> 33554432,
+        "8192" -> 8192,
+        "8193" -> 8193,
+        "33554431" -> 33554431,
+        "33554432" -> 33554432)) {
       assert(new RapidsConf(Map(segmentKey -> value)).shuffleMultiThreadedWriterBufferSegmentSize ==
         expected)
     }
-    for (value <- Seq("-1", "2g")) {
+    for (value <- Seq("-1", "-5k", "1", "5k", "8191", "33554433", "33m", "1g", "5x")) {
       intercept[IllegalArgumentException] {
         new RapidsConf(Map(segmentKey -> value)).shuffleMultiThreadedWriterBufferSegmentSize
       }
@@ -76,6 +85,57 @@ class SegmentedByteArrayOutputStreamSuite extends AnyFunSuite {
         assert(actual.toByteArray.sameElements(expected.toByteArray))
       }
     }
+  }
+
+  test("reserved regions preserve logical offsets across unused segment tails") {
+    val out = new SegmentedByteArrayOutputStream(16)
+    val prefix = Array.tabulate[Byte](10)(_.toByte)
+    out.write(prefix)
+    val region = out.acquire(8) // The first segment has six unused bytes.
+    val bytes = region.array()
+    Array[Byte](40, 41, 42).copyToArray(bytes, region.offset())
+    region.commit(3)
+    region.close()
+    intercept[IllegalStateException](region.array())
+    out.write(43)
+    val expected = prefix ++ Array[Byte](40, 41, 42, 43)
+    assert(out.getCount == expected.length && out.getCapacity == 32)
+    val owned = out.takeBuffer()
+    try {
+      val actual = new ByteArrayOutputStream()
+      owned.writeTo(actual)
+      assert(actual.toByteArray.sameElements(expected))
+      for (start <- expected.indices; length <- 0 to expected.length - start) {
+        val read = new Array[Byte](length)
+        owned.read(start, read, 0, length)
+        assert(read.sameElements(expected.slice(start, start + length)))
+      }
+    } finally {
+      owned.close()
+    }
+  }
+
+  test("uncommitted regions cannot be published and abort restores allocation and contents") {
+    val out = new SegmentedByteArrayOutputStream(16)
+    out.write(Array[Byte](1, 2, 3))
+    val region = out.acquire(16)
+    region.array()(region.offset()) = 99
+    intercept[IllegalStateException](out.acquire(1))
+    intercept[IllegalStateException](out.write(4))
+    intercept[IllegalStateException](out.takeBuffer())
+    intercept[IllegalStateException](out.writeTo(new ByteArrayOutputStream()))
+    intercept[IndexOutOfBoundsException](region.commit(17))
+    region.close()
+    region.close()
+    assert(out.getCount == 3 && out.getCapacity == 16)
+    val reused = out.acquire(1)
+    reused.array()(reused.offset()) = 4
+    reused.commit(1)
+    val actual = new ByteArrayOutputStream()
+    out.writeTo(actual)
+    assert(actual.toByteArray.sameElements(Array[Byte](1, 2, 3, 4)))
+    intercept[IllegalArgumentException](out.acquire(17))
+    intercept[IllegalArgumentException](out.acquire(0))
   }
 
   test("invalid writes preserve data and an exact boundary does not allocate an extra segment") {

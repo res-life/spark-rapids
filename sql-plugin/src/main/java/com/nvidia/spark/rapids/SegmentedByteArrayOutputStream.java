@@ -30,9 +30,20 @@ import java.util.Objects;
  */
 public final class SegmentedByteArrayOutputStream extends OutputStream {
   private final int segmentSize;
-  private List<byte[]> segments = new ArrayList<>();
+  private List<Segment> segments = new ArrayList<>();
   private long count;
-  private int position;
+  private WritableRegion pending;
+
+  private static final class Segment {
+    private final byte[] bytes;
+    private final long start;
+    private int length;
+
+    private Segment(int capacity, long start) {
+      this.bytes = new byte[capacity];
+      this.start = start;
+    }
+  }
 
   public SegmentedByteArrayOutputStream(int segmentSize) {
     if (segmentSize <= 0 || segmentSize > Integer.MAX_VALUE - 8) {
@@ -47,33 +58,95 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     }
   }
 
-  private byte[] writableSegment() {
+  private void requireWritable() {
     requireOwned();
-    if (segments.isEmpty() || position == segmentSize) {
-      segments.add(new byte[segmentSize]);
-      position = 0;
+    if (pending != null) {
+      throw new IllegalStateException("A writable region is still outstanding");
+    }
+  }
+
+  private Segment writableSegment(int minimumCapacity) {
+    requireWritable();
+    if (segments.isEmpty() ||
+        segmentSize - segments.get(segments.size() - 1).length < minimumCapacity) {
+      segments.add(new Segment(segmentSize, count));
     }
     return segments.get(segments.size() - 1);
   }
 
+  public int getSegmentSize() { return segmentSize; }
+
+  /**
+   * Lease contiguous space in the final record. Only one region may be outstanding. The caller
+   * may modify only [offset, offset + capacity), and must stop using the array on commit/close.
+   * A region never exceeds segmentSize; callers needing larger blocks must use their fallback.
+   */
+  public WritableRegion acquire(int minimumCapacity) {
+    if (minimumCapacity <= 0 || minimumCapacity > segmentSize) {
+      throw new IllegalArgumentException("Requested region must fit in one segment");
+    }
+    WritableRegion region = new WritableRegion(writableSegment(minimumCapacity));
+    pending = region;
+    return region;
+  }
+
+  public final class WritableRegion implements AutoCloseable {
+    private final Segment segment;
+    private boolean done;
+
+    private WritableRegion(Segment segment) { this.segment = segment; }
+
+    private void requireActive() {
+      if (done || pending != this) {
+        throw new IllegalStateException("Writable region is no longer active");
+      }
+    }
+
+    public byte[] array() { requireActive(); return segment.bytes; }
+    public int offset() { requireActive(); return segment.length; }
+    public int capacity() { requireActive(); return segmentSize - segment.length; }
+
+    public void commit(int length) {
+      requireActive();
+      if (length < 0 || length > capacity()) {
+        throw new IndexOutOfBoundsException();
+      }
+      segment.length += length;
+      count += length;
+      close();
+    }
+
+    /** Abandon unpublished bytes, including an otherwise empty newly allocated segment. */
+    @Override
+    public void close() {
+      if (!done) {
+        requireActive();
+        if (segment.length == 0) segments.remove(segments.size() - 1);
+        pending = null;
+        done = true;
+      }
+    }
+  }
+
   @Override
   public void write(int value) {
-    writableSegment()[position++] = (byte) value;
+    Segment segment = writableSegment(1);
+    segment.bytes[segment.length++] = (byte) value;
     count++;
   }
 
   @Override
   public void write(byte[] bytes, int offset, int length) {
-    requireOwned();
+    requireWritable();
     Objects.requireNonNull(bytes, "bytes");
     if (offset < 0 || length < 0 || offset > bytes.length - length) {
       throw new IndexOutOfBoundsException();
     }
     while (length > 0) {
-      byte[] segment = writableSegment();
-      int amount = Math.min(length, segmentSize - position);
-      System.arraycopy(bytes, offset, segment, position, amount);
-      position += amount;
+      Segment segment = writableSegment(1);
+      int amount = Math.min(length, segmentSize - segment.length);
+      System.arraycopy(bytes, offset, segment.bytes, segment.length, amount);
+      segment.length += amount;
       count += amount;
       offset += amount;
       length -= amount;
@@ -84,7 +157,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     return count;
   }
 
-  /** Actual backing-array capacity, including unused space in the last segment. */
+  /** Actual backing-array capacity, including unused tails left by contiguous reservations. */
   public long getCapacity() {
     requireOwned();
     return (long) segments.size() * segmentSize;
@@ -92,16 +165,13 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
 
   /** Write only valid bytes. Does not flush or close the destination or consume this stream. */
   public void writeTo(OutputStream out) throws IOException {
-    requireOwned();
+    requireWritable();
     Objects.requireNonNull(out, "out");
     if (out == this) {
       throw new IllegalArgumentException("Cannot write a stream to itself");
     }
-    long remaining = count;
-    for (byte[] segment : segments) {
-      int length = (int) Math.min(remaining, segmentSize);
-      out.write(segment, 0, length);
-      remaining -= length;
+    for (Segment segment : segments) {
+      out.write(segment.bytes, 0, segment.length);
     }
   }
 
@@ -112,7 +182,7 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
 
   /** Transfers the arrays exactly once. The producer can no longer write or read them. */
   public OwnedBuffer takeBuffer() {
-    requireOwned();
+    requireWritable();
     OwnedBuffer result = new OwnedBuffer(segments, segmentSize, count);
     segments = null;
     return result;
@@ -120,14 +190,12 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
 
   /** Immutable payload with exclusive ownership; close promptly drops all array references. */
   public static final class OwnedBuffer implements AutoCloseable {
-    private List<byte[]> segments;
-    private final int segmentSize;
+    private List<Segment> segments;
     private final long count;
     private final long capacity;
 
-    private OwnedBuffer(List<byte[]> segments, int segmentSize, long count) {
+    private OwnedBuffer(List<Segment> segments, int segmentSize, long count) {
       this.segments = segments;
-      this.segmentSize = segmentSize;
       this.count = count;
       this.capacity = (long) segments.size() * segmentSize;
     }
@@ -148,11 +216,19 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
           offset < 0 || offset > count - length) {
         throw new IndexOutOfBoundsException();
       }
+      if (length == 0) return;
+      int low = 0;
+      int high = segments.size() - 1;
+      while (low < high) {
+        int mid = low + (high - low + 1) / 2;
+        if (segments.get(mid).start <= offset) low = mid; else high = mid - 1;
+      }
+      int index = low;
       while (length > 0) {
-        int inSegment = (int) (offset % segmentSize);
-        int size = Math.min(length, segmentSize - inSegment);
-        System.arraycopy(segments.get((int) (offset / segmentSize)), inSegment,
-            target, start, size);
+        Segment segment = segments.get(index++);
+        int inSegment = (int) (offset - segment.start);
+        int size = Math.min(length, segment.length - inSegment);
+        System.arraycopy(segment.bytes, inSegment, target, start, size);
         offset += size;
         start += size;
         length -= size;
@@ -162,11 +238,8 @@ public final class SegmentedByteArrayOutputStream extends OutputStream {
     public void writeTo(OutputStream out) throws IOException {
       requireOpen();
       Objects.requireNonNull(out, "out");
-      long remaining = count;
-      for (byte[] segment : segments) {
-        int length = (int) Math.min(remaining, segmentSize);
-        out.write(segment, 0, length);
-        remaining -= length;
+      for (Segment segment : segments) {
+        out.write(segment.bytes, 0, segment.length);
       }
     }
 

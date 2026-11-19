@@ -299,6 +299,8 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
   private val limiter = new BytesInFlightLimiter(maxBytesInFlight)
   private val bufferSegmentSize =
     new RapidsConf(sparkConf).shuffleMultiThreadedWriterBufferSegmentSize
+  private val recordCompression =
+    new ShuffleRecordCompression(sparkConf, blockManager.serializerManager)
   private val limiterWaitTimeMetric =
     handle.metrics.get(METRIC_THREADED_WRITER_LIMITER_WAIT_TIME)
   private val serializationWaitTimeMetric =
@@ -834,7 +836,7 @@ abstract class RapidsShuffleThreadedWriterBase[K, V](
                 }
 
                 // Serialize + compress + encryption to memory buffer
-                val compressedOutputStream = blockManager.serializerManager.wrapStream(
+                val compressedOutputStream = recordCompression.wrapStream(
                   ShuffleBlockId(shuffleId, mapId, reducePartitionId), buffer)
 
                 val serializationStream = serializerInstance.serializeStream(
