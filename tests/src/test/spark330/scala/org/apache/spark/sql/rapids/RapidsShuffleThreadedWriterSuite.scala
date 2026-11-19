@@ -23,6 +23,7 @@ package org.apache.spark.sql.rapids
 
 import java.io._
 import java.nio.ByteBuffer
+import java.nio.file.{Files, NoSuchFileException, Paths}
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.{CancellationException, CountDownLatch, Future, FutureTask, TimeUnit}
@@ -36,6 +37,7 @@ import scala.util.control.NonFatal
 import ai.rapids.cudf.HostMemoryBuffer
 import com.nvidia.spark.rapids.{MapOutputSegments, MultithreadedShuffleBufferCatalog, RapidsConf,
   SlicedSerializedColumnVector}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.spill.{SpillablePartialFileHandle, SpillFramework}
 import org.mockito.{Mock, MockitoAnnotations}
 import org.mockito.Answers.RETURNS_SMART_NULLS
@@ -548,6 +550,84 @@ class RapidsShuffleThreadedWriterSuite extends AnyFunSuite
   }
 
   // ==================== Skip-merge catalog ====================
+
+  test("many file-backed batches keep output and merge input descriptors bounded") {
+    val descriptors = Paths.get("/proc/self/fd")
+    assume(Files.isDirectory(descriptors), "file descriptor inspection requires procfs")
+    conf.set("spark.rapids.shuffle.multiThreaded.writer.buffer.segmentSize", "128k")
+    useUncompressedShuffleOutput()
+    val maxOpenFiles = new AtomicInteger()
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def getPartitionWriter(reducePartitionId: Int): ShufflePartitionWriter = {
+            val openFiles = withResource(Files.list(descriptors)) { entries =>
+              import scala.collection.JavaConverters._
+              entries.iterator().asScala.count { path =>
+                try {
+                  Files.readSymbolicLink(path).startsWith(tempDir.toPath)
+                } catch {
+                  case _: NoSuchFileException => false // Another merger closed its file.
+                }
+              }
+            }
+            maxOpenFiles.accumulateAndGet(openFiles, (a: Int, b: Int) => math.max(a, b))
+            // Allow descriptor turnover during this non-atomic procfs scan. The bound is
+            // independent of batch count and also checked after all partition-0 merge reads.
+            assert(openFiles <= 2 * numWriterThreads + 2,
+              s"Completed batches retained $openFiles open files")
+            super.getPartitionWriter(reducePartitionId)
+          }
+        }
+      }
+    }
+    val batches = 32
+    val writer = createWriter()
+    try {
+      writer.write(createTestRecords(Iterator.fill(batches)(Seq(0, 1)).flatten))
+      writer.stop(true)
+      verifyWrite(writer, batches * 2, Set(0, 1))
+      assert(maxOpenFiles.get() > 0, "the test must exercise file-backed storage")
+      assert(readPartitionKeys(writer, 0) == Seq.fill(batches)(0))
+      assert(readPartitionKeys(writer, 1) == Seq.fill(batches)(1))
+    } finally {
+      writer.stop(false)
+    }
+  }
+
+  test("batch finalization failure reaches the producer and releases quota") {
+    val failure = new IOException("injected batch finalization failure")
+    shuffleExecutorComponents = new RapidsLocalDiskShuffleExecutorComponents(
+      conf, blockManager, blockResolver) {
+      override def createMapOutputWriter(
+          shuffleId: Int,
+          mapTaskId: Long,
+          numPartitions: Int): ShuffleMapOutputWriter = {
+        new RapidsLocalDiskShuffleMapOutputWriter(
+          shuffleId, mapTaskId, numPartitions, blockResolver, conf) {
+          override def finishWritePhase(): Unit = {
+            super.finishWritePhase()
+            throw failure
+          }
+        }
+      }
+    }
+    val writer = createWriter()
+    try {
+      val error = intercept[IOException] {
+        writer.write(createTestRecords(Iterator(0, 1, 0, 1)))
+      }
+      assert(Iterator.iterate[Throwable](error)(_.getCause).takeWhile(_ != null).contains(failure))
+      assert(writer.getBytesInFlight == 0)
+    } finally {
+      writer.stop(false)
+    }
+  }
 
   for (segmentSize <- Seq("0", "8k", "128k", "1m"); compress <- Seq(false, true)) {
     test(s"partition payload roundtrip with segmentSize=$segmentSize and compression=$compress") {

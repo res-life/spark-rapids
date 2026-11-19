@@ -57,6 +57,34 @@ class SpillablePartialFileHandleSuite
     spillInProgressField.setBoolean(handle, value)
   }
 
+  test("sequential reader releases its descriptor and resumes past buffered read-ahead") {
+    val expected = Array.tabulate[Byte](150003)(i => (i * 17).toByte)
+    withFinishedFileOnlyHandle(expected) { (handle, _) =>
+      val prefix = new Array[Byte](31)
+      assert(handle.read(prefix, 0, prefix.length) == prefix.length)
+      assert(prefix.sameElements(expected.take(prefix.length)))
+      val field = classOf[SpillablePartialFileHandle].getDeclaredField("fileInputStream")
+      field.setAccessible(true)
+      val raw = field.get(handle).asInstanceOf[Option[java.io.FileInputStream]].get
+      handle.closeReadStream()
+      assert(!raw.getChannel.isOpen)
+      handle.closeReadStream()
+      // Random-access reads use a separate position and channel.
+      assert(handle.readAt(0, prefix, 0, prefix.length) == prefix.length)
+      assert(prefix.sameElements(expected.take(prefix.length)))
+      var position = prefix.length
+      val chunk = new Array[Byte](70001)
+      while (position < expected.length) {
+        val count = handle.read(chunk, 0, chunk.length)
+        assert(count > 0)
+        assert(chunk.take(count).sameElements(expected.slice(position, position + count)))
+        position += count
+        handle.closeReadStream()
+      }
+      assert(handle.read(chunk, 0, chunk.length) == -1)
+    }
+  }
+
   private def waitUntil(condition: => Boolean, clue: String): Unit = {
     val deadline = System.currentTimeMillis() + 5000
     while (!condition && System.currentTimeMillis() < deadline) {
