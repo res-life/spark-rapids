@@ -114,6 +114,18 @@ public class ShimUtils {
         return IMPL.rowGroupFilter(reader, requiredSchema, fileSchema, filter, caseSensitive, dictFilterTime);
     }
 
+    public static boolean hasWriteDefault(Types.NestedField field) {
+        return IMPL.hasWriteDefault(field);
+    }
+
+    /** Resolve defaults by field ID because Iceberg's write schema may omit them. */
+    public static IcebergWriteDefaultAccessor writeDefaultAccessor(Schema tableSchema) {
+        return (field, sparkField) -> {
+            Types.NestedField original = tableSchema.findField(field.fieldId());
+            return IMPL.withWriteDefault(original != null ? original : field, sparkField);
+        };
+    }
+
     public static int rowIdFieldId() {
         return ROW_ID_FIELD_ID;
     }

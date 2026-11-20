@@ -15,8 +15,8 @@ from typing import Callable, Any
 
 import pytest
 
-from asserts import assert_equal_with_local_sort, assert_gpu_fallback_collect, \
-    assert_gpu_fallback_write_sql
+from asserts import assert_equal_with_local_sort, assert_spark_exception, \
+    assert_gpu_fallback_collect, assert_gpu_fallback_write_sql
 from conftest import is_iceberg_remote_catalog
 from data_gen import DEFAULT_DATA_GEN_LENGTH, gen_df, copy_and_update
 from iceberg import (
@@ -26,7 +26,9 @@ from iceberg import (
     full_coverage_partition_transforms, assert_iceberg_files_use_codec, supports_iceberg_v3,
     ICEBERG_V3_UNSUPPORTED_REASON, supports_iceberg_row_lineage_inheritance,
     ICEBERG_ROW_LINEAGE_INHERITANCE_UNSUPPORTED_REASON, iceberg_table_properties_sql,
-    row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table)
+    row_lineage_df, iceberg_variant_read_conf, setup_iceberg_variant_table,
+    setup_iceberg_write_default_tables, assert_iceberg_write_defaults,
+    assert_iceberg_write_only_default_fallback)
 from marks import iceberg, ignore_order, allow_non_gpu, datagen_overrides, iceberg_fast_test, incompat
 from spark_session import with_gpu_session, with_cpu_session, is_spark_411_or_later
 
@@ -147,6 +149,39 @@ def test_insert_into_v3_table_fallback(spark_tmp_table_factory):
         base_table_name,
         ["AppendDataExec"],
         conf=copy_and_update(iceberg_write_enabled_conf, {"spark.rapids.sql.format.iceberg.v3.enabled": "false"}))
+
+
+@iceberg
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@allow_non_gpu("LocalTableScanExec")
+def test_iceberg_v3_write_default_gpu_write_cpu_read(spark_tmp_table_factory):
+    cpu_table, gpu_table, catalog_has_default = setup_iceberg_write_default_tables(
+        spark_tmp_table_factory)
+    conf = copy_and_update(iceberg_write_enabled_conf, {"spark.sql.adaptive.enabled": "false"})
+
+    def write(spark, table):
+        omitted = f"INSERT INTO {table} (id, p) VALUES (3, 0), (4, 1)"
+        if catalog_has_default:
+            spark.sql(omitted)
+        else:
+            assert_spark_exception(
+                lambda: spark.sql(omitted), "INCOMPATIBLE_DATA_FOR_TABLE.CANNOT_FIND_DATA")
+        spark.sql(f"INSERT INTO {table} VALUES (5, 0, NULL), (6, 1, 'explicit')")
+
+    expected = [(1, 0, "legacy"), (2, 1, "legacy")]
+    if catalog_has_default:
+        expected.extend([(3, 0, "current"), (4, 1, "current")])
+    expected.extend([(5, 0, None), (6, 1, "explicit")])
+    assert_iceberg_write_defaults(cpu_table, gpu_table, write, expected, conf)
+
+
+@iceberg
+@ignore_order(local=True)
+@pytest.mark.skipif(not supports_iceberg_v3, reason=ICEBERG_V3_UNSUPPORTED_REASON)
+@allow_non_gpu("AppendDataExec")
+def test_iceberg_append_write_only_default_fallback(spark_tmp_table_factory):
+    assert_iceberg_write_only_default_fallback(
+        spark_tmp_table_factory, "INSERT INTO {table} VALUES (2L, CAST(NULL AS BINARY))", "AppendDataExec")
 
 
 @iceberg

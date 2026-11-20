@@ -16,10 +16,13 @@
 
 /*** spark-rapids-shim-json-lines
 {"spark":["350"],"carryForward":"all"}
+{"spark":["400","411"],"carryForward":"sameMinor"}
 spark-rapids-shim-json-lines ***/
 package org.apache.iceberg.spark
 
 import com.nvidia.spark.rapids.SchemaUtils._
+import com.nvidia.spark.rapids.iceberg.IcebergDefaultTestUtils.fieldWithWriteDefault
+import com.nvidia.spark.rapids.iceberg.ShimUtils
 import org.apache.iceberg.Schema
 import org.apache.iceberg.types.Types
 import org.scalatest.funsuite.AnyFunSuite
@@ -39,6 +42,17 @@ class GpuTypeToSparkTypeSuite extends AnyFunSuite {
     assert(md.getLong(FIELD_ID_METADATA_KEY) == 1L)
     assert(!md.contains(LIST_ELEMENT_FIELD_ID_METADATA_KEY))
     assert(!md.contains(LIST_ELEMENT_NESTED_IDS_METADATA_KEY))
+  }
+
+  test("toSparkType preserves an Iceberg write default alongside field-id metadata") {
+    val field = fieldWithWriteDefault(1, "value", Types.IntegerType.get(), Int.box(9))
+    val schema = new Schema(field)
+
+    val sparkField = GpuTypeToSparkType
+      .toSparkType(schema, ShimUtils.writeDefaultAccessor(schema))(field.name())
+    assert(sparkField.metadata.getLong(FIELD_ID_METADATA_KEY) == 1L)
+    assert(sparkField.getCurrentDefaultValue().contains("9"))
+    assert(GpuTypeToSparkType.toSparkType(schema)(field.name()).getCurrentDefaultValue().isEmpty)
   }
 
   test("toSparkType: flat list records only the element id") {
