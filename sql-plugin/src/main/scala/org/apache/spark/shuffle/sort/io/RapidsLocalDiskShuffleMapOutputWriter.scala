@@ -21,7 +21,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.WritableByteChannel
 import java.util.Optional
 
-import com.nvidia.spark.rapids.{HostAlloc, RapidsConf}
+import com.nvidia.spark.rapids.{HostAlloc, RapidsConf, SegmentedByteArrayOutputStream}
 import com.nvidia.spark.rapids.spill.SpillablePartialFileHandle
 
 import org.apache.spark.SparkConf
@@ -64,6 +64,7 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   private var partialFileHandle: Option[SpillablePartialFileHandle] = None
   private var storageInitAttempted: Boolean = false
   private var forceFileOnly: Boolean = false
+  private var retainRecords: Boolean = false
 
   // Track completed partition count for predictive buffer sizing
   private var completedPartitionCount: Int = 0
@@ -127,6 +128,18 @@ class RapidsLocalDiskShuffleMapOutputWriter(
     forceFileOnly = true
   }
 
+  /** Select storage before the threaded writer publishes any records. */
+  def setRecordBufferMode(retainInMemory: Boolean): Unit = {
+    if (storageInitAttempted) {
+      throw new IllegalStateException("Cannot change record storage after initialization")
+    }
+    retainRecords = retainInMemory
+    // Without a memory catalog, commit requires a file. Consume record arrays directly into
+    // that file instead of retaining them on the JVM heap until the whole batch completes.
+    // Keep the legacy commit path for synchronous writes, which forces the spill channel.
+    if (!retainInMemory && !syncWrites) forceFileOnly = true
+  }
+
   // Try to initialize storage on first partition write
   private def ensureStorageInitialized(): Unit = {
     if (!storageInitAttempted) {
@@ -150,7 +163,8 @@ class RapidsLocalDiskShuffleMapOutputWriter(
             spillFile = outputTempFile,
             priority = Long.MinValue,
             syncWrites = syncWrites,
-            capacityHintProvider = Some(capacityHintProvider))
+            capacityHintProvider = Some(capacityHintProvider),
+            retainRecords = retainRecords)
           partialFileHandle = Some(handle)
           logDebug(s"Using memory-with-spill mode for shuffle $shuffleId map $mapId " +
             s"with predictive sizing (initial=${initialBufferSize / 1024 / 1024}MB, " +
@@ -274,11 +288,19 @@ class RapidsLocalDiskShuffleMapOutputWriter(
   }
 
   // Unified stream writer using SpillablePartialFileHandle
-  private class PartitionWriterStream(partitionId: Int) extends OutputStream {
+  private class PartitionWriterStream(partitionId: Int)
+      extends OutputStream with SegmentedByteArrayOutputStream.Sink {
     private var count = 0L
     private var isClosed = false
 
     def getCount(): Long = count
+
+    override def writeRecord(record: SegmentedByteArrayOutputStream): Unit = {
+      verifyNotClosed()
+      val length = record.getCount
+      partialFileHandle.get.writeRecord(record)
+      count += length
+    }
 
     override def write(b: Int): Unit = {
       verifyNotClosed()

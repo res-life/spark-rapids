@@ -177,6 +177,9 @@ trait StoreHandle extends AutoCloseable {
 }
 
 trait SpillableHandle extends StoreHandle with Logging {
+  // Usually immutable. Growable partial files update this only while untracked and protected
+  // from spilling, so the host store can account for actual retained capacity.
+  private[spill] def spillSizeInBytes: Long = approxSizeInBytes
   /**
    * used to gate when a spill is actively being done so that a second thread won't
    * also begin spilling, and a handle won't release the underlying buffer if it's
@@ -224,7 +227,7 @@ trait SpillableHandle extends StoreHandle with Logging {
    *       construction, and is immutable.
    * @return true if currently spillable, false otherwise
    */
-  private[spill] def spillable: Boolean = approxSizeInBytes > 0
+  private[spill] def spillable: Boolean = spillSizeInBytes > 0
 
   /**
    * Performs the actual closing of underlying buffers held by this handle, whereas
@@ -1828,7 +1831,7 @@ trait SpillableStore[T <: SpillableHandle]
     while (allHandles.hasNext && amountToSpill < spillNeeded) {
       val handle = allHandles.next()
       if (handle.spillable) {
-        amountToSpill += handle.approxSizeInBytes
+        amountToSpill += handle.spillSizeInBytes
         plan.add(handle)
       }
     }
@@ -1884,10 +1887,10 @@ trait SpillableStore[T <: SpillableHandle]
     var totalHandleBytes = 0L
     // Iterate outside the store lock to avoid deadlock
     handlesCopy.forEach(handle => {
-      totalHandleBytes += handle.approxSizeInBytes
+      totalHandleBytes += handle.spillSizeInBytes
       if (handle.spillable) {
         spillableHandleCount += 1
-        spillableHandleBytes += handle.approxSizeInBytes
+        spillableHandleBytes += handle.spillSizeInBytes
       }
     })
     s"SpillableStore: ${this.getClass.getSimpleName}, " +
@@ -1905,24 +1908,24 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
   private[spill] var totalSize: Long = 0L
 
   private def tryTrack(handle: HostSpillableHandle[_]): Boolean = {
-    if (maxSize.isEmpty || handle.approxSizeInBytes == 0) {
+    if (maxSize.isEmpty || handle.spillSizeInBytes == 0) {
       super.doTrack(handle)
       // for now, keep this totalSize part, we technically
       // do not need to track `totalSize` if we don't have a limit
       synchronized {
-        totalSize += handle.approxSizeInBytes
+        totalSize += handle.spillSizeInBytes
       }
       true
     } else {
       synchronized {
         val storeMaxSize = maxSize.get
-        if (totalSize > 0 && totalSize + handle.approxSizeInBytes > storeMaxSize) {
+        if (totalSize > 0 && totalSize + handle.spillSizeInBytes > storeMaxSize) {
           // we want to try to make room for this buffer
           false
         } else {
           // it fits
           if (super.doTrack(handle)) {
-            totalSize += handle.approxSizeInBytes
+            totalSize += handle.spillSizeInBytes
           }
           true
         }
@@ -1945,7 +1948,7 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
       // we are going to try to track again, in a loop,
       // since we want to release
       var canFit = true
-      val handleSize = handle.approxSizeInBytes
+      val handleSize = handle.spillSizeInBytes
       var amountSpilled = 0L
       val hadHandlesToSpill = !isEmpty
       while (canFit && !tracked && numRetries < 5) {
@@ -1993,7 +1996,7 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
   def trackNoSpill(handle: HostSpillableHandle[_]): Unit = {
     synchronized {
       if (doTrack(handle)) {
-        totalSize += handle.approxSizeInBytes
+        totalSize += handle.spillSizeInBytes
       }
     }
   }
@@ -2001,7 +2004,7 @@ class SpillableHostStore(val maxSize: Option[Long] = None)
   override def remove(handle: HostSpillableHandle[_]): Unit = {
     synchronized {
       if (doRemove(handle)) {
-        totalSize -= handle.approxSizeInBytes
+        totalSize -= handle.spillSizeInBytes
       }
     }
   }
